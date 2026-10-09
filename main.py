@@ -1,8 +1,18 @@
 from getpass import getpass
 from multiprocessing.dummy import connection
 import discovery
+from discovery.components import (
+    ComponentDiscovery,
+    display_component_report,
+)
+from planning.decisions import (
+    ConfigurationPlanner,
+    display_configuration_plan,
+)
+from discovery.ports import PortDiscovery, display_port_report
 from discovery.system import SystemDiscovery, display_discovery_report
 from connection.ssh import SSHConnection
+from discovery.panel import PanelDiscovery, display_panel_report
 
 
 def get_server_details():
@@ -48,6 +58,40 @@ def get_server_details():
 
     return hostname, port, username, password
 
+def select_components(available):
+    """Collect and validate requested components for planning."""
+
+    names = list(available)
+
+    print("\n=== SELECT COMPONENTS ===")
+
+    for index, name in enumerate(names, start=1):
+        print(f"{index:>2}. {name}")
+
+    while True:
+        selection = input(
+            "\nEnter component numbers separated by commas "
+            "[Enter to skip]: "
+        ).strip()
+
+        if not selection:
+            return []
+
+        try:
+            numbers = [
+                int(value.strip())
+                for value in selection.split(",")
+            ]
+
+            if not all(1 <= number <= len(names) for number in numbers):
+                raise ValueError
+
+            return list(dict.fromkeys(
+                names[number - 1] for number in numbers
+            ))
+
+        except ValueError:
+            print("Invalid selection. Enter valid component numbers.")
 
 def main():
     """Run the server connection workflow."""
@@ -82,13 +126,41 @@ def main():
 
         supported = display_discovery_report(server_info)
 
+        print("\nChecking existing control panel...")
+        panel_discovery = PanelDiscovery(connection)
+        panel_info = panel_discovery.discover()
+        display_panel_report(panel_info)
+        print("\nDiscovering existing software...")
+        component_discovery = ComponentDiscovery(connection)
+        components = component_discovery.discover()
+        display_component_report(components)
+
+        print("\nDiscovering listening ports...")
+        port_discovery = PortDiscovery(connection)
+        ports = port_discovery.discover()
+        display_port_report(ports)
+        requested = select_components(components)
+
+        if requested:
+            planner = ConfigurationPlanner(
+            supported=supported,
+            panel=panel_info,
+            components=components,
+            ports=ports,
+            )
+
+            plan = planner.evaluate(requested)
+            display_configuration_plan(plan)
+        else:
+            print("\nNo components selected. Discovery completed.")
+
         if not supported:
             print(
                 "\nThis operating system is not supported for automated "
                 "server configuration."
             )
             print("Discovery completed. No server changes were made.")
-        return
+            return
     except RuntimeError as error:
         print(f"Server discovery failed: {error}")
 
