@@ -47,40 +47,6 @@ def get_server_details():
 
     return hostname, port, username, password
 
-def verify_sudo(self):
-    """
-    Verify that the connected account can authenticate with sudo and
-    execute privileged commands.
-
-    Returns:
-        bool: True when sudo access is successfully verified.
-    """
-
-    if self.client is None:
-        raise ConnectionError("SSH connection has not been established.")
-
-    stdin, stdout, stderr = self.client.exec_command(
-        "sudo -S -p '' id -u"
-    )
-
-    stdin.write(self.password + "\n")
-    stdin.flush()
-
-    exit_code = stdout.channel.recv_exit_status()
-    output = stdout.read().decode().strip()
-    error = stderr.read().decode().strip()
-
-    if exit_code != 0:
-        raise PermissionError(
-            error or "Sudo authentication or authorization failed."
-        )
-
-    if output != "0":
-        raise PermissionError(
-            "Sudo command did not execute with root privileges."
-        )
-
-    return True
 
 def main():
     """Run the server connection workflow."""
