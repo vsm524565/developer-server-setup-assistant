@@ -1,3 +1,6 @@
+from zipfile import Path
+from pathlib import Path
+
 import paramiko
 
 
@@ -26,7 +29,11 @@ class SSHConnection:
 
         # Accept unknown host keys for the initial version of the tool.
         # Host-key verification will be strengthened before production release.
-        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        self.client.load_system_host_keys()
+        self.client.load_host_keys(
+            str(Path.home() / ".ssh" / "known_hosts")
+        )
+        self.client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
         try:
             self.client.connect(
@@ -43,6 +50,11 @@ class SSHConnection:
 
         except paramiko.AuthenticationException:
             raise ConnectionError("SSH authentication failed.")
+        except paramiko.BadHostKeyException:
+            raise ConnectionError(
+            "SSH host-key verification failed. "
+            "The server identity does not match the trusted key."
+            )
 
         except paramiko.SSHException as error:
             raise ConnectionError(f"SSH connection failed: {error}")

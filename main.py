@@ -1,6 +1,7 @@
 from getpass import getpass
 from multiprocessing.dummy import connection
-
+import discovery
+from discovery.system import SystemDiscovery, display_discovery_report
 from connection.ssh import SSHConnection
 
 
@@ -74,6 +75,22 @@ def main():
         connection.verify_sudo()
         
         print("Sudo access verified.")
+        print("\nDiscovering server environment...")
+
+        discovery = SystemDiscovery(connection)
+        server_info = discovery.discover()
+
+        supported = display_discovery_report(server_info)
+
+        if not supported:
+            print(
+                "\nThis operating system is not supported for automated "
+                "server configuration."
+            )
+            print("Discovery completed. No server changes were made.")
+        return
+    except RuntimeError as error:
+        print(f"Server discovery failed: {error}")
 
     except PermissionError as error:
         print(f"Sudo verification failed: {error}")
