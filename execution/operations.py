@@ -30,4 +30,14 @@ OPERATIONS = {
         "sudo": False,
         "timeout": 2,
     },
+    "test_large_output": {
+    "command": "head -c 200000 /dev/zero | tr '\\000' 'A'",
+    "sudo": False,
+    "timeout": 10,
+    },
+    "test_nonzero_exit": {
+    "command": "sh -c 'exit 7'",
+    "sudo": False,
+    "timeout": 10,
+    },
 }
