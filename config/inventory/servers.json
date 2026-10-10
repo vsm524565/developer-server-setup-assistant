@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "servers": [
+    {
+      "target_id": "lab-ubuntu-01",
+      "platform": "linux",
+      "host": "192.168.56.109",
+      "ssh_port": 22,
+      "ssh_user": "vivek",
+      "enabled": true
+    }
+  ]
+}
