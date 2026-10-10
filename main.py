@@ -9,6 +9,11 @@ from planning.decisions import (
     ConfigurationPlanner,
     display_configuration_plan,
 )
+from planning.dependencies import DependencyResolver
+from planning.installation import (
+    InstallationPlanner,
+    display_installation_plan,
+)
 from discovery.ports import PortDiscovery, display_port_report
 from discovery.system import SystemDiscovery, display_discovery_report
 from connection.ssh import SSHConnection
@@ -142,15 +147,33 @@ def main():
         requested = select_components(components)
 
         if requested:
+            resolver = DependencyResolver(components)
+            ordered_components = resolver.resolve(requested)
+
+            print("\nResolved component order:")
+            print(" -> ".join(ordered_components))
+
             planner = ConfigurationPlanner(
-            supported=supported,
-            panel=panel_info,
-            components=components,
-            ports=ports,
+                supported=supported,
+                panel=panel_info,
+                components=components,
+                ports=ports,
             )
 
-            plan = planner.evaluate(requested)
-            display_configuration_plan(plan)
+            decisions = planner.evaluate(ordered_components)
+            display_configuration_plan(decisions)
+
+            installation_planner = InstallationPlanner(
+                components=components,
+                decisions=decisions,
+            )
+
+            installation_plan = installation_planner.build(
+                ordered_components
+            )
+
+            display_installation_plan(installation_plan)
+
         else:
             print("\nNo components selected. Discovery completed.")
 
