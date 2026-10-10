@@ -2,6 +2,8 @@ from zipfile import Path
 from pathlib import Path
 
 import paramiko
+import base64
+import hashlib
 
 
 class SSHConnection:
@@ -82,6 +84,40 @@ class SSHConnection:
             stdout.read().decode().strip(),
             stderr.read().decode().strip(),
         )
+
+    def get_host_key_fingerprint(self):
+        """
+        Return the SHA-256 fingerprint of the authenticated SSH host key.
+
+        Uses the established Paramiko transport.
+        Does not initiate another connection or execute commands.
+        """
+
+        if self.client is None:
+            raise ConnectionError(
+                "SSH connection has not been established."
+            )
+
+        transport = self.client.get_transport()
+
+        if transport is None or not transport.is_active():
+            raise ConnectionError(
+                "SSH transport is not active."
+            )
+
+        server_key = transport.get_remote_server_key()
+
+        if server_key is None:
+            raise ConnectionError(
+                "Authenticated SSH host key is unavailable."
+            )
+
+        digest = hashlib.sha256(server_key.asbytes()).digest()
+
+        encoded = base64.b64encode(digest).decode("ascii").rstrip("=")
+
+        return f"SHA256:{encoded}"
+
 
     def close(self):
         """Close the active SSH connection."""

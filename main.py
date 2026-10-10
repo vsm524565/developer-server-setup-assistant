@@ -52,6 +52,8 @@ from planning.state_consistency import (
     ServerStateComparator,
     display_consistency_report,
 )
+from planning.approval_binding import ApprovalBinding
+from planning.approval_session import ApprovalSession
 
 from verification.components import (
     ComponentVerifier,
@@ -368,13 +370,68 @@ def main():
 
                 display_consistency_report(consistency_result)
 
+
                 if consistency_result["consistent"]:
-                    review_installation_plan(installation_plan)
+                    target = {
+                        "hostname": hostname,
+                    "port": port,
+                    "username": username,
+                    }
+
+                    host_key = connection.get_host_key_fingerprint()
+
+                    binding_fingerprint = ApprovalBinding.create(
+                        target=target,
+                        host_key_sha256=host_key,
+                        snapshot=current_snapshot,
+                        plan=installation_plan,
+                    )
+
+                    print("\n=== PLAN-BOUND APPROVAL CONTEXT ===")
+                    print(f"Target           : {hostname}:{port}")
+                    print(f"SSH User         : {username}")
+                    print(f"SSH Host Key     : {host_key}")
+                    print(f"Plan Fingerprint : {binding_fingerprint}")
+                    print("Execution        : DISABLED")
+
+                    approval_session = ApprovalSession()
+
+                    approved = review_installation_plan(
+                        installation_plan
+                    )
+
+                    if approved:
+                        approval_session.approve(binding_fingerprint)
+
+                        # Validate the recorded approval against its context.
+                        # This is not execution authorization.
+                        binding_valid = approval_session.is_valid(
+                            target,
+                            connection.get_host_key_fingerprint(),
+                            current_snapshot,
+                            installation_plan,
+                        )
+
+                        if binding_valid:
+                            print(
+                                "\nApproval binding validated "
+                                "for the reviewed server and plan."
+                            )
+                        else:
+                            approval_session.invalidate()
+                            print(
+                                "\nApproval binding validation failed. "
+                                "Approval invalidated."
+                                )
+
+                    else:
+                        print("\nNo plan-bound approval recorded.")
+
                 else:
                     print(
                         "\nInstallation approval skipped: "
                         "server state changed. Replanning is required."
-                    )
+                        )
 
             except (RuntimeError, SnapshotError, ValueError) as error:
                 print(
