@@ -1,11 +1,36 @@
+
+"""
+Developer Server Setup Assistant.
+
+Connects to a remote Ubuntu server, discovers its environment,
+evaluates component dependencies and conflicts, generates a
+read-only installation plan, and verifies selected components.
+
+Actual installation execution remains disabled.
+"""
+
 from getpass import getpass
-from multiprocessing.dummy import connection
-import discovery
+
+from connection.ssh import SSHConnection
+
 from discovery.components import (
     ComponentDiscovery,
     display_component_report,
 )
-from planning import approval
+from discovery.panel import (
+    PanelDiscovery,
+    display_panel_report,
+)
+from discovery.ports import (
+    PortDiscovery,
+    display_port_report,
+)
+from discovery.system import (
+    SystemDiscovery,
+    display_discovery_report,
+)
+
+from planning.approval import PlanApproval
 from planning.decisions import (
     ConfigurationPlanner,
     display_configuration_plan,
@@ -15,26 +40,22 @@ from planning.installation import (
     InstallationPlanner,
     display_installation_plan,
 )
-from discovery.ports import PortDiscovery, display_port_report
-from discovery.system import SystemDiscovery, display_discovery_report
-from connection.ssh import SSHConnection
-from discovery.panel import PanelDiscovery, display_panel_report
-from planning.approval import PlanApproval
+
+from verification.components import (
+    ComponentVerifier,
+    display_verification_report,
+)
 
 
 def get_server_details():
-    """
-    Collect and validate the SSH connection details required to access
-    the target server.
-
-    Returns:
-        tuple: hostname, SSH port, username, and password.
-    """
+    """Collect and validate remote SSH connection details."""
 
     while True:
         hostname = input("Enter server IP/hostname: ").strip()
+
         if hostname:
             break
+
         print("Server IP/hostname cannot be empty.")
 
     while True:
@@ -53,20 +74,25 @@ def get_server_details():
             print("Port must be between 1 and 65535.")
 
         except ValueError:
-            print("Port must be a number.")
+            pass
+
+        print("Enter a valid port number between 1 and 65535.")
 
     while True:
         username = input("Enter sudo username: ").strip()
+
         if username:
             break
+
         print("Username cannot be empty.")
 
     password = getpass("Enter password: ")
 
     return hostname, port, username, password
 
+
 def select_components(available):
-    """Collect and validate requested components for planning."""
+    """Collect and validate the components requested by the operator."""
 
     names = list(available)
 
@@ -90,32 +116,158 @@ def select_components(available):
                 for value in selection.split(",")
             ]
 
-            if not all(1 <= number <= len(names) for number in numbers):
+            if not all(
+                1 <= number <= len(names)
+                for number in numbers
+            ):
                 raise ValueError
 
-            return list(dict.fromkeys(
-                names[number - 1] for number in numbers
-            ))
+            return list(
+                dict.fromkeys(
+                    names[number - 1]
+                    for number in numbers
+                )
+            )
 
         except ValueError:
-            print("Invalid selection. Enter valid component numbers.")
+            print(
+                "Invalid selection. Enter valid component numbers."
+            )
+
+
+def discover_server(connection):
+    """Collect system, panel, component and port information."""
+
+    print("\nDiscovering server environment...")
+
+    system_discovery = SystemDiscovery(connection)
+    server_info = system_discovery.discover()
+
+    supported = display_discovery_report(server_info)
+
+    print("\nChecking existing control panel...")
+
+    panel_discovery = PanelDiscovery(connection)
+    panel_info = panel_discovery.discover()
+    display_panel_report(panel_info)
+
+    print("\nDiscovering existing software...")
+
+    component_discovery = ComponentDiscovery(connection)
+    components = component_discovery.discover()
+    display_component_report(components)
+
+    print("\nDiscovering listening ports...")
+
+    port_discovery = PortDiscovery(connection)
+    ports = port_discovery.discover()
+    display_port_report(ports)
+
+    return {
+        "supported": supported,
+        "panel": panel_info,
+        "components": components,
+        "ports": ports,
+    }
+
+
+def generate_installation_plan(server_state, requested):
+    """Resolve dependencies and generate a read-only installation plan."""
+
+    resolver = DependencyResolver(server_state["components"])
+    ordered_components = resolver.resolve(requested)
+
+    print("\nResolved component order:")
+    print(" -> ".join(ordered_components))
+
+    configuration_planner = ConfigurationPlanner(
+        supported=server_state["supported"],
+        panel=server_state["panel"],
+        components=server_state["components"],
+        ports=server_state["ports"],
+    )
+
+    decisions = configuration_planner.evaluate(
+        ordered_components
+    )
+
+    display_configuration_plan(decisions)
+
+    installation_planner = InstallationPlanner(
+        components=server_state["components"],
+        decisions=decisions,
+    )
+
+    installation_plan = installation_planner.build(
+        ordered_components
+    )
+
+    display_installation_plan(installation_plan)
+
+    return ordered_components, installation_plan
+
+
+def review_installation_plan(installation_plan):
+    """Collect demonstration-only approval for the proposed plan."""
+
+    approval = PlanApproval(installation_plan)
+    validation = approval.validate()
+
+    approved = approval.request_approval()
+
+    if approved:
+        print("\nPlan approved for this session.")
+
+    elif validation["eligible"] and not validation["has_changes"]:
+        print("\nVerification-only plan. No installation required.")
+
+    else:
+        print("\nInstallation plan was not approved.")
+
+    return approved
+
+
+def verify_components(connection, ordered_components):
+    """Run read-only verification for selected components."""
+
+    verifier = ComponentVerifier(connection)
+
+    verification_results = [
+        verifier.verify(component)
+        for component in ordered_components
+    ]
+
+    display_verification_report(verification_results)
+
+    return verification_results
+
 
 def main():
-    """Run the server connection workflow."""
+    """Coordinate the remote server discovery and planning workflow."""
 
     hostname, port, username, password = get_server_details()
 
-    connection = SSHConnection(hostname, port, username, password)
+    connection = SSHConnection(
+        hostname,
+        port,
+        username,
+        password,
+    )
 
     print(f"\nConnecting to {hostname}:{port}...")
 
     try:
         connection.connect()
 
-        exit_code, hostname_output, error = connection.execute("hostname")
+        exit_code, hostname_output, error = connection.execute(
+            "hostname"
+        )
 
         if exit_code != 0:
-            print(f"Connected, but server validation failed: {error}")
+            print(
+                "Connected, but server validation failed: "
+                f"{error}"
+            )
             return
 
         print("SSH connection successful.")
@@ -124,83 +276,62 @@ def main():
         print("Verifying sudo access...")
 
         connection.verify_sudo()
-        
+
         print("Sudo access verified.")
-        print("\nDiscovering server environment...")
 
-        discovery = SystemDiscovery(connection)
-        server_info = discovery.discover()
+        server_state = discover_server(connection)
 
-        supported = display_discovery_report(server_info)
-
-        print("\nChecking existing control panel...")
-        panel_discovery = PanelDiscovery(connection)
-        panel_info = panel_discovery.discover()
-        display_panel_report(panel_info)
-        print("\nDiscovering existing software...")
-        component_discovery = ComponentDiscovery(connection)
-        components = component_discovery.discover()
-        display_component_report(components)
-
-        print("\nDiscovering listening ports...")
-        port_discovery = PortDiscovery(connection)
-        ports = port_discovery.discover()
-        display_port_report(ports)
-        requested = select_components(components)
-
-        if requested:
-            resolver = DependencyResolver(components)
-            ordered_components = resolver.resolve(requested)
-
-            print("\nResolved component order:")
-            print(" -> ".join(ordered_components))
-
-            planner = ConfigurationPlanner(
-                supported=supported,
-                panel=panel_info,
-                components=components,
-                ports=ports,
-            )
-
-            decisions = planner.evaluate(ordered_components)
-            display_configuration_plan(decisions)
-
-            installation_planner = InstallationPlanner(
-                components=components,
-                decisions=decisions,
-            )
-
-            installation_plan = installation_planner.build(
-                ordered_components
-            )
-
-            display_installation_plan(installation_plan)
-            approval = PlanApproval(installation_plan)
-            approved = approval.request_approval()
-
-            if approved:
-                print("\nPlan recorded as approved for this session.")
-            else:
-                print("\nInstallation plan was not approved.")
-
-        else:
-            print("\nNo components selected. Discovery completed.")
-
-        if not supported:
+        # Verification is allowed on unsupported systems,
+        # but installation planning remains disabled.
+        if not server_state["supported"]:
             print(
-                "\nThis operating system is not supported for automated "
-                "server configuration."
+                "\nThis operating system is not supported "
+                "for automated server configuration."
             )
-            print("Discovery completed. No server changes were made.")
+            print(
+                "Discovery completed. No server changes were made."
+            )
             return
-    except RuntimeError as error:
-        print(f"Server discovery failed: {error}")
+
+        requested = select_components(
+            server_state["components"]
+        )
+
+        if not requested:
+            print(
+                "\nNo components selected. Discovery completed."
+            )
+            return
+
+        ordered_components, installation_plan = (
+            generate_installation_plan(
+                server_state,
+                requested,
+            )
+        )
+
+        review_installation_plan(installation_plan)
+
+        # Stage 3.4: read-only component verification.
+        # Runs regardless of the approval outcome.
+        verify_components(
+            connection,
+            ordered_components,
+        )
+
+        print(
+            "\nWorkflow completed. "
+            "No installation commands were executed."
+        )
 
     except PermissionError as error:
         print(f"Sudo verification failed: {error}")
 
     except ConnectionError as error:
         print(f"Connection failed: {error}")
+
+    except RuntimeError as error:
+        print(f"Server operation failed: {error}")
 
     finally:
         connection.close()
