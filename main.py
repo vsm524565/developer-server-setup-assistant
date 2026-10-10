@@ -44,6 +44,14 @@ from planning.preflight import (
     PreflightValidator,
     display_preflight_report,
 )
+from planning.snapshot import (
+    ServerSnapshotBuilder,
+    SnapshotError,
+)
+from planning.state_consistency import (
+    ServerStateComparator,
+    display_consistency_report,
+)
 
 from verification.components import (
     ComponentVerifier,
@@ -169,6 +177,7 @@ def discover_server(connection):
 
     return {
         "supported": supported,
+        "system": server_info,
         "panel": panel_info,
         "components": components,
         "ports": ports,
@@ -246,6 +255,25 @@ def verify_components(connection, ordered_components):
     return verification_results
 
 
+def collect_server_snapshot(connection):
+    """
+    Collect fresh discovery data and build a normalized snapshot.
+
+    Does not display discovery reports or modify the server.
+    """
+
+    system_info = SystemDiscovery(connection).discover()
+    panel_info = PanelDiscovery(connection).discover()
+    components = ComponentDiscovery(connection).discover()
+    ports = PortDiscovery(connection).discover()
+
+    return ServerSnapshotBuilder.build(
+        system_info=system_info,
+        panel_info=panel_info,
+        components=components,
+        ports=ports,
+    )
+
 def main():
     """Coordinate the remote server discovery and planning workflow."""
 
@@ -284,6 +312,12 @@ def main():
         print("Sudo access verified.")
 
         server_state = discover_server(connection)
+        initial_snapshot = ServerSnapshotBuilder.build(
+            system_info=server_state["system"],
+            panel_info=server_state["panel"],
+            components=server_state["components"],
+            ports=server_state["ports"],
+        )
 
         # Verification is allowed on unsupported systems,
         # but installation planning remains disabled.
@@ -318,16 +352,43 @@ def main():
             installation_plan=installation_plan,
         )
 
+
         preflight_result = preflight.validate()
         display_preflight_report(preflight_result)
 
         if preflight_result["passed"]:
-            review_installation_plan(installation_plan)
+            print("\nRefreshing server discovery before approval...")
+
+            try:
+                current_snapshot = collect_server_snapshot(connection)
+
+                consistency_result = ServerStateComparator(
+                    initial_snapshot
+                ).compare(current_snapshot)
+
+                display_consistency_report(consistency_result)
+
+                if consistency_result["consistent"]:
+                    review_installation_plan(installation_plan)
+                else:
+                    print(
+                        "\nInstallation approval skipped: "
+                        "server state changed. Replanning is required."
+                    )
+
+            except (RuntimeError, SnapshotError, ValueError) as error:
+                print(
+                    "\nInstallation approval skipped: "
+                    "fresh server discovery could not be validated."
+                )
+                print(f"Reason: {error}")
+
         else:
             print(
                 "\nInstallation approval skipped: "
                 "preflight validation failed."
             )
+
 
         # Stage 3.4: read-only component verification.
         # Runs regardless of the approval outcome.
