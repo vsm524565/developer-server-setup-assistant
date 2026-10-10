@@ -40,6 +40,10 @@ from planning.installation import (
     InstallationPlanner,
     display_installation_plan,
 )
+from planning.preflight import (
+    PreflightValidator,
+    display_preflight_report,
+)
 
 from verification.components import (
     ComponentVerifier,
@@ -309,8 +313,21 @@ def main():
                 requested,
             )
         )
+        preflight = PreflightValidator(
+            server_state=server_state,
+            installation_plan=installation_plan,
+        )
 
-        review_installation_plan(installation_plan)
+        preflight_result = preflight.validate()
+        display_preflight_report(preflight_result)
+
+        if preflight_result["passed"]:
+            review_installation_plan(installation_plan)
+        else:
+            print(
+                "\nInstallation approval skipped: "
+                "preflight validation failed."
+            )
 
         # Stage 3.4: read-only component verification.
         # Runs regardless of the approval outcome.

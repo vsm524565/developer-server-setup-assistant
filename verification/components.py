@@ -123,9 +123,18 @@ class ComponentVerifier:
             or result["config_valid"] is False
         )
 
-        result["status"] = (
-            "VERIFICATION_FAILED" if failed else "VERIFIED"
-        )
+        if failed:
+            result["status"] = "VERIFICATION_FAILED"
+
+        elif (
+            "service" in check
+            or "config_test" in check
+            or "version_command" in check
+        ):
+            result["status"] = "VERIFIED"
+
+        else:
+            result["status"] = "PRESENT"
 
         return result
 
