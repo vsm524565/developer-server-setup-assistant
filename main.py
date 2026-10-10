@@ -5,6 +5,7 @@ from discovery.components import (
     ComponentDiscovery,
     display_component_report,
 )
+from planning import approval
 from planning.decisions import (
     ConfigurationPlanner,
     display_configuration_plan,
@@ -18,6 +19,7 @@ from discovery.ports import PortDiscovery, display_port_report
 from discovery.system import SystemDiscovery, display_discovery_report
 from connection.ssh import SSHConnection
 from discovery.panel import PanelDiscovery, display_panel_report
+from planning.approval import PlanApproval
 
 
 def get_server_details():
@@ -173,6 +175,13 @@ def main():
             )
 
             display_installation_plan(installation_plan)
+            approval = PlanApproval(installation_plan)
+            approved = approval.request_approval()
+
+            if approved:
+                print("\nPlan recorded as approved for this session.")
+            else:
+                print("\nInstallation plan was not approved.")
 
         else:
             print("\nNo components selected. Discovery completed.")
