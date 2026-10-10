@@ -81,4 +81,3 @@ display_consistency_report(result)
 assert result["consistent"] is False
 
 print("\nAll eight state consistency tests passed.")
-

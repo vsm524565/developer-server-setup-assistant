@@ -82,8 +82,8 @@ class ServerStateComparator:
                     ):
                         issues.append(
                             f"Incomplete {field} discovery for: {key}"
-                        )        
-                        
+                        )
+
         return {
             "consistent": not changes and not issues,
             "changes": changes,

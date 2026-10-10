@@ -114,4 +114,3 @@ else:
 
 
 print("\nAll six snapshot adapter tests passed.")
-
