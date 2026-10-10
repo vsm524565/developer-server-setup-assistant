@@ -5,7 +5,7 @@ Manage demonstration-only approval for a specific server and plan.
 No installation execution or persistent authorization.
 """
 
-from planning.approval_binding import ApprovalBinding
+from bridge.planning.approval_binding import ApprovalBinding
 
 
 class ApprovalSession:

@@ -15,7 +15,7 @@ class InstallationPlanner:
         Components depending on blocked or unresolved prerequisites
         are marked BLOCKED_DEPENDENCY.
         """
-        from planning.dependencies import DependencyResolver
+        from bridge.planning.dependencies import DependencyResolver
 
         plan = []
         actions = {}

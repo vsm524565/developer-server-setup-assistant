@@ -6,9 +6,9 @@ This module does not connect to servers or execute commands.
 READY is not permission to install software.
 """
 
-from planning.approval_binding import ApprovalBindingError
-from planning.preflight import PreflightValidator
-from planning.state_consistency import ServerStateComparator
+from bridge.planning.approval_binding import ApprovalBindingError
+from bridge.planning.preflight import PreflightValidator
+from bridge.planning.state_consistency import ServerStateComparator
 
 
 class ExecutionReadinessValidator:
