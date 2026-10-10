@@ -19,3 +19,9 @@ logs/
 
 # OS
 .DS_Store
+
+# Local runtime logs
+/var/log/
+
+# Runtime credentials and secrets
+/var/secrets/
