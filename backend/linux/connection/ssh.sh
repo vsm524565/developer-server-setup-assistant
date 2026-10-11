@@ -4,6 +4,7 @@ umask 077
 
 BASE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 INVENTORY_SCRIPT="$BASE_DIR/backend/linux/connection/inventory.sh"
+SYSTEM_SCRIPT="$BASE_DIR/backend/linux/discovery/system.sh"
 
 SSH_KEY="$HOME/.ssh/id_ed25519"
 KNOWN_HOSTS="$HOME/.ssh/known_hosts"
@@ -19,7 +20,8 @@ operation="$2"
 # Only explicitly approved read-only operations are accepted.
 case "$operation" in
     discovery.system)
-        remote_command='hostname; uname -s; uname -r; id -un'
+        remote_command='bash -s'
+        remote_script="$SYSTEM_SCRIPT"
         ;;
     *)
         echo "ERROR: Unsupported SSH operation" >&2
@@ -50,6 +52,10 @@ if [[ ! "$host" =~ ^[a-zA-Z0-9.-]+$ ]] ||
     echo "ERROR: Invalid SSH inventory fields" >&2
     exit 3
 fi
+if [[ ! -f "$remote_script" || ! -r "$remote_script" ]]; then
+    echo "ERROR: Discovery module unavailable" >&2
+    exit 3
+fi
 
 if ! output="$(ssh \
     -F /dev/null \
@@ -75,35 +81,24 @@ if ! output="$(ssh \
     -i "$SSH_KEY" \
     -p "$port" \
     -l "$user" \
-    -- "$host" "$remote_command")"; then
+    -- "$host" "$remote_command" < "$remote_script")"; then
     echo "ERROR: SSH discovery execution failed" >&2
     exit 4
 fi
 
-# Validate and normalize the four discovery fields.
-if [[ "$(printf '%s\n' "$output" | wc -l)" -ne 4 ]]; then
-    echo "ERROR: Unexpected discovery response" >&2
+# Validate structured JSON returned by the remote discovery module.
+if ! jq -e '
+    type == "object"
+    and (.hostname | type == "string" and length > 0)
+    and (.os_id | type == "string" and length > 0)
+    and (.os_version | type == "string" and length > 0)
+    and (.architecture | type == "string" and length > 0)
+    and ((keys | sort) ==
+         (["hostname","os_id","os_version","architecture"] | sort))
+' <<< "$output" >/dev/null 2>&1; then
+    echo "ERROR: Invalid remote discovery response" >&2
     exit 5
 fi
 
-hostname="$(sed -n '1p' <<< "$output")"
-os="$(sed -n '2p' <<< "$output")"
-kernel="$(sed -n '3p' <<< "$output")"
-remote_user="$(sed -n '4p' <<< "$output")"
+printf '%s\n' "$output"
 
-if [[ -z "$hostname" || -z "$os" || -z "$kernel" || -z "$remote_user" ]]; then
-    echo "ERROR: Incomplete discovery response" >&2
-    exit 5
-fi
-
-jq -n \
-    --arg hostname "$hostname" \
-    --arg os "$os" \
-    --arg kernel "$kernel" \
-    --arg remote_user "$remote_user" \
-    '{
-        hostname: $hostname,
-        os: $os,
-        kernel: $kernel,
-        remote_user: $remote_user
-    }'

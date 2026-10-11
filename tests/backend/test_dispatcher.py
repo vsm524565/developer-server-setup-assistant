@@ -62,9 +62,9 @@ class DispatcherTests(unittest.TestCase):
         data = response["data"]
 
         self.assertEqual(data["hostname"], "ubuntutest")
-        self.assertEqual(data["os"], "Linux")
-        self.assertTrue(data["kernel"])
-        self.assertEqual(data["remote_user"], "vivek")
+        self.assertEqual(data["os_id"], "ubuntu")
+        self.assertEqual(data["os_version"], "24.04")
+        self.assertEqual(data["architecture"], "x86_64")
 
         events = self.audit_events()
 

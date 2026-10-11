@@ -50,7 +50,11 @@ class SSHTransportTests(unittest.TestCase):
         mock_ssh.write_text(
             "#!/usr/bin/env bash\n"
             "printf '%s\\n' \"$@\" > \"$SSH_TEST_CAPTURE\"\n"
-            "printf 'ubuntutest\\nLinux\\n6.8.0-146-generic\\nvivek\\n'\n"
+            "printf '%s\\n' "
+            "'{\"hostname\":\"ubuntutest\","
+            "\"os_id\":\"ubuntu\","
+            "\"os_version\":\"24.04\","
+            "\"architecture\":\"x86_64\"}'\n"
         )
         mock_ssh.chmod(0o700)
 
@@ -72,9 +76,9 @@ class SSHTransportTests(unittest.TestCase):
         data = json.loads(result.stdout)
 
         self.assertEqual(data["hostname"], "ubuntutest")
-        self.assertEqual(data["os"], "Linux")
-        self.assertEqual(data["kernel"], "6.8.0-146-generic")
-        self.assertEqual(data["remote_user"], "vivek")
+        self.assertEqual(data["os_id"], "ubuntu")
+        self.assertEqual(data["os_version"], "24.04")
+        self.assertEqual(data["architecture"], "x86_64")
 
         args = self.capture.read_text().splitlines()
         self.assertIn("StrictHostKeyChecking=yes", args)
@@ -82,6 +86,7 @@ class SSHTransportTests(unittest.TestCase):
         self.assertIn("IdentitiesOnly=yes", args)
         self.assertIn("PasswordAuthentication=no", args)
         self.assertIn("192.168.56.109", args)
+        self.assertIn("bash -s", args)
 
     def test_unknown_target(self):
         result = self.run_ssh("unknown-server", "discovery.system")

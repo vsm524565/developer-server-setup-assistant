@@ -146,9 +146,9 @@ if [[ "$discovery_status" == "success" ]]; then
     if ! jq -e '
         type == "object"
         and (.hostname | type == "string" and length > 0)
-        and (.os | type == "string" and length > 0)
-        and (.kernel | type == "string" and length > 0)
-        and (.remote_user | type == "string" and length > 0)
+        and (.os_id | type == "string" and length > 0)
+        and (.os_version | type == "string" and length > 0)
+        and (.architecture | type == "string" and length > 0)
     ' <<< "$discovery_data" >/dev/null 2>&1; then
         discovery_status="error"
         discovery_exit_code=5
