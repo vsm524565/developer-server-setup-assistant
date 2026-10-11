@@ -7,7 +7,16 @@
     "hostname": "ubuntutest",
     "os_id": "ubuntu",
     "os_version": "24.04",
-    "architecture": "x86_64"
+    "architecture": "x86_64",
+    "cpu_logical_cores": 3,
+    "cpu_model": "Intel(R) Core(TM) i7-9850H CPU @ 2.60GHz",
+    "memory_total_bytes": 4105826304,
+    "memory_available_bytes": 3617198080,
+    "disk_total_bytes": 25180848128,
+    "disk_used_bytes": 6938574848,
+    "disk_available_bytes": 16937218048,
+    "uptime_seconds": 109534,
+    "virtualization": "oracle"
   },
   "errors": []
 }

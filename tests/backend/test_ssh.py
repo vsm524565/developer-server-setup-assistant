@@ -54,7 +54,16 @@ class SSHTransportTests(unittest.TestCase):
             "'{\"hostname\":\"ubuntutest\","
             "\"os_id\":\"ubuntu\","
             "\"os_version\":\"24.04\","
-            "\"architecture\":\"x86_64\"}'\n"
+            "\"architecture\":\"x86_64\","
+            "\"cpu_logical_cores\":3,"
+            "\"cpu_model\":\"Intel Core i7\","
+            "\"memory_total_bytes\":4105826304,"
+            "\"memory_available_bytes\":3617198080,"
+            "\"disk_total_bytes\":25180848128,"
+            "\"disk_used_bytes\":6938574848,"
+            "\"disk_available_bytes\":16937263104,"
+            "\"uptime_seconds\":109534,"
+            "\"virtualization\":\"oracle\"}'\n"
         )
         mock_ssh.chmod(0o700)
 
@@ -79,6 +88,14 @@ class SSHTransportTests(unittest.TestCase):
         self.assertEqual(data["os_id"], "ubuntu")
         self.assertEqual(data["os_version"], "24.04")
         self.assertEqual(data["architecture"], "x86_64")
+        self.assertEqual(data["cpu_logical_cores"], 3)
+        self.assertEqual(data["cpu_model"], "Intel Core i7")
+        self.assertEqual(data["memory_total_bytes"], 4105826304)
+        self.assertGreaterEqual(data["memory_available_bytes"], 0)
+        self.assertGreater(data["disk_total_bytes"], 0)
+        self.assertGreaterEqual(data["disk_available_bytes"], 0)
+        self.assertEqual(data["virtualization"], "oracle")
+        self.assertGreaterEqual(data["uptime_seconds"], 0)
 
         args = self.capture.read_text().splitlines()
         self.assertIn("StrictHostKeyChecking=yes", args)

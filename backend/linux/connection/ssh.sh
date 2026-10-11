@@ -88,13 +88,38 @@ fi
 
 # Validate structured JSON returned by the remote discovery module.
 if ! jq -e '
-    type == "object"
-    and (.hostname | type == "string" and length > 0)
-    and (.os_id | type == "string" and length > 0)
-    and (.os_version | type == "string" and length > 0)
-    and (.architecture | type == "string" and length > 0)
-    and ((keys | sort) ==
-         (["hostname","os_id","os_version","architecture"] | sort))
+type == "object"
+and ((keys | sort) == ([
+    "hostname",
+    "os_id",
+    "os_version",
+    "architecture",
+    "cpu_logical_cores",
+    "cpu_model",
+    "memory_total_bytes",
+    "memory_available_bytes",
+    "disk_total_bytes",
+    "disk_used_bytes",
+    "disk_available_bytes",
+    "uptime_seconds",
+    "virtualization"
+] | sort))
+and (.hostname | type == "string" and length > 0)
+and (.os_id | type == "string" and length > 0)
+and (.os_version | type == "string" and length > 0)
+and (.architecture | type == "string" and length > 0)
+and (.cpu_logical_cores | type == "number" and . >= 1)
+and (.cpu_model | type == "string" and length > 0)
+and (.memory_total_bytes | type == "number" and . > 0)
+and (.memory_available_bytes | type == "number" and . >= 0)
+and (.memory_available_bytes <= .memory_total_bytes)
+and (.disk_total_bytes | type == "number" and . > 0)
+and (.disk_used_bytes | type == "number" and . >= 0)
+and (.disk_available_bytes | type == "number" and . >= 0)
+and (.disk_used_bytes <= .disk_total_bytes)
+and (.disk_available_bytes <= .disk_total_bytes)
+and (.uptime_seconds | type == "number" and . >= 0)
+and (.virtualization | type == "string" and length > 0)
 ' <<< "$output" >/dev/null 2>&1; then
     echo "ERROR: Invalid remote discovery response" >&2
     exit 5
