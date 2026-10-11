@@ -1,0 +1,7 @@
+{
+  "available_package_tools": [
+    "apt-get",
+    "dpkg"
+  ],
+  "package_manager_detected": true
+}

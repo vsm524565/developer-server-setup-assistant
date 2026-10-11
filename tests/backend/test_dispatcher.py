@@ -138,7 +138,59 @@ class DispatcherTests(unittest.TestCase):
             response["errors"][0]["code"],
             "AUDIT_FAILURE",
         )
+    def test_package_manager_discovery_request(self):
+        self.request["operation"] = "discovery.package_manager"
+        self.request["request_id"] = "req-package-test-001"
 
+        result = self.run_dispatcher(self.request)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        response = json.loads(result.stdout)
+
+        self.assertEqual(response["status"], "success")
+        self.assertEqual(
+            response["operation"],
+            "discovery.package_manager"
+        )
+        self.assertEqual(response["errors"], [])
+
+        data = response["data"]
+
+        self.assertIsInstance(data["available_package_tools"], list)
+        self.assertIsInstance(data["package_manager_detected"], bool)
+        self.assertEqual(
+            data["package_manager_detected"],
+            len(data["available_package_tools"]) > 0
+        )
+
+        events = self.audit_events()
+
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["event"], "discovery.requested")
+        self.assertEqual(events[1]["event"], "discovery.completed")
+        self.assertEqual(events[1]["status"], "success")
+        self.assertEqual(events[1]["exit_code"], 0)
+
+
+    def test_package_manager_rejects_unexpected_parameters(self):
+        self.request["operation"] = "discovery.package_manager"
+        self.request["parameters"] = {
+            "install": "nginx"
+        }
+
+        result = self.run_dispatcher(self.request)
+
+        self.assertEqual(result.returncode, 2)
+
+        response = json.loads(result.stdout)
+        self.assertEqual(
+            response["errors"][0]["code"],
+            "INVALID_REQUEST"
+        )
+
+        events = self.audit_events()
+        self.assertEqual(events[0]["event"], "request.rejected")
 
 if __name__ == "__main__":
     unittest.main()

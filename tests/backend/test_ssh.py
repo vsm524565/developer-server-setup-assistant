@@ -48,22 +48,30 @@ class SSHTransportTests(unittest.TestCase):
 
         mock_ssh = self.bin_dir / "ssh"
         mock_ssh.write_text(
-            "#!/usr/bin/env bash\n"
-            "printf '%s\\n' \"$@\" > \"$SSH_TEST_CAPTURE\"\n"
-            "printf '%s\\n' "
-            "'{\"hostname\":\"ubuntutest\","
-            "\"os_id\":\"ubuntu\","
-            "\"os_version\":\"24.04\","
-            "\"architecture\":\"x86_64\","
-            "\"cpu_logical_cores\":3,"
-            "\"cpu_model\":\"Intel Core i7\","
-            "\"memory_total_bytes\":4105826304,"
-            "\"memory_available_bytes\":3617198080,"
-            "\"disk_total_bytes\":25180848128,"
-            "\"disk_used_bytes\":6938574848,"
-            "\"disk_available_bytes\":16937263104,"
-            "\"uptime_seconds\":109534,"
-            "\"virtualization\":\"oracle\"}'\n"
+            """#!/usr/bin/env bash
+        printf '%s\\n' "$@" > "$SSH_TEST_CAPTURE"
+
+        if [[ -n "${SSH_TEST_RESPONSE_FILE:-}" ]]; then
+            cat "$SSH_TEST_RESPONSE_FILE"
+            exit 0
+        fi
+
+        printf '%s\\n' '{
+            "hostname": "ubuntutest",
+            "os_id": "ubuntu",
+            "os_version": "24.04",
+            "architecture": "x86_64",
+            "cpu_logical_cores": 3,
+            "cpu_model": "Intel Core i7",
+            "memory_total_bytes": 4105826304,
+            "memory_available_bytes": 3617198080,
+            "disk_total_bytes": 25180848128,
+            "disk_used_bytes": 6938574848,
+            "disk_available_bytes": 16937263104,
+            "uptime_seconds": 109534,
+            "virtualization": "oracle"
+        }'
+        """
         )
         mock_ssh.chmod(0o700)
 
@@ -78,6 +86,15 @@ class SSHTransportTests(unittest.TestCase):
             env=self.env,
             timeout=10,
         )
+    def set_mock_response(self, response):
+        response_file = self.base / "mock-response.json"
+
+        if isinstance(response, str):
+            response_file.write_text(response)
+        else:
+            response_file.write_text(json.dumps(response))
+
+        self.env["SSH_TEST_RESPONSE_FILE"] = str(response_file)
 
     def test_approved_discovery(self):
         result = self.run_ssh("lab-ubuntu-01", "discovery.system")
@@ -128,6 +145,61 @@ class SSHTransportTests(unittest.TestCase):
         result = self.run_ssh("lab-ubuntu-01", "discovery.system")
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.capture.exists())
+
+    def test_package_manager_discovery(self):
+        self.set_mock_response({
+            "available_package_tools": ["apt-get", "dpkg"],
+            "package_manager_detected": True
+        })
+
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.package_manager"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        data = json.loads(result.stdout)
+
+        self.assertEqual(
+            data["available_package_tools"],
+            ["apt-get", "dpkg"]
+        )
+        self.assertTrue(data["package_manager_detected"])
+
+        args = self.capture.read_text().splitlines()
+        self.assertIn("StrictHostKeyChecking=yes", args)
+        self.assertIn("BatchMode=yes", args)
+        self.assertIn("bash -s", args)
+
+
+    def test_package_manager_rejects_invalid_json(self):
+        self.set_mock_response('{"invalid":')
+
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.package_manager"
+        )
+
+        self.assertEqual(result.returncode, 5)
+        self.assertIn(
+            "Invalid remote package manager discovery response",
+            result.stderr
+        )
+
+
+    def test_package_manager_rejects_invalid_schema(self):
+        self.set_mock_response({
+            "available_package_tools": ["apt-get", "dpkg"],
+            "package_manager_detected": False
+        })
+
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.package_manager"
+        )
+
+        self.assertEqual(result.returncode, 5)
 
 
 if __name__ == "__main__":

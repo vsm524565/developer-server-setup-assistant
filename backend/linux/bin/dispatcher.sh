@@ -53,7 +53,8 @@ if ! jq -e '
     type == "object"
     and .schema_version == "1.0"
     and (.request_id | type == "string" and length > 0)
-    and .operation == "discovery.system"
+    and (.operation == "discovery.system"
+     or .operation == "discovery.package_manager")
     and (.target_id | type == "string"
      and test("^[a-zA-Z0-9_-]{1,64}$"))
     and .parameters == {}
@@ -143,42 +144,66 @@ fi
 
 # Validate the discovery response before reporting success.
 if [[ "$discovery_status" == "success" ]]; then
-    if ! jq -e '
-        type == "object"
-        and ((keys | sort) == ([
-            "hostname",
-            "os_id",
-            "os_version",
-            "architecture",
-            "cpu_logical_cores",
-            "cpu_model",
-            "memory_total_bytes",
-            "memory_available_bytes",
-            "disk_total_bytes",
-            "disk_used_bytes",
-            "disk_available_bytes",
-            "uptime_seconds",
-            "virtualization"
-        ] | sort))
-        and (.hostname | type == "string" and length > 0)
-        and (.os_id | type == "string" and length > 0)
-        and (.os_version | type == "string" and length > 0)
-        and (.architecture | type == "string" and length > 0)
-        and (.cpu_logical_cores | type == "number" and . >= 1)
-        and (.cpu_model | type == "string" and length > 0)
-        and (.memory_total_bytes | type == "number" and . > 0)
-        and (.memory_available_bytes | type == "number" and . >= 0)
-        and (.memory_available_bytes <= .memory_total_bytes)
-        and (.disk_total_bytes | type == "number" and . > 0)
-        and (.disk_used_bytes | type == "number" and . >= 0)
-        and (.disk_available_bytes | type == "number" and . >= 0)
-        and (.disk_used_bytes <= .disk_total_bytes)
-        and (.disk_available_bytes <= .disk_total_bytes)
-        and (.uptime_seconds | type == "number" and . >= 0)
-        and (.virtualization | type == "string" and length > 0)
-    ' <<< "$discovery_data" >/dev/null 2>&1; then
-        discovery_status="error"
-        discovery_exit_code=5
+
+    case "$operation" in
+        discovery.system)
+            validation_filter='
+                type == "object"
+                and ((keys | sort) == ([
+                    "hostname", "os_id", "os_version",
+                    "architecture", "cpu_logical_cores",
+                    "cpu_model", "memory_total_bytes",
+                    "memory_available_bytes", "disk_total_bytes",
+                    "disk_used_bytes", "disk_available_bytes",
+                    "uptime_seconds", "virtualization"
+                ] | sort))
+                and (.hostname | type == "string" and length > 0)
+                and (.os_id | type == "string" and length > 0)
+                and (.os_version | type == "string" and length > 0)
+                and (.architecture | type == "string" and length > 0)
+                and (.cpu_logical_cores | type == "number" and . >= 1)
+                and (.cpu_model | type == "string" and length > 0)
+                and (.memory_total_bytes | type == "number" and . > 0)
+                and (.memory_available_bytes | type == "number" and . >= 0)
+                and (.memory_available_bytes <= .memory_total_bytes)
+                and (.disk_total_bytes | type == "number" and . > 0)
+                and (.disk_used_bytes | type == "number" and . >= 0)
+                and (.disk_available_bytes | type == "number" and . >= 0)
+                and (.disk_used_bytes <= .disk_total_bytes)
+                and (.disk_available_bytes <= .disk_total_bytes)
+                and (.uptime_seconds | type == "number" and . >= 0)
+                and (.virtualization | type == "string" and length > 0)
+            '
+            ;;
+
+        discovery.package_manager)
+            validation_filter='
+                type == "object"
+                and ((keys | sort) == ([
+                    "available_package_tools",
+                    "package_manager_detected"
+                ] | sort))
+                and (.available_package_tools | type == "array")
+                and (.available_package_tools |
+                     all(.[]; type == "string" and length > 0))
+                and (.package_manager_detected | type == "boolean")
+                and (.package_manager_detected ==
+                     (.available_package_tools | length > 0))
+            '
+            ;;
+
+        *)
+            discovery_status="error"
+            discovery_exit_code=5
+            ;;
+    esac
+
+    if [[ "$discovery_status" == "success" ]]; then
+        if ! jq -e "$validation_filter" \
+            <<< "$discovery_data" >/dev/null 2>&1; then
+            discovery_status="error"
+            discovery_exit_code=5
+        fi
     fi
 fi
 
