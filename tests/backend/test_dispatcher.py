@@ -50,15 +50,29 @@ class DispatcherTests(unittest.TestCase):
     def test_valid_discovery_request(self):
         result = self.run_dispatcher(self.request)
 
-        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
         response = json.loads(result.stdout)
-        self.assertEqual(response["status"], "not_implemented")
+
+        self.assertEqual(response["status"], "success")
         self.assertEqual(response["request_id"], "req-001")
+        self.assertEqual(response["operation"], "discovery.system")
+        self.assertEqual(response["errors"], [])
+
+        data = response["data"]
+
+        self.assertEqual(data["hostname"], "ubuntutest")
+        self.assertEqual(data["os"], "Linux")
+        self.assertTrue(data["kernel"])
+        self.assertEqual(data["remote_user"], "vivek")
 
         events = self.audit_events()
-        self.assertEqual(len(events), 1)
+
+        self.assertEqual(len(events), 2)
         self.assertEqual(events[0]["event"], "discovery.requested")
+        self.assertEqual(events[1]["event"], "discovery.completed")
+        self.assertEqual(events[1]["status"], "success")
+        self.assertEqual(events[1]["exit_code"], 0)
 
     def test_unsupported_operation(self):
         self.request["operation"] = "system.execute"

@@ -6,6 +6,7 @@ umask 077
 BASE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 AUDIT_SCRIPT="$BASE_DIR/backend/linux/logging/audit.sh"
 INVENTORY_SCRIPT="$BASE_DIR/backend/linux/connection/inventory.sh"
+SSH_SCRIPT="$BASE_DIR/backend/linux/connection/ssh.sh"
 
 command -v jq >/dev/null || {
     echo "ERROR: jq is required" >&2
@@ -131,19 +132,82 @@ if ! printf '%s\n' "$audit_event" | "$AUDIT_SCRIPT"; then
     echo '{"schema_version":"1.0","status":"error","data":null,"errors":[{"code":"AUDIT_FAILURE","message":"Audit recording failed"}]}'
     exit 3
 fi
+# Execute approved discovery through the Bash SSH backend.
+if discovery_data="$("$SSH_SCRIPT" "$target_id" "$operation")"; then
+    discovery_status="success"
+    discovery_exit_code=0
+else
+    discovery_exit_code=$?
+    discovery_status="error"
+fi
 
-# Stub response: no SSH or remote discovery yet.
-jq -n \
-  --arg request_id "$request_id" \
-  --arg operation "$operation" \
-  '{
-    schema_version:"1.0",
-    request_id:$request_id,
-    operation:$operation,
-    status:"not_implemented",
-    data:null,
-    errors:[{
-      code:"NOT_IMPLEMENTED",
-      message:"Linux system discovery backend is not connected yet"
-    }]
-  }'
+# Validate the discovery response before reporting success.
+if [[ "$discovery_status" == "success" ]]; then
+    if ! jq -e '
+        type == "object"
+        and (.hostname | type == "string" and length > 0)
+        and (.os | type == "string" and length > 0)
+        and (.kernel | type == "string" and length > 0)
+        and (.remote_user | type == "string" and length > 0)
+    ' <<< "$discovery_data" >/dev/null 2>&1; then
+        discovery_status="error"
+        discovery_exit_code=5
+    fi
+fi
+
+# Record the execution outcome before returning data.
+outcome_event="$(
+    jq -n \
+      --arg request_id "$request_id" \
+      --arg operation "$operation" \
+      --arg target_id "$target_id" \
+      --arg status "$discovery_status" \
+      --argjson exit_code "$discovery_exit_code" \
+      '{
+        schema_version:"1.0",
+        request_id:$request_id,
+        source:"linux-backend",
+        event:"discovery.completed",
+        target_id:$target_id,
+        operation:$operation,
+        status:$status,
+        exit_code:$exit_code
+      }'
+)"
+
+if ! printf '%s\n' "$outcome_event" | "$AUDIT_SCRIPT"; then
+    echo '{"schema_version":"1.0","status":"error","data":null,"errors":[{"code":"AUDIT_FAILURE","message":"Audit recording failed"}]}'
+    exit 3
+fi
+
+if [[ "$discovery_status" == "success" ]]; then
+    jq -n \
+      --arg request_id "$request_id" \
+      --arg operation "$operation" \
+      --argjson data "$discovery_data" \
+      '{
+        schema_version:"1.0",
+        request_id:$request_id,
+        operation:$operation,
+        status:"success",
+        data:$data,
+        errors:[]
+      }'
+else
+    jq -n \
+      --arg request_id "$request_id" \
+      --arg operation "$operation" \
+      '{
+        schema_version:"1.0",
+        request_id:$request_id,
+        operation:$operation,
+        status:"error",
+        data:null,
+        errors:[{
+          code:"DISCOVERY_FAILED",
+          message:"Remote system discovery failed"
+        }]
+      }'
+
+    exit 4
+fi
