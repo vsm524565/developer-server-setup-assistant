@@ -192,5 +192,69 @@ class DispatcherTests(unittest.TestCase):
         events = self.audit_events()
         self.assertEqual(events[0]["event"], "request.rejected")
 
+    def test_runtime_discovery_request(self):
+        self.request["operation"] = "discovery.runtimes"
+        self.request["request_id"] = "req-runtimes-test-001"
+
+        result = self.run_dispatcher(self.request)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        response = json.loads(result.stdout)
+
+        self.assertEqual(response["status"], "success")
+        self.assertEqual(response["operation"], "discovery.runtimes")
+        self.assertEqual(response["errors"], [])
+
+        runtimes = response["data"]["runtimes"]
+
+        self.assertEqual(
+            set(runtimes),
+            {"python3", "php", "node", "java"}
+        )
+
+        for runtime in runtimes.values():
+            self.assertIsInstance(runtime["available"], bool)
+
+            if runtime["available"]:
+                self.assertIsInstance(runtime["path"], str)
+                self.assertTrue(runtime["path"])
+            else:
+                self.assertIsNone(runtime["path"])
+                self.assertIsNone(runtime["version"])
+
+            if runtime["version"] is not None:
+                self.assertIsInstance(runtime["version"], str)
+
+        events = self.audit_events()
+
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["event"], "discovery.requested")
+        self.assertEqual(events[1]["event"], "discovery.completed")
+        self.assertEqual(events[1]["status"], "success")
+        self.assertEqual(events[1]["exit_code"], 0)
+
+    def test_runtime_discovery_rejects_unexpected_parameters(self):
+        self.request["operation"] = "discovery.runtimes"
+        self.request["parameters"] = {
+            "install": "nodejs"
+        }
+
+        result = self.run_dispatcher(self.request)
+
+        self.assertEqual(result.returncode, 2)
+
+        response = json.loads(result.stdout)
+
+        self.assertEqual(
+            response["errors"][0]["code"],
+            "INVALID_REQUEST"
+        )
+
+        events = self.audit_events()
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event"], "request.rejected")
+
 if __name__ == "__main__":
     unittest.main()

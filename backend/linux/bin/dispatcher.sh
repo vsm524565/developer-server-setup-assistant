@@ -54,7 +54,8 @@ if ! jq -e '
     and .schema_version == "1.0"
     and (.request_id | type == "string" and length > 0)
     and (.operation == "discovery.system"
-     or .operation == "discovery.package_manager")
+    or .operation == "discovery.package_manager"
+    or .operation == "discovery.runtimes")
     and (.target_id | type == "string"
      and test("^[a-zA-Z0-9_-]{1,64}$"))
     and .parameters == {}
@@ -176,6 +177,41 @@ if [[ "$discovery_status" == "success" ]]; then
             '
             ;;
 
+        discovery.runtimes)
+            validation_filter='
+                type == "object"
+                and ((keys | sort) == ["runtimes"])
+                and (.runtimes | type == "object")
+                and (
+                    (.runtimes | keys | sort) ==
+                    (["python3", "php", "node", "java"] | sort)
+                )
+                and (
+                    [.runtimes[] |
+                        (
+                            type == "object"
+                            and ((keys | sort) == ([
+                                "available",
+                                "path",
+                                "version"
+                            ] | sort))
+                            and (.available | type == "boolean")
+                            and (
+                                if .available then
+                                    (.path | type == "string" and length > 0)
+                                else
+                                    .path == null and .version == null
+                                end
+                            )
+                            and (
+                                .version == null or
+                                (.version | type == "string" and length > 0)
+                            )
+                        )
+                    ] | all
+                )
+            '
+            ;;
         discovery.package_manager)
             validation_filter='
                 type == "object"

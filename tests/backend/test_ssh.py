@@ -201,6 +201,85 @@ class SSHTransportTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 5)
 
+    def test_runtime_discovery(self):
+        self.set_mock_response({
+            "runtimes": {
+                "python3": {
+                    "available": True,
+                    "path": "/usr/bin/python3",
+                    "version": "Python 3.12.3"
+                },
+                "php": {
+                    "available": False,
+                    "path": None,
+                    "version": None
+                },
+                "node": {
+                    "available": False,
+                    "path": None,
+                    "version": None
+                },
+                "java": {
+                    "available": False,
+                    "path": None,
+                    "version": None
+                }
+            }
+        })
+
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.runtimes"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        data = json.loads(result.stdout)
+        runtimes = data["runtimes"]
+
+        self.assertEqual(
+            set(runtimes),
+            {"python3", "php", "node", "java"}
+        )
+        self.assertTrue(runtimes["python3"]["available"])
+        self.assertEqual(
+            runtimes["python3"]["path"],
+            "/usr/bin/python3"
+        )
+        self.assertFalse(runtimes["php"]["available"])
+
+        args = self.capture.read_text().splitlines()
+        self.assertIn("StrictHostKeyChecking=yes", args)
+        self.assertIn("BatchMode=yes", args)
+        self.assertIn("bash -s", args)
+
+    def test_runtime_rejects_invalid_json(self):
+        self.set_mock_response('{"invalid":')
+
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.runtimes"
+        )
+
+        self.assertEqual(result.returncode, 5)
+
+    def test_runtime_rejects_invalid_schema(self):
+        self.set_mock_response({
+            "runtimes": {
+                "python3": {
+                    "available": "yes",
+                    "path": "/usr/bin/python3",
+                    "version": "Python 3.12.3"
+                }
+            }
+        })
+
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.runtimes"
+        )
+
+        self.assertEqual(result.returncode, 5)
 
 if __name__ == "__main__":
     unittest.main()
