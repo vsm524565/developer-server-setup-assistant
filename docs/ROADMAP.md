@@ -97,6 +97,8 @@ Destination servers use agentless SSH.
 - 47 backend tests passed before installation audit integration.
 - Integrated CLI and successful installation audit path verified live.
 - Bounded local HTTP readiness check passed with HTTP 200 on Ubuntu 24.
+- Python bridge checks OS compatibility before installation confirmation.
+- Ubuntu 26.04 rejection verified without attempting installation.
 
 ### Current Limits
 

@@ -16,6 +16,23 @@ def main():
     backend = LinuxBackend()
 
     try:
+        print(
+            f"\nChecking platform compatibility on {args.target}...",
+            flush=True,
+        )
+        system = backend.discover_system(args.target)
+
+        os_id = system.get("os_id")
+        os_version = system.get("os_version")
+
+        print(f"Detected platform: {os_id} {os_version}")
+
+        if os_id != "ubuntu" or os_version != "24.04":
+            print(
+                "Installation blocked: the current Nginx installer "
+                "supports Ubuntu 24.04 only. No installation was attempted."
+            )
+            return 1
         print(f"\nDiscovering web servers on {args.target}...", flush=True)
         servers = backend.discover_web_servers(args.target)
         nginx = servers["nginx"]
