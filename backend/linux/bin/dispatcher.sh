@@ -55,7 +55,8 @@ if ! jq -e '
     and (.request_id | type == "string" and length > 0)
     and (.operation == "discovery.system"
     or .operation == "discovery.package_manager"
-    or .operation == "discovery.runtimes")
+    or .operation == "discovery.runtimes"
+    or .operation == "discovery.web_servers")
     and (.target_id | type == "string"
      and test("^[a-zA-Z0-9_-]{1,64}$"))
     and .parameters == {}
@@ -227,6 +228,61 @@ if [[ "$discovery_status" == "success" ]]; then
                      (.available_package_tools | length > 0))
             '
             ;;
+
+        discovery.web_servers)
+            validation_filter='
+                type == "object"
+                and ((keys | sort) == ["web_servers"])
+                and (.web_servers | type == "object")
+                and (
+                    (.web_servers | keys | sort) ==
+                    (["nginx", "apache", "openlitespeed", "litespeed"] | sort)
+                )
+                and (
+                    [.web_servers[] |
+                        (
+                            type == "object"
+                            and ((keys | sort) == ([
+                                "available",
+                                "path",
+                                "version",
+                                "service_name",
+                                "service_state",
+                                "detection_status"
+                            ] | sort))
+                            and (.available | type == "boolean")
+                            and (
+                                if .available then
+                                    (.path | type == "string" and length > 0)
+                                    and .detection_status == "detected"
+                                else
+                                    .path == null
+                                    and .version == null
+                                    and .detection_status != "detected"
+                                end
+                            )
+                            and (
+                                .version == null or
+                                (.version | type == "string" and length > 0)
+                            )
+                            and (
+                                .service_name == null or
+                                (.service_name | type == "string" and length > 0)
+                            )
+                            and (
+                                .service_state |
+                                IN("active", "inactive", "failed", "unknown")
+                            )
+                            and (
+                                .detection_status |
+                                IN("detected", "absent", "unidentified")
+                            )
+                        )
+                    ] | all
+                )
+            '
+            ;;
+
 
         *)
             discovery_status="error"

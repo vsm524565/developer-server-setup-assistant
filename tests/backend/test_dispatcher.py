@@ -47,6 +47,70 @@ class DispatcherTests(unittest.TestCase):
             for line in path.read_text().splitlines()
         ]
 
+
+    def test_web_server_discovery_request(self):
+        """Web-server discovery must pass through the dispatcher."""
+        self.request["operation"] = "discovery.web_servers"
+        self.request["request_id"] = "req-web-servers-test-001"
+
+        result = self.run_dispatcher(self.request)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        response = json.loads(result.stdout)
+        self.assertEqual(response["status"], "success")
+        self.assertEqual(
+            response["request_id"], self.request["request_id"]
+        )
+        self.assertEqual(
+            response["operation"], "discovery.web_servers"
+        )
+        self.assertEqual(response["errors"], [])
+
+        servers = response["data"]["web_servers"]
+        self.assertEqual(
+            set(servers),
+            {"nginx", "apache", "openlitespeed", "litespeed"},
+        )
+
+        for server in servers.values():
+            self.assertIsInstance(server["available"], bool)
+            self.assertIn(
+                server["detection_status"],
+                {"detected", "absent", "unidentified"},
+            )
+            if server["available"]:
+                self.assertEqual(server["detection_status"], "detected")
+                self.assertIsInstance(server["path"], str)
+                self.assertTrue(server["path"])
+            else:
+                self.assertNotEqual(
+                    server["detection_status"], "detected"
+                )
+                self.assertIsNone(server["path"])
+
+        events = self.audit_events()
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["event"], "discovery.requested")
+        self.assertEqual(events[1]["event"], "discovery.completed")
+        self.assertEqual(events[1]["status"], "success")
+        self.assertEqual(events[1]["exit_code"], 0)
+
+    def test_web_server_rejects_unexpected_parameters(self):
+        """Discovery requests must reject installation parameters."""
+        self.request["operation"] = "discovery.web_servers"
+        self.request["parameters"] = {"install": "nginx"}
+
+        result = self.run_dispatcher(self.request)
+        self.assertEqual(result.returncode, 2)
+
+        response = json.loads(result.stdout)
+        self.assertEqual(
+            response["errors"][0]["code"], "INVALID_REQUEST"
+        )
+        self.assertEqual(
+            self.audit_events()[0]["event"], "request.rejected"
+        )
+
     def test_valid_discovery_request(self):
         result = self.run_dispatcher(self.request)
 

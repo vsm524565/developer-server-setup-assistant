@@ -25,3 +25,6 @@ logs/
 
 # Runtime credentials and secrets
 /var/secrets/
+
+# Local lab inventory
+/config/inventory/lab-six.json

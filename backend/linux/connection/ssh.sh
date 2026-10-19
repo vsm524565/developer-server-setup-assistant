@@ -20,7 +20,11 @@ PACKAGE_MANAGER_RUNNER="$BASE_DIR/backend/linux/discovery/package_manager.sh"
 RUNTIMES_MODULE="$BASE_DIR/backend/linux/modules/software/runtimes.sh"
 RUNTIMES_RUNNER="$BASE_DIR/backend/linux/discovery/runtimes.sh"
 
-SSH_KEY="$HOME/.ssh/id_ed25519"
+# Web server discovery.
+WEB_SERVERS_MODULE="$BASE_DIR/backend/linux/modules/software/web_servers.sh"
+WEB_SERVERS_RUNNER="$BASE_DIR/backend/linux/discovery/web_servers.sh"
+
+SSH_KEY="${DSSA_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 KNOWN_HOSTS="$HOME/.ssh/known_hosts"
 
 # ---------------------------------------------------------
@@ -50,6 +54,10 @@ case "$operation" in
         ;;
 
     discovery.runtimes)
+        remote_command='bash -s'
+        ;;
+
+    discovery.web_servers)
         remote_command='bash -s'
         ;;
 
@@ -95,7 +103,8 @@ fi
 # ---------------------------------------------------------
 
 if [[ "$operation" == "discovery.package_manager" ||
-      "$operation" == "discovery.runtimes" ]]; then
+      "$operation" == "discovery.runtimes" ||
+      "$operation" == "discovery.web_servers" ]]; then
 
     case "$operation" in
         discovery.package_manager)
@@ -106,6 +115,11 @@ if [[ "$operation" == "discovery.package_manager" ||
         discovery.runtimes)
             module="$RUNTIMES_MODULE"
             runner="$RUNTIMES_RUNNER"
+            ;;
+
+        discovery.web_servers)
+            module="$WEB_SERVERS_MODULE"
+            runner="$WEB_SERVERS_RUNNER"
             ;;
     esac
 
@@ -294,6 +308,67 @@ case "$operation" in
             exit 5
         fi
         ;;
+    # -----------------------------------------------------
+    # Web server discovery
+    # -----------------------------------------------------
+    discovery.web_servers)
+        if ! jq -e '
+            type == "object"
+            and ((keys | sort) == ["web_servers"])
+            and (.web_servers | type == "object")
+            and (
+                (.web_servers | keys | sort) ==
+                (["nginx", "apache", "openlitespeed", "litespeed"] | sort)
+            )
+            and (
+                [.web_servers[] |
+                    (
+                        type == "object"
+                        and ((keys | sort) == ([
+                            "available",
+                            "path",
+                            "version",
+                            "service_name",
+                            "service_state",
+                            "detection_status"
+                        ] | sort))
+                        and (.available | type == "boolean")
+                        and (
+                            if .available then
+                                (.path | type == "string" and length > 0)
+                                and .detection_status == "detected"
+                            else
+                                .path == null
+                                and .version == null
+                                and .detection_status != "detected"
+                            end
+                        )
+                        and (
+                            .version == null or
+                            (.version | type == "string" and length > 0)
+                        )
+                        and (
+                            .service_name == null or
+                            (.service_name | type == "string" and length > 0)
+                        )
+                        and (
+                            .service_state |
+                            IN("active", "inactive", "failed", "unknown")
+                        )
+                        and (
+                            .detection_status |
+                            IN("detected", "absent", "unidentified")
+                        )
+                    )
+                ] | all
+            )
+        ' <<< "$output" >/dev/null 2>&1; then
+
+            echo "ERROR: Invalid remote web server discovery response" >&2
+            exit 5
+        fi
+        ;;
+
 esac
 
 # ---------------------------------------------------------

@@ -6,8 +6,8 @@
 - [x] Define initial scope
 - [x] Define V1 requirements
 - [x] Define supported platform
-- [ ] Create Git repository
-- [ ] Create initial documentation
+- [x] Create Git repository
+- [x] Create initial documentation
 
 ## Milestone 1 — Connection & Discovery
 
@@ -73,3 +73,46 @@ Implement and test supported components individually.
 - [ ] LinkedIn project write-up
 - [ ] External review
 - [ ] Technical viva
+
+## Backend Integration Checkpoint — 2026-10-19
+
+### Architecture
+
+Python coordinates requests and presents results.
+The central Linux Bash backend owns SSH and privileged execution.
+Destination servers use agentless SSH.
+
+### Completed
+
+- Web-server discovery collectors and response validation.
+- Live web-server discovery passed on all six lab distributions.
+- Backend SSH key selection through DSSA_SSH_KEY.
+- Separate six-server lab inventory.
+- Python bridge CLI for the Nginx workflow.
+- Ubuntu 24.04 Nginx installer with platform, panel and port checks.
+- Existing-package handling avoids repeated package installation.
+- Nginx configuration validation and active-service verification.
+- Installation start and outcome audit events with a shared request ID.
+- Installer SHA256 recorded in installation audit events.
+- 47 backend tests passed before installation audit integration.
+- Integrated CLI and successful installation audit path verified live.
+- Bounded local HTTP readiness check passed with HTTP 200 on Ubuntu 24.
+
+### Current Limits
+
+- Fresh Nginx installation branch exists but is not yet verified live.
+- Installation currently supports Ubuntu 24.04 only.
+- Confirmation is interactive through the lab runner.
+- Python plan-bound approval is not yet enforced by the install runner.
+- Installation uses a separate runner rather than the JSON dispatcher.
+- Remote jq is required for web-server discovery.
+- LiteSpeed edition identification currently uses Debian package metadata.
+- Failed installation may leave partial changes; automatic rollback is absent.
+- HTTP readiness checks the local default endpoint only; external reachability and application-specific health are not verified.
+
+### Working Process
+
+Develop one operational capability at a time.
+Explain file responsibilities before creating or modifying files.
+Use proportionate verification and record unverified behaviour.
+Snapshots and VM resets are not routine requirements.

@@ -281,5 +281,103 @@ class SSHTransportTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 5)
 
+    def valid_web_server_response(self):
+        """Return a valid web server discovery response for testing."""
+        def absent():
+            return {
+                "available": False,
+                "path": None,
+                "version": None,
+                "service_name": None,
+                "service_state": "unknown",
+                "detection_status": "absent",
+            }
+
+        return {
+            "web_servers": {
+                "nginx": {
+                    "available": True,
+                    "path": "/usr/sbin/nginx",
+                    "version": "nginx version: nginx/1.24.0",
+                    "service_name": "nginx.service",
+                    "service_state": "active",
+                    "detection_status": "detected",
+                },
+                "apache": absent(),
+                "openlitespeed": absent(),
+                "litespeed": absent(),
+            }
+        }
+
+    def test_web_server_discovery(self):
+        """Valid web server discovery must pass SSH validation."""
+        self.set_mock_response(self.valid_web_server_response())
+
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.web_servers",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        data = json.loads(result.stdout)
+        servers = data["web_servers"]
+
+        self.assertEqual(
+            set(servers),
+            {"nginx", "apache", "openlitespeed", "litespeed"},
+        )
+        self.assertTrue(servers["nginx"]["available"])
+        self.assertEqual(servers["nginx"]["service_state"], "active")
+        self.assertFalse(servers["apache"]["available"])
+
+        args = self.capture.read_text().splitlines()
+        self.assertIn("StrictHostKeyChecking=yes", args)
+        self.assertIn("BatchMode=yes", args)
+        self.assertIn("bash -s", args)
+
+    def test_web_server_rejects_invalid_json(self):
+        """Malformed remote JSON must be rejected."""
+        self.set_mock_response('{"web_servers":')
+
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.web_servers",
+        )
+
+        self.assertEqual(result.returncode, 5)
+
+    def test_web_server_rejects_missing_field(self):
+        """Missing required discovery fields must be rejected."""
+        response = self.valid_web_server_response()
+        del response["web_servers"]["nginx"]["service_state"]
+
+        self.set_mock_response(response)
+
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.web_servers",
+        )
+
+        self.assertEqual(result.returncode, 5)
+
+    def test_web_server_rejects_inconsistent_detection(self):
+        """Unavailable software cannot have detected status."""
+        response = self.valid_web_server_response()
+
+        response["web_servers"]["nginx"]["available"] = False
+        response["web_servers"]["nginx"]["path"] = None
+        response["web_servers"]["nginx"]["version"] = None
+
+        # Deliberately leave detection_status as "detected".
+        self.set_mock_response(response)
+
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.web_servers",
+        )
+
+        self.assertEqual(result.returncode, 5)
+
 if __name__ == "__main__":
     unittest.main()
