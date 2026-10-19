@@ -118,3 +118,17 @@ Develop one operational capability at a time.
 Explain file responsibilities before creating or modifying files.
 Use proportionate verification and record unverified behaviour.
 Snapshots and VM resets are not routine requirements.
+
+## Bash Foundation Refactor — 2026-10-19
+
+- Bash owns environment detection and component coordination.
+- Python remains the request and presentation bridge.
+- Shared package functions select apt or dnf and check package presence.
+- Package-changing functions are separated from discovery.
+- Nginx installation and read-only verification are separate functions.
+- The coordinator validates component selections before execution.
+- Existing Nginx packages are skipped without changing service state.
+- Integrated Ubuntu 24 existing-package path passed.
+- Multi-component selection, backend planning and approval enforcement
+  remain pending.
+- Fresh-installation and dnf execution paths remain unverified.

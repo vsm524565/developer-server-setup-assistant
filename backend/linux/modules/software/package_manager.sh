@@ -23,8 +23,39 @@ detect_package_manager() {
               }
         '
 }
+# Select an installation method with its matching package database.
+select_package_manager() {
+    if command -v apt-get >/dev/null 2>&1 &&
+       command -v dpkg-query >/dev/null 2>&1; then
+        printf '%s\n' "apt"
+    elif command -v dnf >/dev/null 2>&1 &&
+         command -v rpm >/dev/null 2>&1; then
+        printf '%s\n' "dnf"
+    else
+        echo "ERROR: No supported package manager found." >&2
+        return 1
+    fi
+}
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    set -euo pipefail
-    detect_package_manager
-fi
+# Distinguish installed packages from merely available executables.
+package_is_installed() {
+    local manager="$1"
+    local package="$2"
+    local status
+
+    case "$manager" in
+        apt)
+            status="$(
+                dpkg-query -W -f='${Status}' "$package" 2>/dev/null
+            )" || return 1
+
+            [[ "$status" == "install ok installed" ]]
+            ;;
+        dnf)
+            rpm -q -- "$package" >/dev/null 2>&1
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+}

@@ -17,7 +17,7 @@ def main():
 
     try:
         print(
-            f"\nChecking platform compatibility on {args.target}...",
+            f"\nDiscovering platform on {args.target}...",
             flush=True,
         )
         system = backend.discover_system(args.target)
@@ -27,12 +27,6 @@ def main():
 
         print(f"Detected platform: {os_id} {os_version}")
 
-        if os_id != "ubuntu" or os_version != "24.04":
-            print(
-                "Installation blocked: the current Nginx installer "
-                "supports Ubuntu 24.04 only. No installation was attempted."
-            )
-            return 1
         print(f"\nDiscovering web servers on {args.target}...", flush=True)
         servers = backend.discover_web_servers(args.target)
         nginx = servers["nginx"]
@@ -42,9 +36,12 @@ def main():
         print("Component: nginx")
 
         if nginx["available"]:
-            print("Action: validate configuration and ensure service is active")
+            print(
+                "Action: backend checks package presence; "
+                "skip if installed"
+            )
         else:
-            print("Action: install Nginx and start its service")
+            print("Action: install Nginx if its package is missing")
 
         print(
             "The backend will check platform and installation constraints "
@@ -53,6 +50,14 @@ def main():
         )
 
         backend.install_nginx(args.target)
+        if nginx["available"]:
+            print("\nStatus: COMPLETED")
+            print(
+                "Backend completed successfully. "
+                "See its package action above; existing packages "
+                "are left unchanged."
+            )
+            return 0
 
         print("\nVerifying through backend discovery...", flush=True)
         verified = backend.discover_web_servers(args.target)["nginx"]

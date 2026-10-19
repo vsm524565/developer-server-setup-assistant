@@ -27,31 +27,37 @@ The frontend does not execute system commands.
 ## Python Bridge
 
 Responsibilities:
-- API request and response processing
-- Data validation and normalization
-- Dependency planning
-- Installation decision preparation
-- Approval workflow coordination
-- Application-specific business logic
+- Accept component selections and operator input
+- Validate request structure
+- Invoke the Bash backend through the local JSON interface
+- Present backend-generated plans for review
+- Return approval responses to the backend
+- Display results and audit information
 
 Restrictions:
-- No destination SSH connections
-- No destination SSH credentials
+- No destination SSH connections or credentials
 - No direct destination-server commands
+- No duplicated dependency, compatibility or installation rules
 
 ## Central Linux Bash Backend
 
 Responsibilities:
-- Resolve approved target identifiers
-- Manage SSH connectivity
-- Perform Linux system discovery
-- Verify installed components
-- Execute explicitly permitted operations
-- Record backend operational and security events
+- Resolve targets and manage SSH credentials
+- Verify connectivity, server identity and sudo access
+- Discover OS, package manager, panels, components and ports
+- Resolve component dependencies and installation conflicts
+- Generate installation plans
+- Validate approval against the operation context
+- Install missing components through allowed package methods
+- Verify results without changing existing services implicitly
+- Record operational and security events
 
-The backend runs on a management host.
-
-Destination servers do not require permanent agents.
+Implementation:
+- Shared functions provide reusable discovery and package operations.
+- Component functions contain application-specific steps.
+- An operation coordinator processes selected components.
+- Discovery and verification remain read-only.
+- Package installation failures do not trigger another package manager.
 
 ## Communication
 

@@ -3,10 +3,14 @@ set -euo pipefail
 umask 077
 
 BASE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
-INSTALLER="$BASE_DIR/backend/linux/modules/install/nginx_ubuntu24.sh"
+INSTALLER="$BASE_DIR/backend/linux/modules/install/nginx.sh"
+PACKAGE_MODULE="$BASE_DIR/backend/linux/modules/software/package_manager.sh"
+PACKAGE_ACTIONS="$BASE_DIR/backend/linux/modules/install/package_manager.sh"
 INVENTORY="$BASE_DIR/backend/linux/connection/inventory.sh"
 SSH_KEY="${DSSA_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 KNOWN_HOSTS="$HOME/.ssh/known_hosts"
+NGINX_VERIFICATION="$BASE_DIR/backend/linux/verification/nginx.sh"
+SETUP_MODULE="$BASE_DIR/backend/linux/operations/setup.sh"
 
 AUDIT_SCRIPT="$BASE_DIR/backend/linux/logging/audit.sh"
 request_id="install-$(cat /proc/sys/kernel/random/uuid)"
@@ -68,11 +72,27 @@ bash -n "$INSTALLER"
 
 # Encode the fixed installer for safe transport as a command argument.
 # No credentials are included in this payload.
-payload="$(base64 < "$INSTALLER" | tr -d '\n')"
-digest="$(sha256sum "$INSTALLER" | awk '{print $1}')"
+# Include shared package functions before the installation steps.
+bundle="$(
+    cat "$PACKAGE_MODULE"
+    printf '\n'
+    cat "$PACKAGE_ACTIONS"
+    printf '\n'
+    cat "$NGINX_VERIFICATION"
+    printf '\n'
+    cat "$INSTALLER"
+    printf '\n'
+    cat "$SETUP_MODULE"
+    printf '\n'
+    printf '%s\n' 'setup_selected_services nginx'
+)"
+
+bash -n <<< "$bundle"
+payload="$(printf '%s\n' "$bundle" | base64 | tr -d '\n')"
+digest="$(printf '%s\n' "$bundle" | sha256sum | awk '{print $1}')"
 
 printf '\nTarget: %s (%s@%s:%s)\n' "$target" "$user" "$host" "$port"
-printf 'Operation: install and start Nginx on Ubuntu 24.04\n'
+printf 'Operation: install and start Nginx using apt or dnf\n'
 printf 'Installer SHA256: %s\n' "$digest"
 printf 'Type INSTALL %s to proceed: ' "$target" > /dev/tty
 IFS= read -r confirmation < /dev/tty
