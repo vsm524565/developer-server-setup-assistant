@@ -60,6 +60,18 @@ done
     local manager
     manager="$(select_package_manager)" || exit 1
     printf 'Selected package manager: %s\n' "$manager" >&2
+    declare -F discover_panels >/dev/null || {
+    echo "ERROR: Panel discovery function is missing." >&2
+    exit 3
+}
+local panel_facts
+
+panel_facts="$(discover_panels)" || {
+    echo "ERROR: Panel discovery failed." >&2
+    exit 1
+}
+
+printf 'Panel discovery: %s\n' "$panel_facts" >&2
 
     # Stop on failure until dependency-aware continuation is implemented.
     for component in "$@"; do
@@ -67,7 +79,7 @@ done
 
         case "$component" in
             nginx)
-                install_nginx "$manager"
+                install_nginx "$manager" "$panel_facts"
                 ;;
             git)
                 install_git "$manager"

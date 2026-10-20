@@ -18,6 +18,7 @@ fail() {
 [[ "$EUID" -eq 0 ]] || fail "Root privileges are required."
 
 local manager="${1:?Package manager is required}"
+local panel_facts="${2:?Panel discovery result is required}"
 
 # Shared functions must be supplied by the backend execution bundle.
 for function_name in \
@@ -25,12 +26,12 @@ for function_name in \
     refresh_package_metadata \
     install_package \
     verify_nginx_configuration \
+    discover_ports \
     verify_nginx_readiness
 do
     declare -F "$function_name" >/dev/null ||
         fail "Missing shared function: $function_name"
 done
-
 
 # Skip existing packages without changing configuration or service state.
 if package_is_installed "$manager" nginx; then
@@ -39,23 +40,19 @@ if package_is_installed "$manager" nginx; then
     exit 0
 fi
 
+# Conservative policy for installing missing Nginx on panel-managed hosts.
+if ! jq -e '
+    type == "object"
+    and (.panels | type == "array")
+    and (.panels | length == 0)
+' <<< "$panel_facts" >/dev/null; then
+    fail "Panel evidence found or invalid discovery data; Nginx installation requires review."
+fi
+
 # Verify tools needed for installation and readiness checks.
 for tool in systemctl ss awk grep timeout; do
     command -v "$tool" >/dev/null 2>&1 ||
         fail "Missing prerequisite: $tool"
-done
-
-# Avoid modifying known panel-managed environments.
-for panel_path in \
-    /www/server/panel \
-    /usr/local/CyberCP \
-    /usr/local/hestia \
-    /usr/local/cpanel \
-    /usr/local/directadmin \
-    /usr/local/psa
-do
-    [[ ! -e "$panel_path" ]] ||
-        fail "Control-panel evidence found: $panel_path"
 done
 
 # Avoid overwriting an installation outside the package database.
@@ -65,12 +62,21 @@ if command -v nginx >/dev/null 2>&1 ||
 fi
 
 # Package installation may start Nginx automatically.
-listeners="$(ss -H -ltn)" ||
-    fail "Unable to inspect listening TCP ports."
+local port_facts
 
-if awk '{print $4}' <<< "$listeners" |
-   grep -Eq ':(80|443)$'; then
-    fail "TCP port 80 or 443 is already listening."
+port_facts="$(discover_ports)" ||
+    fail "Port discovery failed."
+
+if ! jq -e '
+    type == "object"
+    and (.listening_tcp_ports | type == "array")
+    and all(.listening_tcp_ports[]; type == "number")
+    and (
+        [.listening_tcp_ports[] | select(. == 80 or . == 443)]
+        | length == 0
+    )
+' <<< "$port_facts" >/dev/null; then
+    fail "TCP port 80 or 443 is occupied, or port discovery data is invalid."
 fi
 
 # Install using the selected method; do not try another on failure.

@@ -144,3 +144,12 @@ Snapshots and VM resets are not routine requirements.
 - Runner renamed to setup-components.sh.
 - Failure propagation regression coverage remains pending.
 - Fresh-installation and dnf execution paths remain unverified.
+## Shared Discovery Integration — 2026-10-20
+
+- Added reusable, read-only panel and TCP-port discovery functions.
+- Coordinator collects panel facts once and passes them to Nginx.
+- Nginx uses shared discovery instead of duplicated panel-path checks.
+- Port facts are refreshed before installing missing Nginx.
+- Ubuntu 24 Nginx/Git existing-package workflow passed.
+- Port-conflict and panel-policy rejection paths remain unverified.
+- Observed coordinator failure propagated through SSH to the Python CLI.

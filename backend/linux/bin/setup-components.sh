@@ -13,6 +13,8 @@ NGINX_VERIFICATION="$BASE_DIR/backend/linux/verification/nginx.sh"
 SETUP_MODULE="$BASE_DIR/backend/linux/operations/setup.sh"
 GIT_INSTALLER="$BASE_DIR/backend/linux/modules/install/git.sh"
 GIT_VERIFICATION="$BASE_DIR/backend/linux/verification/git.sh"
+PANEL_DISCOVERY="$BASE_DIR/backend/linux/discovery/panel.sh"
+PORT_DISCOVERY="$BASE_DIR/backend/linux/discovery/ports.sh"
 
 AUDIT_SCRIPT="$BASE_DIR/backend/linux/logging/audit.sh"
 request_id="install-$(cat /proc/sys/kernel/random/uuid)"
@@ -117,6 +119,12 @@ bundle="$(
     cat "$GIT_VERIFICATION"
     printf '\n'
     cat "$GIT_INSTALLER"
+    printf '\n'
+
+    cat "$PANEL_DISCOVERY"
+    printf '\n'
+
+    cat "$PORT_DISCOVERY"
     printf '\n'
 
     cat "$SETUP_MODULE"
