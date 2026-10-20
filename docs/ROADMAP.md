@@ -165,3 +165,6 @@ Snapshots and VM resets are not routine requirements.
 - Apply confirmation still occurs before remote plan generation.
 - Execution still uses the selection loop rather than consuming plan steps.
 - Binding execution to a reviewed plan remains pending.
+- Execution now consumes generated plan steps rather than raw selections.
+- Duplicate-selection live check passed: Nginx and Git each processed once.
+- SKIP actions bypass installers and leave service state unchanged.

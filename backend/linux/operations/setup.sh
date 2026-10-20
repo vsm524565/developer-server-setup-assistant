@@ -106,17 +106,52 @@ printf 'Panel discovery: %s\n' "$panel_facts" >&2
         echo "ERROR: Plan requires review; no components were changed." >&2
         exit 4
     fi
-    # Stop on failure until dependency-aware continuation is implemented.
-    for component in "$@"; do
-        printf '\nProcessing component: %s\n' "$component" >&2
+    # Materialize plan steps before execution so parsing failures are caught.
+    local plan_steps action
 
-        case "$component" in
-            nginx)
-                install_nginx "$manager" "$panel_facts"
+    plan_steps="$(
+        jq -er '
+            .steps
+            | .[]
+            | [.component, .action]
+            | @tsv
+        ' <<< "$plan"
+    )" || {
+        echo "ERROR: Unable to read execution plan." >&2
+        exit 3
+    }
+
+    # Execute the deduplicated plan in its generated order.
+    while IFS=$'\t' read -r component action; do
+        printf '\nComponent: %s | Action: %s\n' \
+            "$component" "$action" >&2
+
+        case "$action" in
+            SKIP)
+                printf 'RESULT: component=%s package_action=skipped service_action=unchanged\n' \
+                    "$component"
                 ;;
-            git)
-                install_git "$manager"
+
+            INSTALL)
+                case "$component" in
+                    nginx)
+                        install_nginx "$manager" "$panel_facts"
+                        ;;
+                    git)
+                        install_git "$manager"
+                        ;;
+                    *)
+                        echo "ERROR: Unsupported installation component." >&2
+                        exit 3
+                        ;;
+                esac
+                ;;
+
+            *)
+                printf 'ERROR: Plan action is not executable: %s\n' \
+                    "$action" >&2
+                exit 4
                 ;;
         esac
-    done
+    done <<< "$plan_steps"
 )
