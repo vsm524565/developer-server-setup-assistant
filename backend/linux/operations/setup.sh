@@ -106,6 +106,24 @@ printf 'Panel discovery: %s\n' "$panel_facts" >&2
         echo "ERROR: Plan requires review; no components were changed." >&2
         exit 4
     fi
+
+    # Confirm the displayed plan before executing any component action.
+    local confirmation
+
+    printf '\nReview the component plan above.\n' >&2
+    printf 'Type APPLY to execute this plan, or anything else to cancel: ' \
+        > /dev/tty
+
+    if ! IFS= read -r confirmation < /dev/tty; then
+        echo "ERROR: Could not read confirmation; no changes attempted." >&2
+        exit 2
+    fi
+
+    if [[ "$confirmation" != "APPLY" ]]; then
+        echo "Setup cancelled; no component changes attempted." >&2
+        exit 2
+    fi
+
     # Materialize plan steps before execution so parsing failures are caught.
     local plan_steps action
 

@@ -161,22 +161,18 @@ payload="$(printf '%s\n' "$bundle" | base64 | tr -d '\n')"
 digest="$(printf '%s\n' "$bundle" | sha256sum | awk '{print $1}')"
 
 if [[ "$mode" == "apply" ]]; then
-    printf '\nTarget: %s (%s@%s:%s)\n' "$target" "$user" "$host" "$port"
-    printf 'Operation: install missing selected components\n'
+    printf '\nTarget: %s (%s@%s:%s)\n' \
+        "$target" "$user" "$host" "$port"
     printf 'Selected components: %s\n' "${components[*]}"
-    printf 'Installer SHA256: %s\n' "$digest"
-    printf 'Type INSTALL %s to proceed: ' "$target" > /dev/tty
-    IFS= read -r confirmation < /dev/tty
+    printf 'Execution bundle SHA256: %s\n' "$digest"
 
-    if [[ "$confirmation" != "INSTALL $target" ]]; then
-        if ! record_install_event "setup.cancelled" "cancelled" 2; then
-            echo "ERROR: Could not record setup cancellation." >&2
-            exit 3
-        fi
-
-        echo "Setup cancelled."
-        exit 2
+    if [[ "$mode" == "plan" ]]; then
+        printf 'Plan-only mode: no installation will be attempted.\n' >&2
+    else
+        printf 'The backend will display the plan before requesting approval.\n' >&2
     fi
+
+
 else
     printf 'Plan-only mode: no installation will be attempted.\n' >&2
 fi
