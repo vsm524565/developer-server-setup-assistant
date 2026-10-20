@@ -34,18 +34,30 @@ def main():
             flush=True,
         )
 
-        backend.setup_components(
+        response = backend.setup_components(
             args.target,
             args.component,
             plan_only=args.plan,
         )
 
         if args.plan:
-            print("\nStatus: PLAN_GENERATED")
-            print("No installation was attempted; review plan eligibility above.")
+            print("\n=== PLAN SUMMARY ===")
+            print(f"Eligible: {response['eligible']}")
+
+            for step in response["steps"]:
+                print(f"{step['component']}: {step['action']}")
+
+            print("No installation was attempted.")
         else:
-            print("\nStatus: COMPLETED")
-            print("See the backend output above for each component's result.")
+            print("\n=== SETUP SUMMARY ===")
+
+            for result in response["results"]:
+                print(
+                    f"{result['component']}: "
+                    f"{result['package_action']} | "
+                    f"verification={result['verification']}"
+                )
+
         return 0
 
     except subprocess.TimeoutExpired:

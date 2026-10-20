@@ -190,3 +190,13 @@ Snapshots and VM resets are not routine requirements.
 - Skipped components report verification as not_run.
 - Ubuntu 24 two-component aggregation passed live.
 - Structured failure responses and Python parsing remain pending.
+
+## Python Bridge Response Parsing — 2026-10-20
+
+- Backend emits a compact DSSA_RESPONSE JSON frame.
+- Machine-readable output explicitly disables jq colours.
+- Python streams terminal output and parses the response frame.
+- Backend exit status is checked before accepting a response.
+- Response component order is checked against deduplicated selections.
+- Plan-only and approved setup summaries passed on Ubuntu 24.
+- Structured failure and partial-result responses remain pending.

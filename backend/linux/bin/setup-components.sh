@@ -143,18 +143,20 @@ bundle="$(
     cat "$SETUP_MODULE"
     printf '\n'
 
-    # Execute only after all functions have been defined.
-    printf '%s' 'setup_selected_services'
+    # Capture structured stdout; progress and prompts remain interactive.
+    printf '%s' 'response="$(setup_selected_services'
 
     if [[ "$mode" == "plan" ]]; then
         printf ' %q' '--plan'
     fi
 
     printf ' %q' "${components[@]}"
-    printf '\n'
+    printf '%s\n' ')"'
 
-    # Preserve the coordinator outcome as the remote process exit status.
-    printf '%s\n' 'exit "$?"'
+    printf '%s\n' \
+        'jq -e -s '\''length == 1 and (.[0] | type == "object")'\'' <<< "$response" >/dev/null' \
+        'printf "DSSA_RESPONSE: "' \
+        'jq -M -c . <<< "$response"'
 )"
 bash -n <<< "$bundle"
 payload="$(printf '%s\n' "$bundle" | base64 | tr -d '\n')"

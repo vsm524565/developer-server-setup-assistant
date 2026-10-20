@@ -4,6 +4,7 @@ import json
 import subprocess
 import uuid
 from pathlib import Path
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -92,12 +93,109 @@ class LinuxBackend:
             command.append("--plan")
 
         command.extend([target_id, *components])
+        # Inherit terminal input; read output as bytes to preserve CR/LF.
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
 
-        result = subprocess.run(command)
+        frames = []
+        line = b""
+        oversized_line = False
+        previous = b""
+        prefix = b"DSSA_RESPONSE: "
 
-        if result.returncode != 0:
+        try:
+            while True:
+                character = process.stdout.read(1)
+
+                if not character:
+                    break
+
+                # Preserve remote CR/LF and complete standalone newlines.
+                if character == b"\n" and previous != b"\r":
+                    sys.stdout.buffer.write(b"\r")
+
+                sys.stdout.buffer.write(character)
+                sys.stdout.buffer.flush()
+                previous = character
+
+                if character == b"\n":
+                    complete_line = line.rstrip(b"\r")
+
+                    if complete_line.startswith(prefix):
+                        frames.append(complete_line[len(prefix):])
+
+                    line = b""
+                elif len(line) < 1048576:
+                    line += character
+                else:
+                    oversized_line = True
+
+            complete_line = line.rstrip(b"\r")
+            if complete_line.startswith(prefix):
+                frames.append(complete_line[len(prefix):])
+
+            exit_code = process.wait()
+
+        except KeyboardInterrupt:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise
+        finally:
+            process.stdout.close()
+
+        # A response frame never overrides a failed backend exit.
+        if exit_code != 0:
             raise RuntimeError(
-                f"Backend setup did not complete successfully "
-                f"(exit {result.returncode}). "
-                "Inspect the backend output before retrying."
+                f"Backend setup failed (exit {exit_code}). "
+                "Remote changes may be partial; inspect the output."
             )
+
+        if oversized_line or len(frames) != 1:
+            raise RuntimeError(
+                "Expected exactly one bounded backend response frame."
+            )
+
+        try:
+            response = json.loads(frames[0])
+        except (ValueError, UnicodeDecodeError) as error:
+            raise RuntimeError(
+                f"Backend response contains invalid JSON: {error}"
+            ) from error
+
+        if (
+            not isinstance(response, dict)
+            or response.get("schema_version") != "1.0"
+        ):
+            raise RuntimeError("Unsupported backend response structure.")
+
+        if plan_only:
+            records = response.get("steps")
+            if type(response.get("eligible")) is not bool:
+                raise RuntimeError("Backend plan eligibility is invalid.")
+        else:
+            records = response.get("results")
+            if response.get("status") != "success":
+                raise RuntimeError("Backend did not report successful setup.")
+
+        if (
+            not isinstance(records, list)
+            or not all(isinstance(record, dict) for record in records)
+        ):
+            raise RuntimeError("Backend component records are invalid.")
+
+        expected = list(dict.fromkeys(components))
+        actual = [record.get("component") for record in records]
+
+        if actual != expected:
+            raise RuntimeError(
+                "Backend response components do not match the selections."
+            )
+
+        return response
