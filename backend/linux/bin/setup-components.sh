@@ -11,6 +11,8 @@ SSH_KEY="${DSSA_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 KNOWN_HOSTS="$HOME/.ssh/known_hosts"
 NGINX_VERIFICATION="$BASE_DIR/backend/linux/verification/nginx.sh"
 SETUP_MODULE="$BASE_DIR/backend/linux/operations/setup.sh"
+GIT_INSTALLER="$BASE_DIR/backend/linux/modules/install/git.sh"
+GIT_VERIFICATION="$BASE_DIR/backend/linux/verification/git.sh"
 
 AUDIT_SCRIPT="$BASE_DIR/backend/linux/logging/audit.sh"
 request_id="install-$(cat /proc/sys/kernel/random/uuid)"
@@ -28,28 +30,54 @@ record_install_event() {
         --arg status "$status" \
         --arg digest "$digest" \
         --argjson exit_code "$exit_code" \
+        --argjson components "$components_json" \
         '{
             schema_version: "1.0",
             request_id: $request_id,
             source: "linux-backend",
             event: $event,
-            operation: "install.nginx",
+            operation: "setup.components",
             target_id: $target,
             status: $status,
             exit_code: $exit_code,
             details: {
-                installer_sha256: $digest
+                installer_sha256: $digest,
+                components: $components
             }
         }' | "$AUDIT_SCRIPT"
 }
 
-[[ $# -eq 1 ]] || {
-    echo "Usage: install-nginx-lab.sh TARGET_ID" >&2
+[[ $# -ge 2 ]] || {
+    echo "Usage: setup-components.sh TARGET_ID COMPONENT..." >&2
     exit 2
 }
 
 target="$1"
-target_json="$("$INVENTORY" "$target")"
+shift
+components=("$@")
+
+# Validate every selection before resolving the target or connecting.
+for component in "${components[@]}"; do
+    case "$component" in
+        nginx|git) ;;
+        *)
+            printf 'ERROR: Unsupported component: %s\n' "$component" >&2
+            exit 2
+            ;;
+    esac
+done
+
+components_json="$(
+    printf '%s\n' "${components[@]}" |
+        jq -R -s 'split("\n") | map(select(length > 0))'
+)"
+
+if ! target_json="$("$INVENTORY" "$target" 2>/dev/null)"; then
+    printf 'ERROR: Target "%s" could not be resolved from the selected inventory.\n' \
+        "$target" >&2
+    echo "Check the inventory path, permissions and target enabled status." >&2
+    exit 3
+fi
 
 host="$(jq -er '.host' <<< "$target_json")"
 port="$(jq -er '.ssh_port' <<< "$target_json")"
@@ -74,17 +102,33 @@ bash -n "$INSTALLER"
 # No credentials are included in this payload.
 # Include shared package functions before the installation steps.
 bundle="$(
+    printf '%s\n' 'set -euo pipefail'
+
     cat "$PACKAGE_MODULE"
     printf '\n'
     cat "$PACKAGE_ACTIONS"
     printf '\n'
+
     cat "$NGINX_VERIFICATION"
     printf '\n'
     cat "$INSTALLER"
     printf '\n'
+
+    cat "$GIT_VERIFICATION"
+    printf '\n'
+    cat "$GIT_INSTALLER"
+    printf '\n'
+
     cat "$SETUP_MODULE"
     printf '\n'
-    printf '%s\n' 'setup_selected_services nginx'
+
+    # Execute only after all functions have been defined.
+    printf '%s' 'setup_selected_services'
+    printf ' %q' "${components[@]}"
+    printf '\n'
+
+    # Preserve the coordinator outcome as the remote process exit status.
+    printf '%s\n' 'exit "$?"'
 )"
 
 bash -n <<< "$bundle"
@@ -92,7 +136,8 @@ payload="$(printf '%s\n' "$bundle" | base64 | tr -d '\n')"
 digest="$(printf '%s\n' "$bundle" | sha256sum | awk '{print $1}')"
 
 printf '\nTarget: %s (%s@%s:%s)\n' "$target" "$user" "$host" "$port"
-printf 'Operation: install and start Nginx using apt or dnf\n'
+printf 'Operation: install missing selected components\n'
+printf 'Selected components: %s\n' "${components[*]}"
 printf 'Installer SHA256: %s\n' "$digest"
 printf 'Type INSTALL %s to proceed: ' "$target" > /dev/tty
 IFS= read -r confirmation < /dev/tty

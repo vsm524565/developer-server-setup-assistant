@@ -73,18 +73,28 @@ class LinuxBackend:
 
         return servers
 
-    def install_nginx(self, target_id):
-        """Run the fixed backend installer with terminal prompts intact."""
+    def setup_components(self, target_id, components):
+        """Pass component selections to the authoritative Bash backend."""
+        if not isinstance(components, list) or not components:
+            raise ValueError("Select at least one component.")
+
+        if any(
+            not isinstance(component, str) or not component.strip()
+            for component in components
+        ):
+            raise ValueError("Component selections must be nonempty strings.")
+
         result = subprocess.run(
             [
-                str(ROOT / "backend/linux/bin/install-nginx-lab.sh"),
+                str(ROOT / "backend/linux/bin/setup-components.sh"),
                 target_id,
+                *components,
             ],
         )
 
         if result.returncode != 0:
             raise RuntimeError(
-                f"Installation did not complete successfully "
+                f"Backend setup did not complete successfully "
                 f"(exit {result.returncode}). "
                 "Inspect the backend output before retrying."
             )

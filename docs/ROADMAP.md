@@ -129,6 +129,18 @@ Snapshots and VM resets are not routine requirements.
 - The coordinator validates component selections before execution.
 - Existing Nginx packages are skipped without changing service state.
 - Integrated Ubuntu 24 existing-package path passed.
-- Multi-component selection, backend planning and approval enforcement
-  remain pending.
+- Multi-component selection, backend planning and approval enforcement remain pending.
+- Fresh-installation and dnf execution paths remain unverified.
+## Multi-Component Setup — 2026-10-20
+
+- Python passes component selections to the Bash backend.
+- Bash validates all selections before connecting.
+- The coordinator currently supports Nginx and Git.
+- Required component functions are checked before processing.
+- All module definitions are bundled before coordinator execution.
+- Ubuntu 24 multi-component existing-package path passed.
+- Installed packages are skipped without changing service state.
+- Inventory lookup failures return a clear message and exit code 3.
+- Runner renamed to setup-components.sh.
+- Failure propagation regression coverage remains pending.
 - Fresh-installation and dnf execution paths remain unverified.

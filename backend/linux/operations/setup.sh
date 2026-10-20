@@ -17,7 +17,7 @@ setup_selected_services() (
     # Validate all selections before making any changes.
     for component in "$@"; do
         case "$component" in
-            nginx) ;;
+            nginx|git) ;;
             *)
                 printf 'ERROR: Unsupported component: %s\n' \
                     "$component" >&2
@@ -25,7 +25,29 @@ setup_selected_services() (
                 ;;
         esac
     done
+# Reject incomplete bundles before processing any component.
+for component in "$@"; do
+    case "$component" in
+        nginx)
+            required_functions=(
+                install_nginx
+                verify_nginx_configuration
+                verify_nginx_readiness
+            )
+            ;;
+        git)
+            required_functions=(install_git verify_git)
+            ;;
+    esac
 
+    for function_name in "${required_functions[@]}"; do
+        declare -F "$function_name" >/dev/null || {
+            printf 'ERROR: Missing backend function: %s\n' \
+                "$function_name" >&2
+            exit 3
+        }
+    done
+done
     [[ -r /etc/os-release ]] || {
         echo "ERROR: Operating-system information unavailable." >&2
         exit 1
@@ -46,6 +68,9 @@ setup_selected_services() (
         case "$component" in
             nginx)
                 install_nginx "$manager"
+                ;;
+            git)
+                install_git "$manager"
                 ;;
         esac
     done

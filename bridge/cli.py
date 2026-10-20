@@ -10,79 +10,35 @@ def main():
     """Discover, install through Bash, and verify Nginx."""
     parser = argparse.ArgumentParser(description="DSSA Linux setup")
     parser.add_argument("--target", required=True)
-    parser.add_argument("--component", required=True, choices=["nginx"])
+    parser.add_argument(
+        "--component",
+        required=True,
+        nargs="+",
+        help="Components to process, separated by spaces",
+    )
     args = parser.parse_args()
 
     backend = LinuxBackend()
 
     try:
+        print(f"\nTarget: {args.target}")
+        print(f"Selected components: {', '.join(args.component)}")
         print(
-            f"\nDiscovering platform on {args.target}...",
-            flush=True,
-        )
-        system = backend.discover_system(args.target)
-
-        os_id = system.get("os_id")
-        os_version = system.get("os_version")
-
-        print(f"Detected platform: {os_id} {os_version}")
-
-        print(f"\nDiscovering web servers on {args.target}...", flush=True)
-        servers = backend.discover_web_servers(args.target)
-        nginx = servers["nginx"]
-
-        print("\n=== PROPOSED ACTION ===")
-        print(f"Target: {args.target}")
-        print("Component: nginx")
-
-        if nginx["available"]:
-            print(
-                "Action: backend checks package presence; "
-                "skip if installed"
-            )
-        else:
-            print("Action: install Nginx if its package is missing")
-
-        print(
-            "The backend will check platform and installation constraints "
-            "and request confirmation.",
+            "The Bash backend will validate selections, discover the "
+            "environment and process the requested components.",
             flush=True,
         )
 
-        backend.install_nginx(args.target)
-        if nginx["available"]:
-            print("\nStatus: COMPLETED")
-            print(
-                "Backend completed successfully. "
-                "See its package action above; existing packages "
-                "are left unchanged."
-            )
-            return 0
+        backend.setup_components(args.target, args.component)
 
-        print("\nVerifying through backend discovery...", flush=True)
-        verified = backend.discover_web_servers(args.target)["nginx"]
-
-        if not (
-            verified["available"]
-            and verified["detection_status"] == "detected"
-            and verified["service_state"] == "active"
-        ):
-            raise RuntimeError(
-                f"Post-operation verification failed: {verified}"
-            )
-
-        print("\n=== RESULT ===")
-        print("Status: VERIFIED")
-        print(f"Path: {verified['path']}")
-        print(f"Version: {verified['version']}")
-        print(f"Service: {verified['service_name']}")
-        print(f"State: {verified['service_state']}")
+        print("\nStatus: COMPLETED")
+        print("See the backend output above for each component's result.")
         return 0
 
     except subprocess.TimeoutExpired:
         print("\nERROR: Discovery timed out.")
         return 1
-    except (RuntimeError, OSError, KeyError, TypeError) as error:
+    except (RuntimeError, OSError, KeyError, TypeError, ValueError) as error:
         print(f"\nERROR: {error}")
         return 1
     except KeyboardInterrupt:
