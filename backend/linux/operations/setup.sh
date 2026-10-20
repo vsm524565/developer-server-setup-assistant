@@ -3,6 +3,12 @@
 # Coordinate a fixed list of supported components.
 setup_selected_services() (
     set -euo pipefail
+    local mode="apply"
+
+    if [[ "${1:-}" == "--plan" ]]; then
+        mode="plan"
+        shift
+    fi
 
     [[ "$EUID" -eq 0 ]] || {
         echo "ERROR: Root privileges are required." >&2
@@ -72,7 +78,34 @@ panel_facts="$(discover_panels)" || {
 }
 
 printf 'Panel discovery: %s\n' "$panel_facts" >&2
+    local port_facts plan
 
+    port_facts="$(discover_ports)" || {
+        echo "ERROR: Port discovery failed." >&2
+        exit 1
+    }
+
+    plan="$(
+        build_component_plan \
+            "$manager" "$panel_facts" "$port_facts" "$@"
+    )" || {
+        echo "ERROR: Component planning failed." >&2
+        exit 1
+    }
+
+    # Plan-only mode returns JSON without executing component installers.
+    if [[ "$mode" == "plan" ]]; then
+        printf '%s\n' "$plan"
+        exit 0
+    fi
+
+    printf '\n=== COMPONENT PLAN ===\n' >&2
+    printf '%s\n' "$plan" >&2
+
+    if ! jq -e '.eligible == true' <<< "$plan" >/dev/null; then
+        echo "ERROR: Plan requires review; no components were changed." >&2
+        exit 4
+    fi
     # Stop on failure until dependency-aware continuation is implemented.
     for component in "$@"; do
         printf '\nProcessing component: %s\n' "$component" >&2

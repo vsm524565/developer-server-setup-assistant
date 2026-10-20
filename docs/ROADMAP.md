@@ -153,3 +153,15 @@ Snapshots and VM resets are not routine requirements.
 - Ubuntu 24 Nginx/Git existing-package workflow passed.
 - Port-conflict and panel-policy rejection paths remain unverified.
 - Observed coordinator failure propagated through SSH to the Python CLI.
+## Bash Component Planning — 2026-10-20
+
+- Bash generates per-component INSTALL, SKIP or REVIEW decisions.
+- Plans include package manager and decision reasons.
+- Duplicate selections are removed from generated plans.
+- Any REVIEW decision makes the whole plan ineligible.
+- Plan-only mode is available through the Python bridge.
+- Ubuntu 24 plan-only run returned two SKIP decisions.
+- Apply mode checks plan eligibility before processing components.
+- Apply confirmation still occurs before remote plan generation.
+- Execution still uses the selection loop rather than consuming plan steps.
+- Binding execution to a reviewed plan remains pending.

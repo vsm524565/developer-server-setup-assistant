@@ -15,6 +15,7 @@ GIT_INSTALLER="$BASE_DIR/backend/linux/modules/install/git.sh"
 GIT_VERIFICATION="$BASE_DIR/backend/linux/verification/git.sh"
 PANEL_DISCOVERY="$BASE_DIR/backend/linux/discovery/panel.sh"
 PORT_DISCOVERY="$BASE_DIR/backend/linux/discovery/ports.sh"
+PLANNING_MODULE="$BASE_DIR/backend/linux/planning/components.sh"
 
 AUDIT_SCRIPT="$BASE_DIR/backend/linux/logging/audit.sh"
 request_id="install-$(cat /proc/sys/kernel/random/uuid)"
@@ -31,6 +32,7 @@ record_install_event() {
         --arg event "$event" \
         --arg status "$status" \
         --arg digest "$digest" \
+        --arg operation "$operation" \
         --argjson exit_code "$exit_code" \
         --argjson components "$components_json" \
         '{
@@ -38,7 +40,7 @@ record_install_event() {
             request_id: $request_id,
             source: "linux-backend",
             event: $event,
-            operation: "setup.components",
+            operation: $operation,
             target_id: $target,
             status: $status,
             exit_code: $exit_code,
@@ -48,9 +50,17 @@ record_install_event() {
             }
         }' | "$AUDIT_SCRIPT"
 }
+mode="apply"
+operation="setup.components"
+
+if [[ "${1:-}" == "--plan" ]]; then
+    mode="plan"
+    operation="setup.plan"
+    shift
+fi
 
 [[ $# -ge 2 ]] || {
-    echo "Usage: setup-components.sh TARGET_ID COMPONENT..." >&2
+    echo "Usage: setup-components.sh [--plan] TARGET_ID COMPONENT..." >&2
     exit 2
 }
 
@@ -127,40 +137,51 @@ bundle="$(
     cat "$PORT_DISCOVERY"
     printf '\n'
 
+    cat "$PLANNING_MODULE"
+    printf '\n'
+
     cat "$SETUP_MODULE"
     printf '\n'
 
     # Execute only after all functions have been defined.
     printf '%s' 'setup_selected_services'
+
+    if [[ "$mode" == "plan" ]]; then
+        printf ' %q' '--plan'
+    fi
+
     printf ' %q' "${components[@]}"
     printf '\n'
 
     # Preserve the coordinator outcome as the remote process exit status.
     printf '%s\n' 'exit "$?"'
 )"
-
 bash -n <<< "$bundle"
 payload="$(printf '%s\n' "$bundle" | base64 | tr -d '\n')"
 digest="$(printf '%s\n' "$bundle" | sha256sum | awk '{print $1}')"
 
-printf '\nTarget: %s (%s@%s:%s)\n' "$target" "$user" "$host" "$port"
-printf 'Operation: install missing selected components\n'
-printf 'Selected components: %s\n' "${components[*]}"
-printf 'Installer SHA256: %s\n' "$digest"
-printf 'Type INSTALL %s to proceed: ' "$target" > /dev/tty
-IFS= read -r confirmation < /dev/tty
+if [[ "$mode" == "apply" ]]; then
+    printf '\nTarget: %s (%s@%s:%s)\n' "$target" "$user" "$host" "$port"
+    printf 'Operation: install missing selected components\n'
+    printf 'Selected components: %s\n' "${components[*]}"
+    printf 'Installer SHA256: %s\n' "$digest"
+    printf 'Type INSTALL %s to proceed: ' "$target" > /dev/tty
+    IFS= read -r confirmation < /dev/tty
 
-if [[ "$confirmation" != "INSTALL $target" ]]; then
-    if ! record_install_event "installation.cancelled" "cancelled" 2; then
-        echo "ERROR: Could not record installation cancellation." >&2
-        exit 3
+    if [[ "$confirmation" != "INSTALL $target" ]]; then
+        if ! record_install_event "setup.cancelled" "cancelled" 2; then
+            echo "ERROR: Could not record setup cancellation." >&2
+            exit 3
+        fi
+
+        echo "Setup cancelled."
+        exit 2
     fi
-
-    echo "Installation cancelled."
-    exit 2
+else
+    printf 'Plan-only mode: no installation will be attempted.\n' >&2
 fi
 
-if ! record_install_event "installation.started" "started" 0; then
+if ! record_install_event "setup.started" "started" 0; then
     echo "ERROR: Audit recording failed. Installation was not started." >&2
     exit 3
 fi
@@ -203,7 +224,7 @@ else
 fi
 
 if ! record_install_event \
-    "installation.completed" "$install_status" "$install_exit"; then
+    "setup.completed" "$install_status" "$install_exit"; then
     echo "ERROR: Outcome audit recording failed." >&2
     echo "The server may already have changed; inspect it before retrying." >&2
     exit 3

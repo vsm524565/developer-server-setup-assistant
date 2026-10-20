@@ -73,7 +73,7 @@ class LinuxBackend:
 
         return servers
 
-    def setup_components(self, target_id, components):
+    def setup_components(self, target_id, components, plan_only=False):
         """Pass component selections to the authoritative Bash backend."""
         if not isinstance(components, list) or not components:
             raise ValueError("Select at least one component.")
@@ -84,13 +84,16 @@ class LinuxBackend:
         ):
             raise ValueError("Component selections must be nonempty strings.")
 
-        result = subprocess.run(
-            [
-                str(ROOT / "backend/linux/bin/setup-components.sh"),
-                target_id,
-                *components,
-            ],
-        )
+        command = [
+            str(ROOT / "backend/linux/bin/setup-components.sh")
+        ]
+
+        if plan_only:
+            command.append("--plan")
+
+        command.extend([target_id, *components])
+
+        result = subprocess.run(command)
 
         if result.returncode != 0:
             raise RuntimeError(
