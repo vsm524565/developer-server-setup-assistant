@@ -36,7 +36,12 @@ done
 # Skip existing packages without changing configuration or service state.
 if package_is_installed "$manager" nginx; then
     printf 'Nginx is already installed; no changes made.\n' >&2
-    printf 'RESULT: package_action=already_installed service_action=unchanged\n'
+    jq -cn '{
+        component: "nginx",
+        package_action: "skipped",
+        verification: "not_run",
+        service_action: "unchanged"
+    }'
     exit 0
 fi
 
@@ -103,5 +108,10 @@ systemctl start nginx ||
 verify_nginx_readiness ||
     fail "Nginx readiness verification failed."
 
-printf 'RESULT: package_action=installed service_state=active\n'
+jq -cn '{
+    component: "nginx",
+    package_action: "installed",
+    verification: "passed",
+    service_action: "start_requested"
+}'
 )

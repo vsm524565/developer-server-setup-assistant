@@ -183,3 +183,10 @@ Snapshots and VM resets are not routine requirements.
 - Fresh Git installation passed on AlmaLinux 10 using DNF: version 2.52.0.
 - Existing-package skip path passed on Ubuntu 24.
 - Fresh Nginx installation remains unverified.
+## Structured Component Results — 2026-10-20
+
+- Nginx and Git emit consistent JSON result objects.
+- Coordinator validates and aggregates successful component results.
+- Skipped components report verification as not_run.
+- Ubuntu 24 two-component aggregation passed live.
+- Structured failure responses and Python parsing remain pending.

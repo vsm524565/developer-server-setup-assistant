@@ -138,7 +138,8 @@ printf 'Panel discovery: %s\n' "$panel_facts" >&2
         echo "ERROR: Unable to read execution plan." >&2
         exit 3
     }
-
+    local component_result
+    local -a results=()
     # Execute the deduplicated plan in its generated order.
     while IFS=$'\t' read -r component action; do
         printf '\nComponent: %s | Action: %s\n' \
@@ -146,17 +147,27 @@ printf 'Panel discovery: %s\n' "$panel_facts" >&2
 
         case "$action" in
             SKIP)
-                printf 'RESULT: component=%s package_action=skipped service_action=unchanged\n' \
-                    "$component"
+                component_result="$(
+                    jq -cn --arg component "$component" '{
+                        component: $component,
+                        package_action: "skipped",
+                        verification: "not_run",
+                        service_action: "unchanged"
+                    }'
+                )"
                 ;;
 
             INSTALL)
                 case "$component" in
                     nginx)
-                        install_nginx "$manager" "$panel_facts"
+                        component_result="$(
+                            install_nginx "$manager" "$panel_facts"
+                        )"
                         ;;
                     git)
-                        install_git "$manager"
+                        component_result="$(
+                            install_git "$manager"
+                        )"
                         ;;
                     *)
                         echo "ERROR: Unsupported installation component." >&2
@@ -171,5 +182,31 @@ printf 'Panel discovery: %s\n' "$panel_facts" >&2
                 exit 4
                 ;;
         esac
+                # Require exactly one result object for the expected component.
+        if ! jq -e -s --arg component "$component" '
+            length == 1
+            and (.[0] | type == "object")
+            and (.[0].component == $component)
+            and (
+                .[0].package_action == "installed"
+                or .[0].package_action == "skipped"
+            )
+            and (
+                .[0].verification == "passed"
+                or .[0].verification == "not_run"
+            )
+            and (.[0].service_action | type == "string")
+        ' <<< "$component_result" >/dev/null; then
+            echo "ERROR: Invalid component result; server changes may already have occurred." >&2
+            exit 5
+        fi
+
+        results+=("$component_result")
     done <<< "$plan_steps"
+    printf '%s\n' "${results[@]}" |
+        jq -s '{
+            schema_version: "1.0",
+            status: "success",
+            results: .
+        }'
 )

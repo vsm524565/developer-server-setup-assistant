@@ -6,7 +6,12 @@ install_git() (
     local manager="${1:?Package manager is required}"
 
     if package_is_installed "$manager" git; then
-        printf 'RESULT: component=git package_action=already_installed\n'
+        jq -cn '{
+            component: "git",
+            package_action: "skipped",
+            verification: "not_run",
+            service_action: "unchanged"
+        }'
         exit 0
     fi
 
@@ -33,5 +38,10 @@ install_git() (
 
     verify_git || exit 1
 
-    printf 'RESULT: component=git package_action=installed verification=passed\n'
+    jq -cn '{
+        component: "git",
+        package_action: "installed",
+        verification: "passed",
+        service_action: "not_applicable"
+    }'
 )
