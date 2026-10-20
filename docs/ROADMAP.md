@@ -168,3 +168,18 @@ Snapshots and VM resets are not routine requirements.
 - Execution now consumes generated plan steps rather than raw selections.
 - Duplicate-selection live check passed: Nginx and Git each processed once.
 - SKIP actions bypass installers and leave service state unchanged.
+## Approval After Planning — 2026-10-20
+
+- Apply mode displays the generated plan before requesting confirmation.
+- Ineligible plans are rejected before execution.
+- Confirmation and execution use the same in-memory plan.
+- Plan-only mode bypasses execution confirmation.
+- Ubuntu 24 approval flow passed with Nginx and Git SKIP actions.
+- Persistent approval binding and post-review state validation remain pending.
+## Installation Evidence — 2026-10-20
+
+- Plan is displayed before interactive APPLY confirmation.
+- Fresh Git installation passed on Debian 13 using APT: version 2.47.3.
+- Fresh Git installation passed on AlmaLinux 10 using DNF: version 2.52.0.
+- Existing-package skip path passed on Ubuntu 24.
+- Fresh Nginx installation remains unverified.
