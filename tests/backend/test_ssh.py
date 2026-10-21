@@ -65,6 +65,28 @@ class SSHTransportTests(unittest.TestCase):
             "cpu_model": "Intel Core i7",
             "memory_total_bytes": 4105826304,
             "memory_available_bytes": 3617198080,
+            "swap_total_bytes": 4105170944,
+            "swap_used_bytes": 0,
+            "swap_devices": [
+                {
+                    "name": "/swap.img",
+                    "type": "file",
+                    "size_bytes": 4105170944,
+                    "used_bytes": 0,
+                    "priority": -2
+                }
+            ],
+            "swap_persistence": {
+                "readable": true,
+                "entries": [
+                    {
+                        "source": "/swap.img",
+                        "mountpoint": "none",
+                        "filesystem_type": "swap",
+                        "options": "sw"
+                    }
+                ]
+            },
             "disk_total_bytes": 25180848128,
             "disk_used_bytes": 6938574848,
             "disk_available_bytes": 16937263104,
@@ -109,6 +131,19 @@ class SSHTransportTests(unittest.TestCase):
         self.assertEqual(data["cpu_model"], "Intel Core i7")
         self.assertEqual(data["memory_total_bytes"], 4105826304)
         self.assertGreaterEqual(data["memory_available_bytes"], 0)
+        self.assertEqual(data["swap_total_bytes"], 4105170944)
+        self.assertEqual(data["swap_used_bytes"], 0)
+
+        self.assertEqual(len(data["swap_devices"]), 1)
+        self.assertEqual(data["swap_devices"][0]["name"], "/swap.img")
+        self.assertEqual(data["swap_devices"][0]["type"], "file")
+
+        self.assertTrue(data["swap_persistence"]["readable"])
+        self.assertEqual(len(data["swap_persistence"]["entries"]), 1)
+        self.assertEqual(
+            data["swap_persistence"]["entries"][0]["source"],
+            "/swap.img"
+        )
         self.assertGreater(data["disk_total_bytes"], 0)
         self.assertGreaterEqual(data["disk_available_bytes"], 0)
         self.assertEqual(data["virtualization"], "oracle")

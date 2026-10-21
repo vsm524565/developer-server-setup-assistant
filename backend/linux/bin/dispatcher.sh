@@ -155,24 +155,73 @@ if [[ "$discovery_status" == "success" ]]; then
                     "hostname", "os_id", "os_version",
                     "architecture", "cpu_logical_cores",
                     "cpu_model", "memory_total_bytes",
-                    "memory_available_bytes", "disk_total_bytes",
-                    "disk_used_bytes", "disk_available_bytes",
+                    "memory_available_bytes",
+                    "swap_total_bytes", "swap_used_bytes",
+                    "swap_devices","swap_persistence",
+                    "disk_total_bytes", "disk_used_bytes",
+                    "disk_available_bytes",
                     "uptime_seconds", "virtualization"
                 ] | sort))
+
                 and (.hostname | type == "string" and length > 0)
                 and (.os_id | type == "string" and length > 0)
                 and (.os_version | type == "string" and length > 0)
                 and (.architecture | type == "string" and length > 0)
                 and (.cpu_logical_cores | type == "number" and . >= 1)
                 and (.cpu_model | type == "string" and length > 0)
+
                 and (.memory_total_bytes | type == "number" and . > 0)
                 and (.memory_available_bytes | type == "number" and . >= 0)
                 and (.memory_available_bytes <= .memory_total_bytes)
+
+                and (.swap_total_bytes | type == "number" and . >= 0)
+                and (.swap_used_bytes | type == "number" and . >= 0)
+                and (.swap_used_bytes <= .swap_total_bytes)
+
+                and (.swap_devices | type == "array")
+                and (
+                    .swap_devices |
+                    all(.[];
+                        type == "object"
+                        and ((keys | sort) == (
+                            ["name", "type", "size_bytes",
+                            "used_bytes", "priority"] | sort
+                        ))
+                        and (.name | type == "string" and length > 0)
+                        and (.type == "file" or .type == "partition")
+                        and (.size_bytes | type == "number" and . > 0)
+                        and (.used_bytes | type == "number" and . >= 0)
+                        and (.used_bytes <= .size_bytes)
+                        and (.priority | type == "number" and floor == .)
+                    )
+                )
+                and (.swap_persistence | type == "object")
+                and (
+                    (.swap_persistence | keys | sort) ==
+                    (["readable", "entries"] | sort)
+                )
+                and (.swap_persistence.readable | type == "boolean")
+                and (.swap_persistence.entries | type == "array")
+                and (
+                    .swap_persistence.entries |
+                    all(.[];
+                        type == "object"
+                        and ((keys | sort) == (
+                        ["source", "mountpoint", "filesystem_type", "options"] | sort
+                        ))
+                        and (.source | type == "string" and length > 0)
+                        and (.mountpoint | type == "string" and length > 0)
+                        and (.filesystem_type == "swap")
+                        and (.options | type == "string" and length > 0)
+                    )
+                )
+
                 and (.disk_total_bytes | type == "number" and . > 0)
                 and (.disk_used_bytes | type == "number" and . >= 0)
                 and (.disk_available_bytes | type == "number" and . >= 0)
                 and (.disk_used_bytes <= .disk_total_bytes)
                 and (.disk_available_bytes <= .disk_total_bytes)
+
                 and (.uptime_seconds | type == "number" and . >= 0)
                 and (.virtualization | type == "string" and length > 0)
             '
