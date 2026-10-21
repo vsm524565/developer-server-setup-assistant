@@ -200,3 +200,13 @@ Snapshots and VM resets are not routine requirements.
 - Response component order is checked against deduplicated selections.
 - Plan-only and approved setup summaries passed on Ubuntu 24.
 - Structured failure and partial-result responses remain pending.
+## Structured Failure Reporting — 2026-10-21
+
+- Coordinator can preserve completed component outcomes on failure.
+- Failed components report unknown change state.
+- Remaining components are marked not_attempted.
+- Runner can emit a failure frame while retaining a nonzero exit code.
+- Local failure-response construction checks passed.
+- Simulated backend-to-Python failure handling passed:
+  backend exit 17 produced CLI exit 1.
+- Real coordinator failure propagation through SSH remains unverified.

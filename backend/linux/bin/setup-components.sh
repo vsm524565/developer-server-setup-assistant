@@ -143,7 +143,9 @@ bundle="$(
     cat "$SETUP_MODULE"
     printf '\n'
 
-    # Capture structured stdout; progress and prompts remain interactive.
+    # Capture the response and retain the coordinator's exit status.
+    # The coordinator enables its own strict error handling.
+    printf '%s\n' 'set +e'
     printf '%s' 'response="$(setup_selected_services'
 
     if [[ "$mode" == "plan" ]]; then
@@ -154,9 +156,24 @@ bundle="$(
     printf '%s\n' ')"'
 
     printf '%s\n' \
-        'jq -e -s '\''length == 1 and (.[0] | type == "object")'\'' <<< "$response" >/dev/null' \
+        'response_status=$?' \
+        'set -e' \
+        'if ! jq -e -s '\''length == 1 and (.[0] | type == "object")'\'' <<< "$response" >/dev/null 2>&1; then' \
+        '    if [[ "$response_status" -eq 0 ]]; then response_status=5; fi' \
+        '    response="$(jq -M -cn --argjson code "$response_status" '\''{' \
+        '        schema_version: "1.0",' \
+        '        status: "error",' \
+        '        results: [],' \
+        '        errors: [{' \
+        '            code: "BACKEND_RESPONSE_UNAVAILABLE",' \
+        '            exit_code: $code,' \
+        '            message: "No valid coordinator response. Remote changes may be partial."' \
+        '        }]' \
+        '    }'\'')"' \
+        'fi' \
         'printf "DSSA_RESPONSE: "' \
-        'jq -M -c . <<< "$response"'
+        'jq -M -c . <<< "$response"' \
+        'exit "$response_status"'
 )"
 bash -n <<< "$bundle"
 payload="$(printf '%s\n' "$bundle" | base64 | tr -d '\n')"

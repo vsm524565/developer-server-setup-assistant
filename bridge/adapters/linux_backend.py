@@ -150,11 +150,11 @@ class LinuxBackend:
         finally:
             process.stdout.close()
 
-        # A response frame never overrides a failed backend exit.
-        if exit_code != 0:
+        # Without a response, the backend exit is our only outcome evidence.
+        if exit_code != 0 and len(frames) != 1:
             raise RuntimeError(
-                f"Backend setup failed (exit {exit_code}). "
-                "Remote changes may be partial; inspect the output."
+                f"Backend failed (exit {exit_code}) without a usable response. "
+                "Remote changes may be partial."
             )
 
         if oversized_line or len(frames) != 1:
@@ -174,7 +174,45 @@ class LinuxBackend:
             or response.get("schema_version") != "1.0"
         ):
             raise RuntimeError("Unsupported backend response structure.")
+        # Failure responses describe partial outcomes; they never mean success.
+        if response.get("status") == "error":
+            if exit_code == 0:
+                raise RuntimeError(
+                    "Backend reported an error but returned exit code zero."
+                )
 
+            records = response.get("results")
+            errors = response.get("errors")
+
+            if (
+                not isinstance(records, list)
+                or not all(isinstance(record, dict) for record in records)
+                or not isinstance(errors, list)
+                or not errors
+                or not all(
+                    isinstance(error, dict)
+                    and isinstance(error.get("code"), str)
+                    for error in errors
+                )
+            ):
+                raise RuntimeError("Invalid backend failure response.")
+
+            expected = list(dict.fromkeys(components))
+            actual = [record.get("component") for record in records]
+
+            # A wrapper-level failure may have no component outcome data.
+            if records and actual != expected:
+                raise RuntimeError(
+                    "Failure response components do not match the selections."
+                )
+
+            response["backend_exit_code"] = exit_code
+            return response
+
+        if exit_code != 0:
+            raise RuntimeError(
+                f"Backend exited with {exit_code} despite a non-error response."
+            )
         if plan_only:
             records = response.get("steps")
             if type(response.get("eligible")) is not bool:

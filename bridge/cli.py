@@ -39,7 +39,27 @@ def main():
             args.component,
             plan_only=args.plan,
         )
+        if response.get("status") == "error":
+            print("\n=== SETUP FAILED ===")
 
+            for result in response["results"]:
+                state = result.get(
+                    "execution_state",
+                    result.get("package_action", "unknown"),
+                )
+                print(
+                    f"{result['component']}: {state} | "
+                    f"verification={result.get('verification', 'unknown')}"
+                )
+
+            for error in response["errors"]:
+                print(
+                    f"{error['code']}: "
+                    f"{error.get('message', 'Backend operation failed.')}"
+                )
+
+            print(f"Backend exit code: {response['backend_exit_code']}")
+            return 1
         if args.plan:
             print("\n=== PLAN SUMMARY ===")
             print(f"Eligible: {response['eligible']}")

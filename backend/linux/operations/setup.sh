@@ -1,5 +1,55 @@
 #!/usr/bin/env bash
+# Preserve completed outcomes and identify failed/unattempted components.
+emit_setup_failure() {
+    local plan="$1"
+    local completed="$2"
+    local failed_component="$3"
+    local failure_code="$4"
 
+    jq -M -cn \
+        --argjson plan "$plan" \
+        --argjson completed "$completed" \
+        --arg failed "$failed_component" \
+        --argjson code "$failure_code" \
+        '{
+            schema_version: "1.0",
+            status: "error",
+            results: [
+                $plan.steps[] |
+                .component as $component |
+                (
+                    $completed |
+                    map(select(.component == $component))
+                ) as $previous |
+                if ($previous | length) > 0 then
+                    $previous[0]
+                elif $component == $failed then
+                    {
+                        component: $component,
+                        execution_state: "failed",
+                        package_action: "unknown",
+                        verification: "unknown",
+                        service_action: "unknown",
+                        exit_code: $code
+                    }
+                else
+                    {
+                        component: $component,
+                        execution_state: "not_attempted",
+                        package_action: "not_attempted",
+                        verification: "not_run",
+                        service_action: "unchanged"
+                    }
+                end
+            ],
+            errors: [{
+                code: "COMPONENT_FAILED",
+                component: $failed,
+                exit_code: $code,
+                message: "Component execution failed; partial changes may remain."
+            }]
+        }'
+}
 # Coordinate a fixed list of supported components.
 setup_selected_services() (
     set -euo pipefail
@@ -138,7 +188,7 @@ printf 'Panel discovery: %s\n' "$panel_facts" >&2
         echo "ERROR: Unable to read execution plan." >&2
         exit 3
     }
-    local component_result
+    local component_result component_exit completed_results
     local -a results=()
     # Execute the deduplicated plan in its generated order.
     while IFS=$'\t' read -r component action; do
@@ -158,6 +208,10 @@ printf 'Panel discovery: %s\n' "$panel_facts" >&2
                 ;;
 
             INSTALL)
+                # Capture failure without terminating the coordinator.
+                # Each installer enables its own strict error handling.
+                set +e
+
                 case "$component" in
                     nginx)
                         component_result="$(
@@ -174,6 +228,23 @@ printf 'Panel discovery: %s\n' "$panel_facts" >&2
                         exit 3
                         ;;
                 esac
+
+                component_exit=$?
+                set -e
+
+                if [[ "$component_exit" -ne 0 ]]; then
+                    completed_results="$(
+                        printf '%s\n' "${results[@]}" | jq -M -s .
+                    )"
+
+                    emit_setup_failure \
+                        "$plan" \
+                        "$completed_results" \
+                        "$component" \
+                        "$component_exit"
+
+                    exit "$component_exit"
+                fi
                 ;;
 
             *)
@@ -198,6 +269,17 @@ printf 'Panel discovery: %s\n' "$panel_facts" >&2
             and (.[0].service_action | type == "string")
         ' <<< "$component_result" >/dev/null; then
             echo "ERROR: Invalid component result; server changes may already have occurred." >&2
+
+            completed_results="$(
+                printf '%s\n' "${results[@]}" | jq -M -s .
+            )"
+
+            emit_setup_failure \
+                "$plan" \
+                "$completed_results" \
+                "$component" \
+                5
+
             exit 5
         fi
 
