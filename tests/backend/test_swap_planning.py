@@ -79,3 +79,37 @@ class SwapPlanningTests(unittest.TestCase):
         result = self.run_planner({}, 2147483648)
         self.assertEqual(result.returncode, 3)
         self.assertEqual(result.stdout, "")
+
+    def test_consistent_accounting(self):
+        result = self.run_planner(self.facts, 2147483648)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        plan = json.loads(result.stdout)
+        self.assertTrue(plan["accounting_consistent"])
+        self.assertEqual(plan["device_total_bytes"], 2147483648)
+        self.assertEqual(plan["device_used_bytes"], 0)
+
+    def test_inconsistent_accounting_blocked(self):
+        facts = json.loads(json.dumps(self.facts))
+
+        # Report 2 GiB of system swap but discover no active devices.
+        facts["swap_devices"] = []
+
+        result = self.run_planner(facts, 2147483648)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        plan = json.loads(result.stdout)
+        self.assertEqual(plan["decision"], "BLOCKED")
+        self.assertFalse(plan["accounting_consistent"])
+    def test_active_device_with_zero_system_swap_blocked(self):
+        facts = json.loads(json.dumps(self.facts))
+
+        facts["swap_total_bytes"] = 0
+        facts["swap_used_bytes"] = 0
+
+        result = self.run_planner(facts, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        plan = json.loads(result.stdout)
+        self.assertEqual(plan["decision"], "BLOCKED")
+        self.assertFalse(plan["accounting_consistent"])

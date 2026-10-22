@@ -25,6 +25,10 @@ plan_swap() {
     local persistence_matches=false
 
     local decision action reason
+    local device_total_bytes
+    local device_used_bytes
+    local accounting_difference_bytes
+    local accounting_consistent=false
 
     # --------------------------------------------------
     # 1. Validate requested capacity
@@ -96,7 +100,34 @@ plan_swap() {
     swap_entry_count="$(
         jq -r '.swap_persistence.entries | length' <<< "$discovery_json"
     )"
+    # Calculate total capacity and usage from discovered swap devices.
+    device_total_bytes="$(
+        jq -r '[.swap_devices[].size_bytes] | add // 0' \
+            <<< "$discovery_json"
+    )"
 
+    device_used_bytes="$(
+        jq -r '[.swap_devices[].used_bytes] | add // 0' \
+            <<< "$discovery_json"
+    )"
+
+    # Absolute difference between system-reported and device capacity.
+    accounting_difference_bytes="$(
+        jq -n \
+            --argjson system "$current_total_bytes" \
+            --argjson devices "$device_total_bytes" \
+            '($system - $devices) | if . < 0 then -. else . end'
+    )"
+
+    # V1 accounting tolerance: 4 KiB.
+    # A larger difference requires investigation before planning.
+    if (( accounting_difference_bytes <= 4096 )) &&
+        jq -e \
+        --argjson expected "$device_used_bytes" \
+        '(.swap_used_bytes - $expected | if . < 0 then -. else . end) <= 4096' \
+        <<< "$discovery_json" >/dev/null; then
+        accounting_consistent=true
+    fi
     # --------------------------------------------------
     # 4. Classify existing swap
     # --------------------------------------------------
@@ -148,6 +179,11 @@ plan_swap() {
         decision="BLOCKED"
         action="NONE"
         reason="Persistent swap configuration cannot be inspected."
+    elif [[ "$accounting_consistent" != true ]]; then
+
+        decision="BLOCKED"
+        action="NONE"
+        reason="System swap accounting does not match discovered active devices."
 
     elif [[ "$persistence_matches" != true ]]; then
 
@@ -181,12 +217,18 @@ plan_swap() {
         --argjson current_total_bytes "$current_total_bytes" \
         --argjson desired_total_bytes "$desired_total_bytes" \
         --argjson persistence_matches "$persistence_matches" \
+        --argjson device_total_bytes "$device_total_bytes" \
+        --argjson device_used_bytes "$device_used_bytes" \
+        --argjson accounting_consistent "$accounting_consistent" \
         '{
             schema_version: "1.0",
             component: $component,
             decision: $decision,
             action: $action,
             swap_type: $swap_type,
+            device_total_bytes: $device_total_bytes,
+            device_used_bytes: $device_used_bytes,
+            accounting_consistent: $accounting_consistent,
             current_total_bytes: $current_total_bytes,
             desired_total_bytes: $desired_total_bytes,
             persistence_matches: $persistence_matches,
