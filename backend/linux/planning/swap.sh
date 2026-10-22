@@ -68,6 +68,17 @@ plan_swap() {
                 and (.used_bytes | type == "number" and . >= 0)
                 and (.used_bytes <= .size_bytes)
                 and (.priority | type == "number" and floor == .)
+                and (.identity | type == "object")
+and ((.identity | keys | sort) ==
+     (["canonical_path", "uuid"] | sort))
+and (
+    .identity.canonical_path == null
+    or (.identity.canonical_path | type == "string" and length > 0)
+)
+and (
+    .identity.uuid == null
+    or (.identity.uuid | type == "string" and length > 0)
+)
             )
         )
         and (
@@ -78,6 +89,10 @@ plan_swap() {
                 and (.mountpoint | type == "string")
                 and (.filesystem_type == "swap")
                 and (.options | type == "string")
+                and (
+    .resolved_path == null
+    or (.resolved_path | type == "string" and length > 0)
+)
             )
         )
     ' <<< "$discovery_json" >/dev/null 2>&1; then
@@ -147,27 +162,35 @@ plan_swap() {
         swap_type="unknown"
     fi
 
-    # --------------------------------------------------
-    # 5. Verify persistence identity
-    # --------------------------------------------------
+# --------------------------------------------------
+# 5. Verify persistence identity
+# --------------------------------------------------
 
-    if jq -e '.swap_persistence.readable == true' \
-        <<< "$discovery_json" >/dev/null; then
+if jq -e '.swap_persistence.readable == true' \
+    <<< "$discovery_json" >/dev/null; then
 
-        if [[ "$swap_type" == "absent" ]]; then
+    if [[ "$swap_type" == "absent" ]]; then
+        persistence_matches=true
+
+    elif [[ "$swap_type" == "file" ||
+            "$swap_type" == "partition" ]]; then
+
+        # Compare resolved identities rather than literal
+        # /proc/swaps and /etc/fstab source strings.
+        #
+        # Unresolved identities must never be considered equal.
+
+        if jq -e '
+            .swap_devices[0].identity.canonical_path as $active
+            | .swap_persistence.entries[0].resolved_path as $persistent
+            | ($active | type == "string" and length > 0)
+              and ($persistent | type == "string" and length > 0)
+              and ($active == $persistent)
+        ' <<< "$discovery_json" >/dev/null; then
             persistence_matches=true
-
-        elif [[ "$swap_type" == "file" ]]; then
-            # V1 supports direct file path matching only.
-            if jq -e '
-                .swap_devices[0].name as $active
-                | .swap_persistence.entries[0].source as $persistent
-                | $active == $persistent
-            ' <<< "$discovery_json" >/dev/null; then
-                persistence_matches=true
-            fi
         fi
     fi
+fi
 
     # --------------------------------------------------
     # 6. Determine planning decision

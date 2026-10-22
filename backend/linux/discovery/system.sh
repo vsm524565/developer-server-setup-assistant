@@ -83,6 +83,61 @@ else
     swap_fstab_readable=false
     swap_fstab_entries='[]'
 fi
+# Enrich active swap devices with canonical identity.
+swap_devices_json="$(
+    jq -c '.[]' <<< "$swap_devices_json" |
+    while IFS= read -r device; do
+        source_path="$(jq -r '.name' <<< "$device")"
+
+        canonical_path="$(
+            resolve_swap_path "$source_path" 2>/dev/null
+        )" || canonical_path=""
+
+        swap_uuid=""
+
+        if [[ -n "$canonical_path" ]]; then
+            swap_uuid="$(
+                resolve_swap_uuid "$canonical_path" 2>/dev/null
+            )" || swap_uuid=""
+        fi
+
+        jq -n \
+            --argjson device "$device" \
+            --arg canonical "$canonical_path" \
+            --arg uuid "$swap_uuid" \
+            '$device + {
+                identity: {
+                    canonical_path: (
+                        if $canonical == "" then null else $canonical end
+                    ),
+                    uuid: (
+                        if $uuid == "" then null else $uuid end
+                    )
+                }
+            }'
+    done | jq -s '.'
+)"
+
+# Resolve persistent swap sources to canonical paths.
+swap_fstab_entries="$(
+    jq -c '.[]' <<< "$swap_fstab_entries" |
+    while IFS= read -r entry; do
+        source_path="$(jq -r '.source' <<< "$entry")"
+
+        resolved_path="$(
+            resolve_swap_path "$source_path" 2>/dev/null
+        )" || resolved_path=""
+
+        jq -n \
+            --argjson entry "$entry" \
+            --arg resolved "$resolved_path" \
+            '$entry + {
+                resolved_path: (
+                    if $resolved == "" then null else $resolved end
+                )
+            }'
+    done | jq -s '.'
+)"
 
 # Root filesystem capacity discovery.
 disk_info="$(df -B1 / | awk 'NR==2 {print $2, $3, $4}')"

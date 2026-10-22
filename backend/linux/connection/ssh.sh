@@ -24,6 +24,8 @@ RUNTIMES_RUNNER="$BASE_DIR/backend/linux/discovery/runtimes.sh"
 WEB_SERVERS_MODULE="$BASE_DIR/backend/linux/modules/software/web_servers.sh"
 WEB_SERVERS_RUNNER="$BASE_DIR/backend/linux/discovery/web_servers.sh"
 
+SWAP_IDENTITY_MODULE="$BASE_DIR/backend/linux/discovery/swap_identity.sh"
+
 SSH_KEY="${DSSA_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 KNOWN_HOSTS="$HOME/.ssh/known_hosts"
 
@@ -46,7 +48,28 @@ operation="$2"
 case "$operation" in
     discovery.system)
         remote_command='bash -s'
-        remote_script="$SYSTEM_SCRIPT"
+
+        for file in "$SWAP_IDENTITY_MODULE" "$SYSTEM_SCRIPT"; do
+            if [[ ! -f "$file" || ! -r "$file" ]]; then
+                echo "ERROR: System discovery component unavailable" >&2
+                exit 3
+            fi
+        done
+
+        remote_script="$(mktemp)"
+        trap 'rm -f -- "$remote_script"' EXIT
+
+        {
+            cat "$SWAP_IDENTITY_MODULE"
+            printf '\n'
+            cat "$SYSTEM_SCRIPT"
+            printf '\n'
+        } > "$remote_script"
+
+        if ! bash -n "$remote_script"; then
+            echo "ERROR: Invalid system discovery bundle" >&2
+            exit 3
+        fi
         ;;
 
     discovery.package_manager)
@@ -238,14 +261,25 @@ case "$operation" in
                 all(.[];
                     type == "object"
                     and ((keys | sort) == (
-                        ["name", "type", "size_bytes", "used_bytes", "priority"] | sort
+                        ["name", "type", "size_bytes", "used_bytes", "priority", "identity"] | sort
                     ))
                     and (.name | type == "string" and length > 0)
                     and (.type == "file" or .type == "partition")
                     and (.size_bytes | type == "number" and . > 0)
                     and (.used_bytes | type == "number" and . >= 0)
                     and (.used_bytes <= .size_bytes)
-                    and (.priority | type == "number")
+                    and (.priority | type == "number" and floor == .)
+and (.identity | type == "object")
+and ((.identity | keys | sort) ==
+     (["canonical_path", "uuid"] | sort))
+and (
+    .identity.canonical_path == null
+    or (.identity.canonical_path | type == "string" and length > 0)
+)
+and (
+    .identity.uuid == null
+    or (.identity.uuid | type == "string" and length > 0)
+)
                 )
             )
             and (.swap_persistence | type == "object")
@@ -260,12 +294,16 @@ case "$operation" in
                     all(.[];
                         type == "object"
                         and ((keys | sort) == (
-                        ["source", "mountpoint", "filesystem_type", "options"] | sort
+                        ["source", "mountpoint", "filesystem_type", "options", "resolved_path"] | sort
                         ))
                         and (.source | type == "string" and length > 0)
                         and (.mountpoint | type == "string" and length > 0)
                         and (.filesystem_type == "swap")
                         and (.options | type == "string" and length > 0)
+                        and (
+                            .resolved_path == null
+                            or (.resolved_path | type == "string" and length > 0)
+                        )
                     )
                 )
 

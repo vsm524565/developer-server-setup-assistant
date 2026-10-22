@@ -185,7 +185,7 @@ if [[ "$discovery_status" == "success" ]]; then
                         type == "object"
                         and ((keys | sort) == (
                             ["name", "type", "size_bytes",
-                            "used_bytes", "priority"] | sort
+                            "used_bytes", "priority", "identity"] | sort
                         ))
                         and (.name | type == "string" and length > 0)
                         and (.type == "file" or .type == "partition")
@@ -193,6 +193,17 @@ if [[ "$discovery_status" == "success" ]]; then
                         and (.used_bytes | type == "number" and . >= 0)
                         and (.used_bytes <= .size_bytes)
                         and (.priority | type == "number" and floor == .)
+                        and (.identity | type == "object")
+and ((.identity | keys | sort) ==
+     (["canonical_path", "uuid"] | sort))
+and (
+    .identity.canonical_path == null
+    or (.identity.canonical_path | type == "string" and length > 0)
+)
+and (
+    .identity.uuid == null
+    or (.identity.uuid | type == "string" and length > 0)
+)
                     )
                 )
                 and (.swap_persistence | type == "object")
@@ -207,15 +218,18 @@ if [[ "$discovery_status" == "success" ]]; then
                     all(.[];
                         type == "object"
                         and ((keys | sort) == (
-                        ["source", "mountpoint", "filesystem_type", "options"] | sort
+                        ["source", "mountpoint", "filesystem_type", "options", "resolved_path"] | sort
                         ))
                         and (.source | type == "string" and length > 0)
                         and (.mountpoint | type == "string" and length > 0)
                         and (.filesystem_type == "swap")
                         and (.options | type == "string" and length > 0)
+                        and (
+    .resolved_path == null
+    or (.resolved_path | type == "string" and length > 0)
+)
                     )
                 )
-
                 and (.disk_total_bytes | type == "number" and . > 0)
                 and (.disk_used_bytes | type == "number" and . >= 0)
                 and (.disk_available_bytes | type == "number" and . >= 0)
