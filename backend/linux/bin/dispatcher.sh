@@ -56,10 +56,25 @@ if ! jq -e '
     and (.operation == "discovery.system"
     or .operation == "discovery.package_manager"
     or .operation == "discovery.runtimes"
-    or .operation == "discovery.web_servers")
+    or .operation == "discovery.web_servers"
+    or .operation == "discovery.swap_filesystem")
     and (.target_id | type == "string"
      and test("^[a-zA-Z0-9_-]{1,64}$"))
-    and .parameters == {}
+    and (
+        if .operation == "discovery.swap_filesystem" then
+            (.parameters | type == "object")
+            and ((.parameters | keys) == ["target_path"])
+            and (.parameters.target_path |
+                type == "string"
+                and length > 1
+                and length <= 4096
+                and startswith("/")
+                and (contains("\n") | not)
+                and (contains("\r") | not))
+        else
+            .parameters == {}
+        end
+    )
     and ((keys | sort) ==
       (["schema_version","request_id","operation","target_id","parameters"] | sort))
 ' <<< "$request" >/dev/null 2>&1; then
@@ -135,8 +150,17 @@ if ! printf '%s\n' "$audit_event" | "$AUDIT_SCRIPT"; then
     echo '{"schema_version":"1.0","status":"error","data":null,"errors":[{"code":"AUDIT_FAILURE","message":"Audit recording failed"}]}'
     exit 3
 fi
+
 # Execute approved discovery through the Bash SSH backend.
-if discovery_data="$("$SSH_SCRIPT" "$target_id" "$operation")"; then
+# Keep every argument separate; never evaluate request content.
+ssh_arguments=("$target_id" "$operation")
+
+if [[ "$operation" == "discovery.swap_filesystem" ]]; then
+    target_path="$(jq -r '.parameters.target_path' <<< "$request")"
+    ssh_arguments+=("$target_path")
+fi
+
+if discovery_data="$("$SSH_SCRIPT" "${ssh_arguments[@]}")"; then
     discovery_status="success"
     discovery_exit_code=0
 else
@@ -148,6 +172,26 @@ fi
 if [[ "$discovery_status" == "success" ]]; then
 
     case "$operation" in
+        discovery.swap_filesystem)
+            validation_filter='
+                type == "object"
+                and ((keys | sort) ==
+                    (["schema_version", "target_path", "filesystem"] | sort))
+                and .schema_version == "1.0"
+                and .target_path == $requested_path
+                and (.filesystem | type == "object")
+                and ((.filesystem | keys | sort) ==
+                    (["mountpoint", "source", "type", "available_bytes"] | sort))
+                and (.filesystem.mountpoint |
+                    type == "string" and startswith("/"))
+                and (.filesystem.source |
+                    type == "string" and length > 0)
+                and (.filesystem.type |
+                    type == "string" and length > 0)
+                and (.filesystem.available_bytes |
+                    type == "number" and floor == . and . >= 0)
+            '
+            ;;
         discovery.system)
             validation_filter='
                 type == "object"
@@ -354,7 +398,9 @@ and (
     esac
 
     if [[ "$discovery_status" == "success" ]]; then
-        if ! jq -e "$validation_filter" \
+        if ! jq -e \
+            --arg requested_path "${target_path:-}" \
+            "$validation_filter" \
             <<< "$discovery_data" >/dev/null 2>&1; then
             discovery_status="error"
             discovery_exit_code=5

@@ -25,6 +25,7 @@ WEB_SERVERS_MODULE="$BASE_DIR/backend/linux/modules/software/web_servers.sh"
 WEB_SERVERS_RUNNER="$BASE_DIR/backend/linux/discovery/web_servers.sh"
 
 SWAP_IDENTITY_MODULE="$BASE_DIR/backend/linux/discovery/swap_identity.sh"
+SWAP_FILESYSTEM_MODULE="$BASE_DIR/backend/linux/discovery/swap_filesystem.sh"
 
 SSH_KEY="${DSSA_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 KNOWN_HOSTS="$HOME/.ssh/known_hosts"
@@ -33,19 +34,70 @@ KNOWN_HOSTS="$HOME/.ssh/known_hosts"
 # 1. Validate arguments
 # ---------------------------------------------------------
 
-if [[ $# -ne 2 ]]; then
-    echo "ERROR: Usage: ssh.sh TARGET_ID OPERATION" >&2
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+    echo "ERROR: Usage: ssh.sh TARGET_ID OPERATION [TARGET_PATH]" >&2
     exit 2
 fi
 
 target_id="$1"
 operation="$2"
+target_path="${3:-}"
+
+if [[ "$operation" == "discovery.swap_filesystem" ]]; then
+    if [[ $# -ne 3 || "$target_path" != /* ||
+          "$target_path" == "/" ||
+          ${#target_path} -gt 4096 ||
+          "$target_path" == *$'\n'* ||
+          "$target_path" == *$'\r'* ]]; then
+        echo "ERROR: Invalid swap filesystem target path" >&2
+        exit 2
+    fi
+elif [[ $# -ne 2 ]]; then
+    echo "ERROR: Unexpected discovery argument" >&2
+    exit 2
+fi
 
 # ---------------------------------------------------------
 # 2. Allow only approved discovery operations
 # ---------------------------------------------------------
 
 case "$operation" in
+    discovery.swap_filesystem)
+        remote_command='bash -s'
+
+        if [[ ! -f "$SWAP_FILESYSTEM_MODULE" ||
+              ! -r "$SWAP_FILESYSTEM_MODULE" ]]; then
+            echo "ERROR: Swap filesystem discovery unavailable" >&2
+            exit 3
+        fi
+
+        # Encode the target path as data, never executable shell source.
+        encoded_target="$(
+            printf '%s' "$target_path" | base64 -w 0
+        )"
+
+        remote_script="$(mktemp)"
+        trap 'rm -f -- "$remote_script"' EXIT
+
+        {
+            cat "$SWAP_FILESYSTEM_MODULE"
+            printf '\n'
+
+            # Only the Base64 alphabet is interpolated here.
+            printf 'encoded_target=%q\n' "$encoded_target"
+
+            cat <<'REMOTE_RUNNER'
+decoded_target="$(printf '%s' "$encoded_target" | base64 -d)" || exit 3
+discover_swap_filesystem "$decoded_target"
+REMOTE_RUNNER
+        } > "$remote_script"
+
+        if ! bash -n "$remote_script"; then
+            echo "ERROR: Invalid swap filesystem discovery bundle" >&2
+            exit 3
+        fi
+        ;;
+
     discovery.system)
         remote_command='bash -s'
 
@@ -220,7 +272,27 @@ case "$operation" in
     # -----------------------------------------------------
     # System discovery
     # -----------------------------------------------------
-
+    discovery.swap_filesystem)
+        if ! jq -e \
+            --arg target "$target_path" '
+            type == "object"
+            and ((keys | sort) ==
+                (["schema_version", "target_path", "filesystem"] | sort))
+            and .schema_version == "1.0"
+            and .target_path == $target
+            and (.filesystem | type == "object")
+            and ((.filesystem | keys | sort) ==
+                (["mountpoint", "source", "type", "available_bytes"] | sort))
+            and (.filesystem.mountpoint | type == "string" and startswith("/"))
+            and (.filesystem.source | type == "string" and length > 0)
+            and (.filesystem.type | type == "string" and length > 0)
+            and (.filesystem.available_bytes |
+                type == "number" and floor == . and . >= 0)
+        ' <<< "$output" >/dev/null 2>&1; then
+            echo "ERROR: Invalid remote swap filesystem response" >&2
+            exit 5
+        fi
+        ;;
     discovery.system)
         if ! jq -e '
             type == "object"

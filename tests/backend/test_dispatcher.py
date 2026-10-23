@@ -47,6 +47,79 @@ class DispatcherTests(unittest.TestCase):
             for line in path.read_text().splitlines()
         ]
 
+    def swap_filesystem_request(self, target_path="/swap.img"):
+        """Build an approved read-only filesystem discovery request."""
+        request = self.request.copy()
+        request["request_id"] = "req-swap-fs-test-001"
+        request["operation"] = "discovery.swap_filesystem"
+        request["parameters"] = {"target_path": target_path}
+        return request
+
+    def run_with_mock_ssh(self, request, mock_response):
+        """Run an isolated dispatcher with a controlled SSH response."""
+        sandbox = Path(self.tempdir.name) / "mock-dispatcher"
+        sandbox.mkdir(exist_ok=True)
+
+        mock_ssh = sandbox / "mock-ssh.sh"
+        mock_ssh.write_text(
+            "#!/usr/bin/env bash\n"
+            "cat \"$DSSA_TEST_RESPONSE_FILE\"\n"
+        )
+        mock_ssh.chmod(0o700)
+
+        response_file = sandbox / "response.json"
+        response_file.write_text(
+            mock_response if isinstance(mock_response, str)
+            else json.dumps(mock_response)
+        )
+
+        dispatcher_copy = sandbox / "dispatcher.sh"
+        original = DISPATCHER.read_text()
+
+        original_assignment = (
+            'SSH_SCRIPT="$BASE_DIR/backend/linux/connection/ssh.sh"'
+        )
+
+        if original.count(original_assignment) != 1:
+            raise AssertionError("Unexpected dispatcher SSH configuration")
+
+        modified = original.replace(
+            original_assignment,
+            f'SSH_SCRIPT="{mock_ssh}"',
+            1,
+        )
+
+        dispatcher_copy.write_text(modified)
+        dispatcher_copy.chmod(0o700)
+
+        # The dispatcher derives BASE_DIR from its own location.
+        # Preserve the repository root for audit and inventory scripts.
+        base_assignment = (
+            'BASE_DIR="$(cd -- "$(dirname -- '
+            '"${BASH_SOURCE[0]}")/../../.." && pwd)"'
+        )
+
+        if modified.count(base_assignment) != 1:
+            raise AssertionError("Unexpected dispatcher BASE_DIR configuration")
+
+        modified = modified.replace(
+            base_assignment,
+            f'BASE_DIR="{ROOT}"',
+            1,
+        )
+        dispatcher_copy.write_text(modified)
+
+        env = self.env.copy()
+        env["DSSA_TEST_RESPONSE_FILE"] = str(response_file)
+
+        return subprocess.run(
+            [str(dispatcher_copy)],
+            input=json.dumps(request),
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=10,
+        )
 
     def test_web_server_discovery_request(self):
         """Web-server discovery must pass through the dispatcher."""
@@ -319,6 +392,173 @@ class DispatcherTests(unittest.TestCase):
 
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["event"], "request.rejected")
+    def test_swap_filesystem_discovery_request(self):
+        request = self.swap_filesystem_request()
 
+        result = self.run_dispatcher(request)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        response = json.loads(result.stdout)
+
+        self.assertEqual(response["status"], "success")
+        self.assertEqual(response["operation"], "discovery.swap_filesystem")
+        self.assertEqual(response["request_id"], request["request_id"])
+        self.assertEqual(response["errors"], [])
+
+        data = response["data"]
+
+        self.assertEqual(data["schema_version"], "1.0")
+        self.assertEqual(data["target_path"], "/swap.img")
+        self.assertTrue(data["filesystem"]["mountpoint"].startswith("/"))
+        self.assertGreaterEqual(data["filesystem"]["available_bytes"], 0)
+
+        events = self.audit_events()
+
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["event"], "discovery.requested")
+        self.assertEqual(events[1]["event"], "discovery.completed")
+        self.assertEqual(events[1]["status"], "success")
+        self.assertEqual(events[1]["exit_code"], 0)
+
+    def test_swap_filesystem_rejects_missing_path(self):
+        request = self.swap_filesystem_request()
+        request["parameters"] = {}
+
+        result = self.run_dispatcher(request)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(
+            json.loads(result.stdout)["errors"][0]["code"],
+            "INVALID_REQUEST",
+        )
+        self.assertEqual(
+            self.audit_events()[0]["event"],
+            "request.rejected",
+        )
+
+    def test_swap_filesystem_rejects_relative_path(self):
+        request = self.swap_filesystem_request("swap.img")
+
+        result = self.run_dispatcher(request)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(
+            json.loads(result.stdout)["errors"][0]["code"],
+            "INVALID_REQUEST",
+        )
+
+    def test_swap_filesystem_rejects_unexpected_parameters(self):
+        request = self.swap_filesystem_request()
+        request["parameters"]["install"] = "nginx"
+
+        result = self.run_dispatcher(request)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(
+            json.loads(result.stdout)["errors"][0]["code"],
+            "INVALID_REQUEST",
+        )
+
+    def test_swap_filesystem_rejects_noncanonical_path(self):
+        request = self.swap_filesystem_request(
+            "/tmp/../etc/test-swap"
+        )
+
+        result = self.run_dispatcher(request)
+
+        self.assertEqual(result.returncode, 4)
+
+        response = json.loads(result.stdout)
+        self.assertEqual(response["status"], "error")
+        self.assertEqual(
+            response["errors"][0]["code"],
+            "DISCOVERY_FAILED",
+        )
+
+        events = self.audit_events()
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[1]["status"], "error")
+
+    def test_swap_filesystem_audit_failure(self):
+        request = self.swap_filesystem_request()
+
+        invalid_dir = Path(self.tempdir.name) / "not-a-directory"
+        invalid_dir.write_text("test")
+
+        env = self.env.copy()
+        env["DSSA_LOG_DIR"] = str(invalid_dir)
+
+        result = self.run_dispatcher(request, env=env)
+
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(
+            json.loads(result.stdout)["errors"][0]["code"],
+            "AUDIT_FAILURE",
+        )
+    def valid_swap_filesystem_response(self):
+        return {
+            "schema_version": "1.0",
+            "target_path": "/swap.img",
+            "filesystem": {
+                "mountpoint": "/",
+                "source": "/dev/sda1",
+                "type": "ext4",
+                "available_bytes": 1000000000,
+            },
+        }
+
+    def test_swap_filesystem_mock_valid_response(self):
+        request = self.swap_filesystem_request()
+        response = self.valid_swap_filesystem_response()
+
+        result = self.run_with_mock_ssh(request, response)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["status"], "success")
+
+    def test_swap_filesystem_mock_malformed_json(self):
+        request = self.swap_filesystem_request()
+
+        result = self.run_with_mock_ssh(
+            request,
+            '{"schema_version":',
+        )
+
+        self.assertEqual(result.returncode, 4)
+        self.assertEqual(
+            json.loads(result.stdout)["errors"][0]["code"],
+            "DISCOVERY_FAILED",
+        )
+
+    def test_swap_filesystem_mock_mismatched_path(self):
+        request = self.swap_filesystem_request()
+        response = self.valid_swap_filesystem_response()
+        response["target_path"] = "/different.img"
+
+        result = self.run_with_mock_ssh(request, response)
+
+        self.assertEqual(result.returncode, 4)
+        self.assertEqual(
+            json.loads(result.stdout)["status"],
+            "error",
+        )
+
+    def test_swap_filesystem_mock_invalid_capacity(self):
+        request = self.swap_filesystem_request()
+        response = self.valid_swap_filesystem_response()
+        response["filesystem"]["available_bytes"] = -1
+
+        result = self.run_with_mock_ssh(request, response)
+
+        self.assertEqual(result.returncode, 4)
+
+    def test_swap_filesystem_mock_extra_field(self):
+        request = self.swap_filesystem_request()
+        response = self.valid_swap_filesystem_response()
+        response["filesystem"]["unexpected"] = True
+
+        result = self.run_with_mock_ssh(request, response)
+
+        self.assertEqual(result.returncode, 4)
 if __name__ == "__main__":
     unittest.main()

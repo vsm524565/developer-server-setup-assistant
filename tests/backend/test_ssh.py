@@ -73,7 +73,11 @@ class SSHTransportTests(unittest.TestCase):
                     "type": "file",
                     "size_bytes": 4105170944,
                     "used_bytes": 0,
-                    "priority": -2
+                    "priority": -2,
+                    "identity": {
+                        "canonical_path": "/swap.img",
+                        "uuid": null
+                    }
                 }
             ],
             "swap_persistence": {
@@ -83,7 +87,8 @@ class SSHTransportTests(unittest.TestCase):
                         "source": "/swap.img",
                         "mountpoint": "none",
                         "filesystem_type": "swap",
-                        "options": "sw"
+                        "options": "sw",
+                        "resolved_path": "/swap.img"
                     }
                 ]
             },
@@ -100,9 +105,10 @@ class SSHTransportTests(unittest.TestCase):
         self.env["PATH"] = f"{self.bin_dir}:{self.env['PATH']}"
         self.env["SSH_TEST_CAPTURE"] = str(self.capture)
 
-    def run_ssh(self, target, operation):
+    def run_ssh(self, target, operation, *arguments):
+        """Execute SSH transport with optional operation arguments."""
         return subprocess.run(
-            [str(SSH_SCRIPT), target, operation],
+            [str(SSH_SCRIPT), target, operation, *arguments],
             text=True,
             capture_output=True,
             env=self.env,
@@ -413,6 +419,111 @@ class SSHTransportTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 5)
+    def test_swap_filesystem_valid_response(self):
+        self.set_mock_response({
+            "schema_version": "1.0",
+            "target_path": "/swap.img",
+            "filesystem": {
+                "mountpoint": "/",
+                "source": "/dev/mapper/ubuntu--vg-ubuntu--lv",
+                "type": "ext4",
+                "available_bytes": 16000000000,
+            },
+        })
+
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.swap_filesystem",
+            "/swap.img",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout)["target_path"],
+            "/swap.img",
+        )
+
+
+    def test_swap_filesystem_invalid_json(self):
+        self.set_mock_response('{"filesystem":')
+
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.swap_filesystem",
+            "/swap.img",
+        )
+
+        self.assertEqual(result.returncode, 5)
+
+
+    def test_swap_filesystem_target_mismatch(self):
+        self.set_mock_response({
+            "schema_version": "1.0",
+            "target_path": "/different.img",
+            "filesystem": {
+                "mountpoint": "/",
+                "source": "/dev/sda1",
+                "type": "ext4",
+                "available_bytes": 1000000000,
+            },
+        })
+
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.swap_filesystem",
+            "/swap.img",
+        )
+
+        self.assertEqual(result.returncode, 5)
+
+
+    def test_swap_filesystem_missing_target(self):
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.swap_filesystem",
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.capture.exists())
+
+
+    def test_swap_filesystem_rejects_extra_argument(self):
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.system",
+            "/swap.img",
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.capture.exists())
+
+
+    def test_swap_filesystem_path_not_in_remote_command(self):
+        suspicious_path = "/tmp/swapfile;touch /tmp/dssa-injected"
+
+        self.set_mock_response({
+            "schema_version": "1.0",
+            "target_path": suspicious_path,
+            "filesystem": {
+                "mountpoint": "/",
+                "source": "/dev/sda1",
+                "type": "ext4",
+                "available_bytes": 1000000000,
+            },
+        })
+
+        result = self.run_ssh(
+            "lab-ubuntu-01",
+            "discovery.swap_filesystem",
+            suspicious_path,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        args = self.capture.read_text().splitlines()
+
+        self.assertIn("bash -s", args)
+        self.assertNotIn(suspicious_path, args)
 
 if __name__ == "__main__":
     unittest.main()
