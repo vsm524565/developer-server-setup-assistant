@@ -17,10 +17,10 @@
 #   3. Swap readiness JSON
 #   4. Filesystem discovery JSON
 #   5. Explicit canonical target path
-
+#   6. Identity JSON
 evaluate_swap_preflight() {
-    if [[ $# -ne 5 ]]; then
-        echo "ERROR: Expected five preflight arguments." >&2
+    if [[ $# -ne 6 ]]; then
+        echo "ERROR: Expected six preflight arguments." >&2
         return 2
     fi
 
@@ -28,7 +28,8 @@ evaluate_swap_preflight() {
     local operation_json="$2"
     local readiness_json="$3"
     local filesystem_json="$4"
-    local target_path="$5"
+    local identity_json="$5"
+    local target_path="$6"
 
     # Require an absolute, canonical path without traversal segments.
     if [[ "$target_path" != /* ||
@@ -129,6 +130,7 @@ evaluate_swap_preflight() {
     local operation_type
     local requested_bytes
     local available_bytes
+    local target_policy_json
 
     operation_type=$(jq -r '.operation' <<< "$operation_json")
     requested_bytes=$(jq -r '.desired_total_bytes' <<< "$operation_json")
@@ -156,23 +158,34 @@ evaluate_swap_preflight() {
     else
         filesystem_policy_json='null'
     fi
+    # Target identity must be validated before making a CREATE decision.
+    # No identity decision can authorize execution.
+    if ! target_policy_json=$(
+        evaluate_swap_target_policy "$identity_json" "$target_path"
+    ); then
+        echo "ERROR: Swap target identity policy evaluation failed." >&2
+        return 3
+    fi
 
     jq -n \
         --arg operation "$operation_type" \
         --arg target "$target_path" \
         --argjson filesystem_policy "$filesystem_policy_json" \
-        --argjson capacity "$capacity_json" '
+        --argjson capacity "$capacity_json" \
+        --argjson target_policy "$target_policy_json" '
         {
             schema_version: "1.0",
             component: "swap",
             check: "execution_preflight",
             operation: $operation,
             target_path: $target,
+            target_policy: $target_policy,
             status: (
                 if $operation == "NO_CHANGE" then "NOT_REQUIRED"
                 elif $operation == "CREATE"
                     and $capacity.status == "PASS"
                     and $filesystem_policy.status == "CANDIDATE"
+                    and $target_policy.status == "CANDIDATE"
                 then "UNKNOWN"
                 else "BLOCKED"
                 end

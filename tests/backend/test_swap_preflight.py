@@ -51,6 +51,17 @@ class SwapPreflightTests(unittest.TestCase):
             },
         }
 
+        self.identity = {
+            "schema_version": "1.0",
+            "component": "swap",
+            "check": "target_identity",
+            "target_path": "/swap.img",
+            "target_type": "ABSENT",
+            "exists": False,
+            "is_symlink": False,
+            "execution_allowed": False,
+        }
+
     def run_preflight(self, *args):
         command = [
             "bash",
@@ -74,6 +85,7 @@ class SwapPreflightTests(unittest.TestCase):
             json.dumps(self.operation),
             json.dumps(self.readiness),
             json.dumps(self.filesystem),
+            json.dumps(self.identity),
             "/swap.img",
         ]
     def test_consistent_evidence_reaches_safety_gate(self):
@@ -106,7 +118,7 @@ class SwapPreflightTests(unittest.TestCase):
 
     def test_target_mismatch_rejected(self):
         evidence = self.evidence()
-        evidence[4] = "/different.img"
+        evidence[5] = "/different.img"
 
         result = self.run_preflight(*evidence)
 
@@ -135,7 +147,7 @@ class SwapPreflightTests(unittest.TestCase):
 
     def test_relative_target_rejected(self):
         evidence = self.evidence()
-        evidence[4] = "swap.img"
+        evidence[5] = "swap.img"
 
         result = self.run_preflight(*evidence)
 
@@ -525,5 +537,82 @@ class SwapPreflightTests(unittest.TestCase):
             "Invalid swap target identity evidence",
             result.stderr,
         )
+    def test_create_existing_target_blocked(self):
+        self.identity["target_type"] = "REGULAR_FILE"
+        self.identity["exists"] = True
+
+        result = self.run_preflight(*self.evidence())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+
+        self.assertEqual(data["status"], "BLOCKED")
+        self.assertEqual(data["target_policy"]["status"], "BLOCKED")
+        self.assertFalse(data["execution_allowed"])
+
+    def test_create_symlink_target_blocked(self):
+        self.identity["target_type"] = "SYMLINK"
+        self.identity["exists"] = True
+        self.identity["is_symlink"] = True
+
+        result = self.run_preflight(*self.evidence())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+
+        self.assertEqual(data["status"], "BLOCKED")
+        self.assertEqual(data["target_policy"]["status"], "BLOCKED")
+        self.assertFalse(data["execution_allowed"])
+
+    def test_create_unknown_target_blocked(self):
+        self.identity["target_type"] = "UNKNOWN"
+
+        result = self.run_preflight(*self.evidence())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+
+        self.assertEqual(data["status"], "BLOCKED")
+        self.assertEqual(data["target_policy"]["status"], "BLOCKED")
+        self.assertFalse(data["execution_allowed"])
+
+    def test_create_contradictory_identity_rejected(self):
+        self.identity["target_type"] = "ABSENT"
+        self.identity["exists"] = True
+
+        result = self.run_preflight(*self.evidence())
+
+        self.assertEqual(result.returncode, 3)
+        self.assertIn(
+            "Swap target identity policy evaluation failed",
+            result.stderr,
+        )
+
+    def test_create_identity_path_mismatch_rejected(self):
+        self.identity["target_path"] = "/different.img"
+
+        result = self.run_preflight(*self.evidence())
+
+        self.assertEqual(result.returncode, 3)
+        self.assertIn(
+            "Swap target identity policy evaluation failed",
+            result.stderr,
+        )
+    def test_create_missing_identity_rejected(self):
+        evidence = self.evidence()
+        evidence[4] = "{}"
+
+        result = self.run_preflight(*evidence)
+
+        self.assertEqual(result.returncode, 3)
+        self.assertFalse(result.stdout.strip())
+
+    def test_create_identity_execution_authorization_rejected(self):
+        self.identity["execution_allowed"] = True
+
+        result = self.run_preflight(*self.evidence())
+
+        self.assertEqual(result.returncode, 3)
+        self.assertFalse(result.stdout.strip())
 if __name__ == "__main__":
     unittest.main()
