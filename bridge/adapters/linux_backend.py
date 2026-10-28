@@ -5,7 +5,9 @@ import subprocess
 import uuid
 from pathlib import Path
 import sys
-
+from bridge.evidence.collection import EvidenceCollector
+from bridge.evidence.freshness import evaluate_freshness
+from bridge.evidence.gate import evaluate_evidence_gate
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -13,16 +15,21 @@ ROOT = Path(__file__).resolve().parents[2]
 class LinuxBackend:
     """Coordinate discovery and the existing interactive lab installer."""
 
-    def _request(self, operation, target_id):
+    def _request(
+        self, operation, target_id, *,
+        parameters=None, include_metadata=False
+    ):
+        if parameters is not None and not isinstance(parameters, dict):
+            raise ValueError("Discovery parameters must be a dictionary.")
         """Send a discovery request and validate the backend response."""
         request = {
             "schema_version": "1.0",
             "request_id": f"bridge-{uuid.uuid4().hex}",
             "operation": operation,
             "target_id": target_id,
-            "parameters": {},
+            "parameters": {} if parameters is None else parameters,
         }
-
+        collector = EvidenceCollector() if include_metadata else None
         result = subprocess.run(
             [str(ROOT / "backend/linux/bin/dispatcher.sh")],
             input=json.dumps(request),
@@ -57,6 +64,15 @@ class LinuxBackend:
 
         if not isinstance(data, dict):
             raise RuntimeError("Backend response data must be an object.")
+
+        if include_metadata:
+            return collector.complete(
+                request_id=request["request_id"],
+                operation=operation,
+                target_id=target_id,
+                data=data,
+                parameters=request["parameters"],
+            )
 
         return data
 
@@ -237,3 +253,107 @@ class LinuxBackend:
             )
 
         return response
+    def discover_with_evidence(
+        self, operation, target_id, *, parameters=None
+    ):
+        """Collect approved discovery with controller timing metadata."""
+
+        allowed = {
+            "discovery.system",
+            "discovery.package_manager",
+            "discovery.runtimes",
+            "discovery.web_servers",
+            "discovery.swap_filesystem",
+        }
+
+        if operation not in allowed:
+            raise ValueError("Unsupported evidence discovery operation.")
+
+        if operation == "discovery.swap_filesystem":
+            if not isinstance(parameters, dict):
+                raise ValueError("Swap filesystem parameters are required.")
+
+            if set(parameters) != {"target_path"}:
+                raise ValueError("Expected only target_path.")
+
+            target_path = parameters["target_path"]
+
+            if (
+                not isinstance(target_path, str)
+                or not target_path.startswith("/")
+                or target_path == "/"
+                or len(target_path) > 4096
+                or "\n" in target_path
+                or "\r" in target_path
+            ):
+                raise ValueError("Invalid swap filesystem target path.")
+
+        elif parameters not in (None, {}):
+            raise ValueError("Unexpected discovery parameters.")
+
+        return self._request(
+            operation,
+            target_id,
+            parameters=parameters,
+            include_metadata=True,
+        )
+    def discover_with_freshness(
+        self,
+        operation,
+        target_id,
+        *,
+        parameters=None,
+        max_age_seconds=30,
+    ):
+        """Collect discovery evidence and assess its freshness."""
+
+        evidence = self.discover_with_evidence(
+            operation,
+            target_id,
+            parameters=parameters,
+        )
+
+        freshness = evaluate_freshness(
+            evidence,
+            max_age_seconds=max_age_seconds,
+        )
+
+        return {
+            "evidence": evidence,
+            "freshness": freshness,
+            "execution_allowed": False,
+        }
+    def discover_for_planning(
+        self,
+        operation,
+        target_id,
+        *,
+        parameters=None,
+        max_age_seconds=30,
+    ):
+        """Collect and validate evidence for read-only planning."""
+
+        evidence = self.discover_with_evidence(
+            operation,
+            target_id,
+            parameters=parameters,
+        )
+
+        expected_target_path = None
+
+        if operation == "discovery.swap_filesystem":
+            expected_target_path = parameters["target_path"]
+
+        gate = evaluate_evidence_gate(
+            evidence,
+            expected_operation=operation,
+            expected_target_id=target_id,
+            expected_target_path=expected_target_path,
+            max_age_seconds=max_age_seconds,
+        )
+
+        return {
+            "evidence": evidence,
+            "gate": gate,
+            "execution_allowed": False,
+        }
