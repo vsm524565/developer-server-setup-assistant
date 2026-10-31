@@ -80,6 +80,31 @@ Initial control-panel support:
 ## Current Status
 
 🚧 Project under active development.
+### Common Server Lifecycle — Milestone 4.10
+
+The project now includes a reusable, read-only common server lifecycle layer.
+
+Implemented capabilities:
+- Agentless Linux bootstrap and common-health discovery.
+- Pre-operation readiness assessment and evidence validation.
+- Historical baseline acceptance and before/after comparison.
+- Post-operation health assessment.
+- Temporary artifact cleanup planning.
+- Structured lifecycle reporting and read-only coordination.
+
+Validation:
+- 177 backend tests passed.
+- Integrated lifecycle verified across six Linux lab VMs.
+- Failure handling and cleanup planning safeguards tested.
+
+Current scope:
+- Read-only inspection and planning.
+- No application execution or privileged remediation.
+- No remote temporary-file deletion.
+- No swap creation or activation.
+
+Future milestones will integrate approved application execution,
+operation-specific verification, safe cleanup, and recovery workflows.
 
 Current milestone:
 

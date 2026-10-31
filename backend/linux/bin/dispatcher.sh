@@ -54,6 +54,8 @@ if ! jq -e '
     and .schema_version == "1.0"
     and (.request_id | type == "string" and length > 0)
     and (.operation == "discovery.system"
+    or .operation == "discovery.bootstrap"
+    or .operation == "discovery.common_health"
     or .operation == "discovery.package_manager"
     or .operation == "discovery.runtimes"
     or .operation == "discovery.web_servers"
@@ -172,6 +174,109 @@ fi
 if [[ "$discovery_status" == "success" ]]; then
 
     case "$operation" in
+
+        discovery.common_health)
+            validation_filter='
+                type == "object"
+                and ((keys | sort) == ([
+                    "schema_version", "check", "identity",
+                    "privileges", "time_health", "execution_allowed"
+                ] | sort))
+                and .schema_version == "1.0"
+                and .check == "common_health"
+                and .execution_allowed == false
+
+                and (.identity | type == "object")
+                and ((.identity | keys | sort) == ([
+                    "schema_version", "check", "uid", "gid",
+                    "username", "is_root", "execution_allowed"
+                ] | sort))
+                and .identity.schema_version == "1.0"
+                and .identity.check == "identity"
+                and (.identity.uid | type == "number" and floor == . and . >= 0)
+                and (.identity.gid | type == "number" and floor == . and . >= 0)
+                and (.identity.username | type == "string" and length > 0)
+                and (.identity.is_root == (.identity.uid == 0))
+                and .identity.execution_allowed == false
+
+                and (.privileges | type == "object")
+                and ((.privileges | keys | sort) == ([
+                    "schema_version", "check", "uid",
+                    "sudo_available", "status", "reason", "execution_allowed"
+                ] | sort))
+                and .privileges.schema_version == "1.0"
+                and .privileges.check == "privileges"
+                and .privileges.uid == .identity.uid
+                and (.privileges.sudo_available | type == "boolean")
+                and (.privileges.status | IN(
+                    "ROOT", "POLICY_LIST_AVAILABLE",
+                    "PASSWORD_REQUIRED", "DENIED",
+                    "UNKNOWN", "UNAVAILABLE"
+                ))
+                and (.privileges.reason | type == "string")
+                and .privileges.execution_allowed == false
+
+                and (.time_health | type == "object")
+                and ((.time_health | keys | sort) == ([
+                    "schema_version", "check", "synchronization",
+                    "ntp_enabled", "timedatectl_available",
+                    "chrony_available", "execution_allowed"
+                ] | sort))
+                and .time_health.schema_version == "1.0"
+                and .time_health.check == "time_health"
+                and (.time_health.synchronization | IN(
+                    "SYNCHRONIZED", "UNSYNCHRONIZED", "UNKNOWN"
+                ))
+                and (.time_health.ntp_enabled | IN(
+                    "ENABLED", "DISABLED", "UNKNOWN"
+                ))
+                and (.time_health.timedatectl_available | type == "boolean")
+                and (.time_health.chrony_available | type == "boolean")
+                and .time_health.execution_allowed == false
+            '
+            ;;
+
+        discovery.bootstrap)
+            validation_filter='
+                type == "object"
+                and ((keys | sort) == ([
+                    "schema_version", "check", "capabilities",
+                    "summary", "execution_allowed"
+                ] | sort))
+                and .schema_version == "1.0"
+                and .check == "bootstrap_capabilities"
+                and .execution_allowed == false
+                and (.capabilities | type == "array")
+                and (.capabilities | length == 17)
+                and ([
+                    .capabilities[] |
+                    type == "object"
+                    and ((keys | sort) == (["name", "status"] | sort))
+                    and (.name | type == "string")
+                    and (.status == "AVAILABLE" or .status == "MISSING")
+                ] | all)
+                and ([.capabilities[].name] | unique | length) == 17
+                and ([.capabilities[].name] | sort) == ([
+                    "bash", "jq", "awk", "sed", "grep", "stat",
+                    "date", "df", "findmnt", "lsblk", "mktemp",
+                    "base64", "systemctl", "sudo", "ip", "ss", "getent"
+                ] | sort)
+                and (.summary | type == "object")
+                and ((.summary | keys | sort) ==
+                    (["total", "available", "missing"] | sort))
+                and .summary.total == 17
+                and (.summary.available | type == "number"
+                     and floor == . and . >= 0)
+                and (.summary.missing | type == "number"
+                     and floor == . and . >= 0)
+                and (.summary.available + .summary.missing == 17)
+                and (.summary.available ==
+                    ([.capabilities[] | select(.status == "AVAILABLE")] | length))
+                and (.summary.missing ==
+                    ([.capabilities[] | select(.status == "MISSING")] | length))
+            '
+            ;;
+
         discovery.swap_filesystem)
             validation_filter='
                 type == "object"

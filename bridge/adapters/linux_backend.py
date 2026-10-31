@@ -79,7 +79,47 @@ class LinuxBackend:
     def discover_system(self, target_id):
         """Retrieve system information for compatibility decisions."""
         return self._request("discovery.system", target_id)
+    def discover_bootstrap(self, target_id):
+        """Discover common remote capabilities without modifying the server."""
+        data = self._request("discovery.bootstrap", target_id)
 
+        if (
+            data.get("schema_version") != "1.0"
+            or data.get("check") != "bootstrap_capabilities"
+            or data.get("execution_allowed") is not False
+        ):
+            raise RuntimeError("Invalid bootstrap discovery response.")
+
+        return data
+    def discover_common_health(self, target_id):
+        """Retrieve read-only identity, privilege and time-health data."""
+        data = self._request("discovery.common_health", target_id)
+
+        if (
+            data.get("schema_version") != "1.0"
+            or data.get("check") != "common_health"
+            or data.get("execution_allowed") is not False
+        ):
+            raise RuntimeError("Invalid common-health discovery response.")
+
+        for section, expected_check in (
+            ("identity", "identity"),
+            ("privileges", "privileges"),
+            ("time_health", "time_health"),
+        ):
+            value = data.get(section)
+
+            if (
+                not isinstance(value, dict)
+                or value.get("schema_version") != "1.0"
+                or value.get("check") != expected_check
+                or value.get("execution_allowed") is not False
+            ):
+                raise RuntimeError(
+                    f"Invalid common-health section: {section}"
+                )
+
+        return data
     def discover_web_servers(self, target_id):
         """Retrieve web-server discovery results."""
         data = self._request("discovery.web_servers", target_id)
@@ -260,6 +300,8 @@ class LinuxBackend:
 
         allowed = {
             "discovery.system",
+            "discovery.bootstrap",
+            "discovery.common_health",
             "discovery.package_manager",
             "discovery.runtimes",
             "discovery.web_servers",

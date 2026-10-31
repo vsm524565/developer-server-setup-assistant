@@ -11,6 +11,13 @@ INVENTORY_SCRIPT="$BASE_DIR/backend/linux/connection/inventory.sh"
 
 # System discovery.
 SYSTEM_SCRIPT="$BASE_DIR/backend/linux/discovery/system.sh"
+BOOTSTRAP_SCRIPT="$BASE_DIR/backend/linux/discovery/bootstrap.sh"
+
+# Common lifecycle health discovery.
+IDENTITY_SCRIPT="$BASE_DIR/backend/linux/discovery/identity.sh"
+PRIVILEGES_SCRIPT="$BASE_DIR/backend/linux/discovery/privileges.sh"
+TIME_HEALTH_SCRIPT="$BASE_DIR/backend/linux/discovery/time_health.sh"
+COMMON_HEALTH_SCRIPT="$BASE_DIR/backend/linux/discovery/common_health.sh"
 
 # Package manager discovery.
 PACKAGE_MANAGER_MODULE="$BASE_DIR/backend/linux/modules/software/package_manager.sh"
@@ -26,6 +33,7 @@ WEB_SERVERS_RUNNER="$BASE_DIR/backend/linux/discovery/web_servers.sh"
 
 SWAP_IDENTITY_MODULE="$BASE_DIR/backend/linux/discovery/swap_identity.sh"
 SWAP_FILESYSTEM_MODULE="$BASE_DIR/backend/linux/discovery/swap_filesystem.sh"
+
 
 SSH_KEY="${DSSA_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 KNOWN_HOSTS="$HOME/.ssh/known_hosts"
@@ -62,6 +70,61 @@ fi
 # ---------------------------------------------------------
 
 case "$operation" in
+    discovery.common_health)
+        remote_command='bash -s'
+
+        for file in \
+            "$IDENTITY_SCRIPT" \
+            "$PRIVILEGES_SCRIPT" \
+            "$TIME_HEALTH_SCRIPT" \
+            "$COMMON_HEALTH_SCRIPT"; do
+
+            if [[ ! -f "$file" || ! -r "$file" ]]; then
+                echo "ERROR: Common health collector unavailable" >&2
+                exit 3
+            fi
+        done
+
+        remote_script="$(mktemp)"
+        trap 'rm -f -- "$remote_script"' EXIT
+
+        {
+            cat "$IDENTITY_SCRIPT"
+            printf '\n'
+            cat "$PRIVILEGES_SCRIPT"
+            printf '\n'
+            cat "$TIME_HEALTH_SCRIPT"
+            printf '\n'
+            cat "$COMMON_HEALTH_SCRIPT"
+            printf '\n'
+            printf 'discover_common_health\n'
+        } > "$remote_script"
+
+        if ! bash -n "$remote_script"; then
+            echo "ERROR: Invalid common health bundle" >&2
+            exit 3
+        fi
+        ;;
+    discovery.bootstrap)
+        remote_command='bash -s'
+
+        if [[ ! -f "$BOOTSTRAP_SCRIPT" ||
+              ! -r "$BOOTSTRAP_SCRIPT" ]]; then
+            echo "ERROR: Bootstrap collector unavailable" >&2
+            exit 3
+        fi
+
+        remote_script="$(mktemp)"
+        trap 'rm -f -- "$remote_script"' EXIT
+
+        cp -- "$BOOTSTRAP_SCRIPT" "$remote_script"
+
+        if ! bash -n "$remote_script"; then
+            echo "ERROR: Invalid bootstrap discovery bundle" >&2
+            exit 3
+        fi
+        ;;
+
     discovery.swap_filesystem)
         remote_command='bash -s'
 
@@ -268,6 +331,100 @@ fi
 # ---------------------------------------------------------
 
 case "$operation" in
+    discovery.common_health)
+        if ! jq -e '
+            type == "object"
+            and ((keys | sort) == ([
+                "schema_version", "check", "identity",
+                "privileges", "time_health", "execution_allowed"
+            ] | sort))
+            and .schema_version == "1.0"
+            and .check == "common_health"
+            and .execution_allowed == false
+
+            and (.identity | type == "object")
+            and .identity.schema_version == "1.0"
+            and .identity.check == "identity"
+            and (.identity.uid | type == "number" and floor == . and . >= 0)
+            and (.identity.gid | type == "number" and floor == . and . >= 0)
+            and (.identity.username | type == "string" and length > 0)
+            and (.identity.is_root == (.identity.uid == 0))
+            and .identity.execution_allowed == false
+
+            and (.privileges | type == "object")
+            and .privileges.schema_version == "1.0"
+            and .privileges.check == "privileges"
+            and .privileges.uid == .identity.uid
+            and (.privileges.sudo_available | type == "boolean")
+            and (.privileges.status | IN(
+                "ROOT", "POLICY_LIST_AVAILABLE",
+                "PASSWORD_REQUIRED", "DENIED",
+                "UNKNOWN", "UNAVAILABLE"
+            ))
+            and (.privileges.reason | type == "string")
+            and .privileges.execution_allowed == false
+
+            and (.time_health | type == "object")
+            and .time_health.schema_version == "1.0"
+            and .time_health.check == "time_health"
+            and (.time_health.synchronization | IN(
+                "SYNCHRONIZED", "UNSYNCHRONIZED", "UNKNOWN"
+            ))
+            and (.time_health.ntp_enabled | IN(
+                "ENABLED", "DISABLED", "UNKNOWN"
+            ))
+            and (.time_health.timedatectl_available | type == "boolean")
+            and (.time_health.chrony_available | type == "boolean")
+            and .time_health.execution_allowed == false
+        ' <<< "$output" >/dev/null 2>&1; then
+            echo "ERROR: Invalid remote common health response" >&2
+            exit 5
+        fi
+        ;;
+    discovery.bootstrap)
+        if ! jq -e '
+            type == "object"
+            and ((keys | sort) == ([
+                "schema_version", "check", "capabilities",
+                "summary", "execution_allowed"
+            ] | sort))
+            and .schema_version == "1.0"
+            and .check == "bootstrap_capabilities"
+            and .execution_allowed == false
+            and (.capabilities | type == "array")
+            and (.capabilities | length == 17)
+            and ([
+                .capabilities[] |
+                type == "object"
+                and ((keys | sort) == (["name", "status"] | sort))
+                and (.name | type == "string")
+                and (.status == "AVAILABLE" or .status == "MISSING")
+            ] | all)
+            and ([.capabilities[].name] | sort) == ([
+                "bash", "jq", "awk", "sed", "grep", "stat",
+                "date", "df", "findmnt", "lsblk", "mktemp",
+                "base64", "systemctl", "sudo", "ip", "ss", "getent"
+            ] | sort)
+            and (.summary | type == "object")
+            and ((.summary | keys | sort) ==
+                (["total", "available", "missing"] | sort))
+            and (.summary.total == 17)
+            and (.summary.available | type == "number")
+            and (.summary.missing | type == "number")
+            and (.summary.available >= 0)
+            and (.summary.missing >= 0)
+            and (.summary.available + .summary.missing == 17)
+            and (.summary.available ==
+                ([.capabilities[] | select(.status == "AVAILABLE")] | length))
+            and (.summary.missing ==
+                ([.capabilities[] | select(.status == "MISSING")] | length))
+        ' <<< "$output" >/dev/null 2>&1; then
+            echo "ERROR: Invalid remote bootstrap response" >&2
+            exit 5
+        fi
+        ;;
+
+
 
     # -----------------------------------------------------
     # System discovery

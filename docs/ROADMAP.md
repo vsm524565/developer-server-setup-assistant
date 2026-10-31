@@ -210,3 +210,51 @@ Snapshots and VM resets are not routine requirements.
 - Simulated backend-to-Python failure handling passed:
   backend exit 17 produced CLI exit 1.
 - Real coordinator failure propagation through SSH remains unverified.
+
+## Milestone 4.10 — Common Server Lifecycle Layer — 2026-10-31
+
+Status: Implemented and tested (read-only scope).
+Git commit: Pending.
+
+### Completed
+
+- Defined common lifecycle contracts and operation context.
+- Implemented agentless bootstrap capability discovery.
+- Implemented identity, privilege, and time-health discovery.
+- Integrated common discovery with SSH, dispatcher, and Python bridge.
+- Implemented evidence-based pre-operation readiness assessment.
+- Implemented historical pre-operation baseline acceptance.
+- Implemented immediate and historical evidence binding.
+- Implemented system baseline comparison and change classification.
+- Implemented post-operation health assessment.
+- Implemented temporary artifact cleanup planning.
+- Implemented structured lifecycle reporting.
+- Implemented a read-only lifecycle coordinator.
+- Added permanent lifecycle security and failure-handling tests.
+
+### Validation Results
+
+- Backend unit and regression suite: 177/177 passed.
+- Six-VM lifecycle integration: 6/6 passed.
+- Pre-operation collection failure: BLOCKED.
+- Post-operation verification failure: VERIFICATION_FAILED.
+- Successful read-only lifecycle: INSPECTED.
+- Execution authorization: disabled.
+
+### Known Limitations
+
+- No application execution is performed by the lifecycle coordinator.
+- Historical acceptance records are not tamper-proof.
+- The lifecycle does not authorize privileged operations.
+- Temporary artifact cleanup is planning-only.
+- Remote filesystem ownership and symlink safety are not yet verified.
+- Application-specific verification remains a separate responsibility.
+
+### Future Work
+
+- Durable, integrity-protected lifecycle evidence and audit records.
+- Operation-specific readiness and expected-change policies.
+- Controlled application execution with explicit authorization.
+- Independently verified post-operation service and network checks.
+- Safe remote temporary-artifact cleanup with ownership verification.
+- Recovery and rollback coordination.
