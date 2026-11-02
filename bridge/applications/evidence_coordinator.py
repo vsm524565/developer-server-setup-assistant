@@ -13,6 +13,7 @@ from bridge.evidence.gate import evaluate_evidence_gate
 
 APPLICATION_DISCOVERY_OPERATIONS = frozenset({
     "discovery.system",
+    "discovery.package_manager",
     "discovery.web_servers",
     "discovery.ports",
     "discovery.panels",

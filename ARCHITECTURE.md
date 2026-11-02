@@ -326,3 +326,56 @@ corresponding legacy dependency.
 - Port discovery identifies listeners but not owning processes.
 - Control-panel discovery uses known filesystem indicators.
 - Application verification declarations are not executable probes.
+## Application Installation Planning — Milestone 4.12
+
+DSSA uses package-manager-oriented draft installation recipes
+under `bridge/applications/installation/`.
+
+### Recipe Selection
+
+- The detected package manager determines the general installation method.
+- The OS family and architecture constrain recipe applicability.
+- Exact OS versions are required only when declared by a recipe.
+- A wildcard OS version represents broad draft applicability,
+  not verified support for every release.
+- Package availability, repository trust and installation safety
+  require additional evidence before execution.
+
+### Registered Recipes
+
+Six draft recipes cover four applications:
+
+- Git: APT for Ubuntu/Debian; DNF for AlmaLinux/Rocky.
+- Nginx: APT for Ubuntu/Debian; DNF for AlmaLinux/Rocky.
+- Docker Engine: Ubuntu 24.04 vendor-repository recipe.
+- Docker Compose: Ubuntu 24.04 vendor-repository recipe.
+
+### Evidence and Dependencies
+
+Installation planning reuses the existing Linux discovery backend,
+target-bound evidence collection and freshness validation.
+
+Docker Compose depends on Docker Engine. The current discovery
+system cannot establish Docker package ownership and daemon health,
+so the dependency remains UNKNOWN.
+
+Nginx planning checks listening ports and known control-panel
+installation indicators.
+
+### Execution Boundary
+
+All recipes have DRAFT status.
+
+Generated plans describe package sources, dependencies, expected
+changes and verification requirements.
+
+They are not executable instructions or authorization tokens.
+The existing Bash installation backend remains separate.
+
+### Remaining Work
+
+- Package ownership and installed-version discovery.
+- Package availability and repository validation.
+- Service health and unmanaged-installation detection.
+- Application-specific compatibility and conflict policies.
+- Stronger approval and evidence binding before execution.

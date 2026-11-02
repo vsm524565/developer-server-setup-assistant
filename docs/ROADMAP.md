@@ -293,3 +293,34 @@ Next:
 - Expand Bash discovery and verification where required.
 - Design individual HestiaCP, CyberPanel and aaPanel workflows.
 - Introduce separately authorized execution integration.
+## Milestone 4.12 — Package-Manager-First Installation Planning
+
+Status: Implementation and validation complete.
+
+Delivered:
+
+- Installation recipe contracts and validated registry.
+- Six draft recipes covering four applications.
+- APT and DNF recipe selection for Git and Nginx.
+- OS-specific vendor-repository recipes for Docker and Compose.
+- Application dependency evaluation.
+- Accepted evidence binding and platform normalization.
+- Target-bound, read-only installation plan assembly.
+- Nginx port and panel conflict checks.
+
+Validation:
+
+- 218 backend tests passed.
+- Six Linux lab environments tested.
+- 24 real SSH-backed installation assessments passed.
+- No installation operations performed.
+
+Next milestone: 4.13 — Application State Discovery and Readiness.
+
+Priorities:
+
+- Detect package-managed and unmanaged applications.
+- Collect installed application versions.
+- Determine application service health.
+- Check package and repository availability.
+- Establish evidence-backed installation readiness.

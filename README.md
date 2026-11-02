@@ -129,3 +129,19 @@ ports and known control-panel installation indicators.
 
 Application-specific installation workflows will be implemented
 in subsequent milestones.
+### Application Installation Planning
+
+DSSA includes six draft installation recipes covering Git,
+Nginx, Docker Engine and Docker Compose.
+
+Git and Nginx use package-manager-specific APT/DNF recipes.
+Docker and Compose currently use Ubuntu 24.04 vendor-repository
+draft recipes.
+
+Plans are generated from accepted Linux discovery evidence.
+They identify applicable recipes, dependency states, potential
+changes and verification requirements.
+
+All planning is read-only. Matching a recipe does not establish
+package availability, compatibility certification or permission
+to execute an installation.
