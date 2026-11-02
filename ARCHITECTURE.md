@@ -228,3 +228,101 @@ Frontend presents.
 Python processes and coordinates.
 Platform-specific backends execute.
 Significant actions are auditable.
+
+## Application Architecture — Milestone 4.11
+
+DSSA provides a reusable application catalog with 23 registered
+application definitions.
+
+### Application Layer
+
+Located under `bridge/applications/`.
+
+Responsibilities:
+
+- Register applications using stable application IDs.
+- Declare application categories and requirements.
+- Evaluate operating-system compatibility.
+- Evaluate prerequisites and conflicts.
+- Describe expected changes and verification requirements.
+- Map accepted Linux discovery evidence to application observations.
+- Produce read-only application planning assessments.
+- Translate selected application decisions to the legacy planner.
+
+### Application Categories
+
+- Web servers
+- Databases
+- Caching
+- Containers
+- Development runtimes
+- Development tools
+- Reverse proxy and SSL
+- Control panels
+- System utilities
+
+### Controller and Backend Responsibilities
+
+The Bash backend collects actual server observations and performs
+server-side operations.
+
+The Python controller validates discovery evidence, applies application
+policies, resolves planning decisions, and coordinates the lifecycle.
+
+Application discovery uses the existing dispatcher and SSH transport.
+
+Two read-only discovery operations were added:
+
+- `discovery.ports`
+- `discovery.panels`
+
+### Evidence and Planning
+
+Application planning uses:
+
+1. An explicitly registered application definition.
+2. Application-required discovery operations.
+3. Target-bound discovery evidence.
+4. Freshness and evidence acceptance checks.
+5. Mapping of observed server facts to declared requirements.
+6. Compatibility, prerequisite, and conflict evaluation.
+
+An accepted evidence gate permits read-only planning only.
+
+### Installation Boundary
+
+All 23 application definitions remain DRAFT.
+
+Draft applications cannot become installation-ready through the
+application planning adapter.
+
+The new application framework does not invoke the existing Bash
+installation entry point or authorize privileged operations.
+
+Existing installation capabilities remain separate and unchanged.
+
+Control-panel directory indicators do not independently establish
+that a control panel is installed correctly or operational.
+
+### Legacy Compatibility
+
+The application catalog uses stable IDs such as `docker_compose`,
+whereas the older planner uses component names such as `Docker Compose`.
+
+An explicit translation adapter preserves compatibility without
+modifying the existing dependency resolver.
+
+Docker Engine is ordered before Docker Compose when resolving the
+corresponding legacy dependency.
+
+### Current Limitations
+
+- Application-specific installation policies remain incomplete.
+- Application-specific execution and recovery are not integrated.
+- Most application prerequisites lack dedicated discovery evidence.
+- Evidence envelopes are controller-created but not cryptographically
+  authenticated as independent execution authorization.
+- Discovery observations may change between separate SSH operations.
+- Port discovery identifies listeners but not owning processes.
+- Control-panel discovery uses known filesystem indicators.
+- Application verification declarations are not executable probes.

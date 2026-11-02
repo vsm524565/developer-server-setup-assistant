@@ -31,6 +31,14 @@ RUNTIMES_RUNNER="$BASE_DIR/backend/linux/discovery/runtimes.sh"
 WEB_SERVERS_MODULE="$BASE_DIR/backend/linux/modules/software/web_servers.sh"
 WEB_SERVERS_RUNNER="$BASE_DIR/backend/linux/discovery/web_servers.sh"
 
+# Listening TCP port discovery.
+PORTS_MODULE="$BASE_DIR/backend/linux/discovery/ports.sh"
+PORTS_RUNNER="$BASE_DIR/backend/linux/discovery/ports_runner.sh"
+
+# Control-panel installation indicator discovery.
+PANELS_MODULE="$BASE_DIR/backend/linux/discovery/panel.sh"
+PANELS_RUNNER="$BASE_DIR/backend/linux/discovery/panels_runner.sh"
+
 SWAP_IDENTITY_MODULE="$BASE_DIR/backend/linux/discovery/swap_identity.sh"
 SWAP_FILESYSTEM_MODULE="$BASE_DIR/backend/linux/discovery/swap_filesystem.sh"
 
@@ -198,7 +206,13 @@ REMOTE_RUNNER
     discovery.web_servers)
         remote_command='bash -s'
         ;;
+    discovery.ports)
+        remote_command='bash -s'
+        ;;
 
+    discovery.panels)
+        remote_command='bash -s'
+        ;;
     *)
         echo "ERROR: Unsupported SSH operation" >&2
         exit 2
@@ -242,7 +256,9 @@ fi
 
 if [[ "$operation" == "discovery.package_manager" ||
       "$operation" == "discovery.runtimes" ||
-      "$operation" == "discovery.web_servers" ]]; then
+      "$operation" == "discovery.web_servers" ||
+      "$operation" == "discovery.ports" ||
+      "$operation" == "discovery.panels" ]]; then
 
     case "$operation" in
         discovery.package_manager)
@@ -259,6 +275,15 @@ if [[ "$operation" == "discovery.package_manager" ||
             module="$WEB_SERVERS_MODULE"
             runner="$WEB_SERVERS_RUNNER"
             ;;
+        discovery.ports)
+            module="$PORTS_MODULE"
+            runner="$PORTS_RUNNER"
+            ;;
+        discovery.panels)
+            module="$PANELS_MODULE"
+            runner="$PANELS_RUNNER"
+            ;;
+        *)
     esac
 
     # Both collector and runner must exist and be readable.

@@ -306,6 +306,8 @@ class LinuxBackend:
             "discovery.runtimes",
             "discovery.web_servers",
             "discovery.swap_filesystem",
+            "discovery.ports",
+            "discovery.panels",
         }
 
         if operation not in allowed:

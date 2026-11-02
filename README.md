@@ -111,3 +111,21 @@ Current milestone:
 **Milestone 1 — SSH connection, sudo verification and server discovery**
 
 No production use is recommended at this stage.
+### Application Catalog
+
+DSSA includes a read-only catalog of 23 application definitions
+covering web servers, databases, caching, containers, runtimes,
+development tools, SSL, control panels and system utilities.
+
+Applications are assessed using target-bound Linux discovery
+evidence and Python planning policies.
+
+Supported catalog entries are currently DRAFT definitions.
+Registration does not imply compatibility, installation readiness,
+or execution authorization.
+
+The framework includes read-only discovery for listening TCP
+ports and known control-panel installation indicators.
+
+Application-specific installation workflows will be implemented
+in subsequent milestones.

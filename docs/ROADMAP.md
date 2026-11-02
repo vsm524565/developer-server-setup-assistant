@@ -258,3 +258,38 @@ Git commit: Pending.
 - Independently verified post-operation service and network checks.
 - Safe remote temporary-artifact cleanup with ownership verification.
 - Recovery and rollback coordination.
+## Milestone 4.11 — Application Contracts and Catalog
+
+Status: Implementation and validation completed; documentation
+and Git commit pending.
+
+Delivered:
+
+- 23 registered application definitions.
+- Central application registry and catalog loader.
+- Compatibility, prerequisite and conflict evaluation.
+- Expected-change and verification contracts.
+- Read-only application evidence mapping.
+- Application evidence coordinator.
+- Target-bound application assessment integration.
+- Legacy component-name and dependency mapping.
+- Non-executable legacy planning adapter.
+- Read-only port and control-panel discovery operations.
+
+Validation:
+
+- 195 backend automated tests passed.
+- Six Linux lab servers tested.
+- 12 port/panel discovery operations passed.
+- 12 Nginx/Docker application assessments passed.
+- Draft applications returned REVIEW_REQUIRED.
+- No application installation was performed through Milestone 4.11.
+
+Next:
+
+- Establish application-specific compatibility policies.
+- Define package, service, dependency and conflict requirements.
+- Implement validated application-specific installation plans.
+- Expand Bash discovery and verification where required.
+- Design individual HestiaCP, CyberPanel and aaPanel workflows.
+- Introduce separately authorized execution integration.

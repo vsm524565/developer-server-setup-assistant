@@ -59,6 +59,8 @@ if ! jq -e '
     or .operation == "discovery.package_manager"
     or .operation == "discovery.runtimes"
     or .operation == "discovery.web_servers"
+    or .operation == "discovery.ports"
+    or .operation == "discovery.panels"
     or .operation == "discovery.swap_filesystem")
     and (.target_id | type == "string"
      and test("^[a-zA-Z0-9_-]{1,64}$"))
@@ -495,7 +497,51 @@ and (
             '
             ;;
 
+        discovery.ports)
+            validation_filter='
+                type == "object"
+                and ((keys | sort) == ["listening_tcp_ports"])
+                and (.listening_tcp_ports | type == "array")
+                and (
+                    .listening_tcp_ports |
+                    all(.[];
+                        type == "number"
+                        and floor == .
+                        and . >= 1
+                        and . <= 65535
+                    )
+                )
+                and (
+                    .listening_tcp_ports ==
+                    (.listening_tcp_ports | unique | sort)
+                )
+            '
+            ;;
 
+        discovery.panels)
+            validation_filter='
+                type == "object"
+                and ((keys | sort) == ["panels"])
+                and (.panels | type == "array")
+                and (
+                    .panels |
+                    all(.[];
+                        IN(
+                            "aapanel",
+                            "cyberpanel",
+                            "hestia",
+                            "cpanel",
+                            "directadmin",
+                            "plesk"
+                        )
+                    )
+                )
+                and (
+                    .panels ==
+                    (.panels | unique | sort)
+                )
+            '
+            ;;
         *)
             discovery_status="error"
             discovery_exit_code=5
