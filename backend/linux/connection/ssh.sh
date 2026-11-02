@@ -39,6 +39,10 @@ PORTS_RUNNER="$BASE_DIR/backend/linux/discovery/ports_runner.sh"
 PANELS_MODULE="$BASE_DIR/backend/linux/discovery/panel.sh"
 PANELS_RUNNER="$BASE_DIR/backend/linux/discovery/panels_runner.sh"
 
+# Read-only application package, binary and service discovery.
+APPLICATION_STATE_MODULE="$BASE_DIR/backend/linux/modules/software/application_state.sh"
+APPLICATION_STATE_RUNNER="$BASE_DIR/backend/linux/discovery/application_state.sh"
+
 SWAP_IDENTITY_MODULE="$BASE_DIR/backend/linux/discovery/swap_identity.sh"
 SWAP_FILESYSTEM_MODULE="$BASE_DIR/backend/linux/discovery/swap_filesystem.sh"
 
@@ -68,6 +72,22 @@ if [[ "$operation" == "discovery.swap_filesystem" ]]; then
         echo "ERROR: Invalid swap filesystem target path" >&2
         exit 2
     fi
+elif [[ "$operation" == "discovery.application_state" ]]; then
+    if [[ $# -ne 3 ]]; then
+        echo "ERROR: Application ID is required" >&2
+        exit 2
+    fi
+
+    application_id="$3"
+
+    case "$application_id" in
+        git|nginx|docker|docker_compose) ;;
+        *)
+            echo "ERROR: Unsupported application ID" >&2
+            exit 2
+            ;;
+    esac
+
 elif [[ $# -ne 2 ]]; then
     echo "ERROR: Unexpected discovery argument" >&2
     exit 2
@@ -213,6 +233,9 @@ REMOTE_RUNNER
     discovery.panels)
         remote_command='bash -s'
         ;;
+    discovery.application_state)
+        remote_command='bash -s'
+        ;;
     *)
         echo "ERROR: Unsupported SSH operation" >&2
         exit 2
@@ -311,7 +334,51 @@ if [[ "$operation" == "discovery.package_manager" ||
         exit 3
     fi
 fi
+# Application-state discovery uses a parameterized read-only bundle.
+# The application ID is allowlisted above.
+# The package manager is selected by the remote server itself.
 
+if [[ "$operation" == "discovery.application_state" ]]; then
+
+    for file in \
+        "$PACKAGE_MANAGER_MODULE" \
+        "$APPLICATION_STATE_MODULE" \
+        "$APPLICATION_STATE_RUNNER"; do
+
+        if [[ ! -f "$file" || ! -r "$file" ]]; then
+            echo "ERROR: Application-state collector unavailable" >&2
+            exit 3
+        fi
+    done
+
+    remote_script="$(mktemp)"
+    trap 'rm -f -- "$remote_script"' EXIT
+
+    {
+        printf 'set -euo pipefail\n'
+
+        cat "$PACKAGE_MANAGER_MODULE"
+        printf '\n'
+
+        cat "$APPLICATION_STATE_MODULE"
+        printf '\n'
+
+        # This command runs on the remote server.
+        printf 'application_manager="$(select_package_manager)"\n'
+
+        # %q safely quotes the already-validated application ID.
+        printf 'set -- %q "$application_manager"\n' "$application_id"
+
+        cat "$APPLICATION_STATE_RUNNER"
+        printf '\n'
+
+    } > "$remote_script"
+
+    if ! bash -n "$remote_script"; then
+        echo "ERROR: Invalid application-state discovery bundle" >&2
+        exit 3
+    fi
+fi
 if [[ ! -f "$remote_script" || ! -r "$remote_script" ]]; then
     echo "ERROR: Discovery module unavailable" >&2
     exit 3
@@ -356,6 +423,69 @@ fi
 # ---------------------------------------------------------
 
 case "$operation" in
+    discovery.application_state)
+        if ! jq -e --arg requested "$application_id" '
+            type == "object"
+            and ((keys | sort) == ([
+                "schema_version", "application_id",
+                "package_manager", "package", "binary",
+                "service", "plugin", "read_only",
+                "execution_allowed"
+            ] | sort))
+            and .schema_version == "1.0"
+            and .application_id == $requested
+            and (.application_id |
+                 IN("git", "nginx", "docker", "docker_compose"))
+            and (.package_manager | IN("apt", "dnf"))
+            and .read_only == true
+            and .execution_allowed == false
+
+            and (.package | type == "object")
+            and ((.package | keys | sort) == ["name", "state"])
+            and (.package.name | type == "string" and length > 0)
+            and (.package.state |
+                 IN("installed", "absent", "unknown"))
+
+            and (.binary | type == "object")
+            and ((.binary | keys | sort) == ["path", "present"])
+            and (.binary.present | type == "boolean")
+            and (
+                if .binary.present then
+                    (.binary.path |
+                     type == "string" and startswith("/"))
+                else
+                    .binary.path == null
+                end
+            )
+
+            and (.service | type == "object")
+            and ((.service | keys) == ["state"])
+            and (.service.state |
+                 IN("active", "inactive", "failed",
+                    "activating", "deactivating",
+                    "unknown", "not_applicable"))
+
+            and (.plugin | type == "object")
+            and ((.plugin | keys) == ["state"])
+            and (.plugin.state |
+                 IN("available", "unknown", "not_applicable"))
+
+            and (
+                if .application_id == "git" then
+                    .package.name == "git"
+                elif .application_id == "nginx" then
+                    .package.name == "nginx"
+                elif .application_id == "docker" then
+                    .package.name == "docker-ce"
+                else
+                    .package.name == "docker-compose-plugin"
+                end
+            )
+        ' <<< "$output" >/dev/null 2>&1; then
+            echo "ERROR: Invalid remote application-state response" >&2
+            exit 5
+        fi
+        ;;
     discovery.common_health)
         if ! jq -e '
             type == "object"

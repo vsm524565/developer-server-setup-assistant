@@ -61,11 +61,19 @@ if ! jq -e '
     or .operation == "discovery.web_servers"
     or .operation == "discovery.ports"
     or .operation == "discovery.panels"
+    or .operation == "discovery.application_state"
     or .operation == "discovery.swap_filesystem")
     and (.target_id | type == "string"
      and test("^[a-zA-Z0-9_-]{1,64}$"))
     and (
-        if .operation == "discovery.swap_filesystem" then
+        if .operation == "discovery.application_state" then
+            (.parameters | type == "object")
+            and ((.parameters | keys) == ["application_id"])
+            and (
+                .parameters.application_id |
+                IN("git", "nginx", "docker", "docker_compose")
+            )
+        elif .operation == "discovery.swap_filesystem" then
             (.parameters | type == "object")
             and ((.parameters | keys) == ["target_path"])
             and (.parameters.target_path |
@@ -162,6 +170,12 @@ ssh_arguments=("$target_id" "$operation")
 if [[ "$operation" == "discovery.swap_filesystem" ]]; then
     target_path="$(jq -r '.parameters.target_path' <<< "$request")"
     ssh_arguments+=("$target_path")
+
+elif [[ "$operation" == "discovery.application_state" ]]; then
+    application_id="$(
+        jq -er '.parameters.application_id' <<< "$request"
+    )"
+    ssh_arguments+=("$application_id")
 fi
 
 if discovery_data="$("$SSH_SCRIPT" "${ssh_arguments[@]}")"; then
@@ -176,7 +190,59 @@ fi
 if [[ "$discovery_status" == "success" ]]; then
 
     case "$operation" in
-
+        discovery.application_state)
+            validation_filter='
+                type == "object"
+                and .schema_version == "1.0"
+                and .application_id == $requested_application
+                and .read_only == true
+                and .execution_allowed == false
+                and (.package_manager | IN("apt", "dnf"))
+                and (.package | type == "object")
+                and (.package.name | type == "string" and length > 0)
+                and (.package.state |
+                     IN("installed", "absent", "unknown"))
+                and (.binary | type == "object")
+                and (.binary.present | type == "boolean")
+                and (
+                    if .binary.present then
+                        (.binary.path |
+                         type == "string" and startswith("/"))
+                    else
+                        .binary.path == null
+                    end
+                )
+                and (.service.state |
+                     IN("active", "inactive", "failed",
+                        "activating", "deactivating",
+                        "unknown", "not_applicable"))
+                and (.plugin.state |
+                     IN("available", "unknown", "not_applicable"))
+                and ((keys | sort) == ([
+                    "schema_version", "application_id",
+                    "package_manager", "package", "binary",
+                    "service", "plugin", "read_only",
+                    "execution_allowed"
+                ] | sort))
+                and ((.package | keys | sort) ==
+                     ["name", "state"])
+                and ((.binary | keys | sort) ==
+                     ["path", "present"])
+                and ((.service | keys) == ["state"])
+                and ((.plugin | keys) == ["state"])
+                and (
+                    if .application_id == "git" then
+                        .package.name == "git"
+                    elif .application_id == "nginx" then
+                        .package.name == "nginx"
+                    elif .application_id == "docker" then
+                        .package.name == "docker-ce"
+                    else
+                        .package.name == "docker-compose-plugin"
+                    end
+                )
+            '
+            ;;
         discovery.common_health)
             validation_filter='
                 type == "object"
@@ -551,6 +617,7 @@ and (
     if [[ "$discovery_status" == "success" ]]; then
         if ! jq -e \
             --arg requested_path "${target_path:-}" \
+            --arg requested_application "${application_id:-}" \
             "$validation_filter" \
             <<< "$discovery_data" >/dev/null 2>&1; then
             discovery_status="error"

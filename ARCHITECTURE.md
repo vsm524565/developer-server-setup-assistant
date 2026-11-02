@@ -379,3 +379,76 @@ The existing Bash installation backend remains separate.
 - Service health and unmanaged-installation detection.
 - Application-specific compatibility and conflict policies.
 - Stronger approval and evidence binding before execution.
+## Application State Discovery — Milestone 4.13
+
+DSSA provides read-only application-state discovery through the
+existing controller, dispatcher and agentless SSH backend.
+
+### Architecture
+
+1. Python requests `discovery.application_state` for an approved application.
+2. The dispatcher validates the request and application identifier.
+3. The SSH transport resolves the target through backend-owned inventory.
+4. The remote Bash bundle determines the package manager.
+5. The application-state collector gathers package, binary, service
+   and plugin observations.
+6. The SSH transport and dispatcher validate the JSON response.
+7. The Python evidence gate validates target identity and freshness.
+8. The application-state interpreter classifies accepted observations.
+
+### Application Coverage
+
+Initial applications:
+
+- Git
+- Nginx
+- Docker Engine
+- Docker Compose
+
+### Application States
+
+- INSTALLED_HEALTHY
+- MISSING
+- UNMANAGED
+- UNHEALTHY
+- UNKNOWN
+
+INSTALLED_HEALTHY currently indicates passing basic installation
+and service-presence checks, not full functional verification.
+
+Docker Engine and Docker Compose classification remains conservative
+because alternative installation methods and ownership are not yet
+fully identified.
+
+### Package Database Handling
+
+APT/dpkg and DNF/RPM package inventories are queried without
+modifying packages or repositories.
+
+Successful inventory queries can establish whether an expected
+package is installed or absent from the package database.
+
+Failed or ambiguous inventory queries produce UNKNOWN.
+
+Package absence alone does not establish application absence.
+
+### Execution Boundary
+
+All application-state operations are read-only.
+
+The application-state interpreter does not generate installation
+commands, invoke installers or authorize execution.
+
+Application discovery is not yet connected to installation readiness.
+
+### Validated Environments
+
+- Ubuntu 22.04
+- Ubuntu 24.04
+- Ubuntu 26.04
+- Debian 13
+- AlmaLinux 10
+- Rocky Linux 10
+
+Validation: 245 backend tests passed and 24 live application-state
+discovery/classification assessments completed successfully.

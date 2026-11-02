@@ -324,3 +324,38 @@ Priorities:
 - Determine application service health.
 - Check package and repository availability.
 - Establish evidence-backed installation readiness.
+## Milestone 4.13 — Application State Discovery
+
+Status: Completed and validated; repository commit pending.
+
+Delivered:
+
+- Reusable Bash application-state collector.
+- Strict application ID validation.
+- Existing SSH transport integration.
+- Remote package-manager selection.
+- Package, binary, service and plugin observations.
+- Dispatcher response-schema validation.
+- Python controller and evidence-gate integration.
+- Conservative five-state application classification.
+- Package-database error handling.
+- Dedicated state-classification and package-query tests.
+
+Validation:
+
+- 245 backend regression tests passed.
+- 24 six-VM application-state assessments passed.
+- 12 additional APT/DNF discovery checks passed.
+- Bash and Python syntax checks passed.
+- No installation operations performed.
+
+Next: Milestone 4.14 — Application Inventory and Readiness Evidence.
+
+Planned work:
+
+- Detect alternative package ownership and unmanaged applications.
+- Collect installed application versions.
+- Verify runtime and service health.
+- Establish package availability and repository identity.
+- Bind application states to installation prerequisites.
+- Continue keeping execution authorization separate.

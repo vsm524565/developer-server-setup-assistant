@@ -145,3 +145,22 @@ changes and verification requirements.
 All planning is read-only. Matching a recipe does not establish
 package availability, compatibility certification or permission
 to execute an installation.
+### Application State Discovery
+
+DSSA supports read-only discovery of Git, Nginx, Docker Engine
+and Docker Compose across supported APT/DNF Linux environments.
+
+The collector gathers installed-package evidence, executable
+presence, service status and Docker Compose plugin observations.
+
+Accepted evidence is interpreted into:
+
+`INSTALLED_HEALTHY`, `MISSING`, `UNMANAGED`, `UNHEALTHY`,
+and `UNKNOWN`.
+
+The initial health classification is limited to basic installation
+and service checks. Docker installation ownership and alternative
+installation methods require additional discovery.
+
+All application-state results are observational and cannot
+authorize package installation.

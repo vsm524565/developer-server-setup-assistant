@@ -308,6 +308,7 @@ class LinuxBackend:
             "discovery.swap_filesystem",
             "discovery.ports",
             "discovery.panels",
+            "discovery.application_state",
         }
 
         if operation not in allowed:
@@ -331,6 +332,34 @@ class LinuxBackend:
                 or "\r" in target_path
             ):
                 raise ValueError("Invalid swap filesystem target path.")
+
+        elif operation == "discovery.application_state":
+            allowed_applications = {
+                "git",
+                "nginx",
+                "docker",
+                "docker_compose",
+            }
+
+            if not isinstance(parameters, dict):
+                raise ValueError(
+                    "Application-state parameters are required."
+                )
+
+            if set(parameters) != {"application_id"}:
+                raise ValueError(
+                    "Expected only application_id."
+                )
+
+            application_id = parameters["application_id"]
+
+            if (
+                not isinstance(application_id, str)
+                or application_id not in allowed_applications
+            ):
+                raise ValueError(
+                    "Unsupported application-state discovery target."
+                )
 
         elif parameters not in (None, {}):
             raise ValueError("Unexpected discovery parameters.")
@@ -401,3 +430,33 @@ class LinuxBackend:
             "gate": gate,
             "execution_allowed": False,
         }
+    def discover_application_state(self, target_id, application_id):
+        """Collect read-only package, binary and service observations."""
+
+        allowed = {
+            "git",
+            "nginx",
+            "docker",
+            "docker_compose",
+        }
+
+        if application_id not in allowed:
+            raise ValueError("Unsupported application ID")
+
+        data = self._request(
+            "discovery.application_state",
+            target_id,
+            parameters={"application_id": application_id},
+        )
+
+        if (
+            data.get("schema_version") != "1.0"
+            or data.get("application_id") != application_id
+            or data.get("read_only") is not True
+            or data.get("execution_allowed") is not False
+        ):
+            raise RuntimeError(
+                "Invalid application-state discovery response"
+            )
+
+        return data
