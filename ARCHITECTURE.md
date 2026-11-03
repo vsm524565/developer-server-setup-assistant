@@ -452,3 +452,31 @@ Application discovery is not yet connected to installation readiness.
 
 Validation: 245 backend tests passed and 24 live application-state
 discovery/classification assessments completed successfully.
+### Application Inventory Evidence Pipeline — Milestone 4.14
+
+The application inventory operation follows the existing layered architecture:
+
+`Python Controller → Dispatcher → SSH Transport → Remote Bash Collector → JSON Validation → Evidence Gate → Inventory Normalizer`
+
+**Operation:** `discovery.application_inventory`
+
+**Request parameter:** `application_id`
+
+Supported application identifiers are `git`, `nginx`, `docker` and `docker_compose`.
+
+The remote inventory collector uses package-manager queries to identify recognized packages, package versions, executable paths and package ownership. Package queries are read-only, and the collector rejects failed package-state queries rather than returning partial candidate lists.
+
+The SSH and dispatcher layers validate application identifiers and inventory response structure. The Python controller maintains target-bound evidence and freshness checks.
+
+The normalizer provides installation-identification statuses:
+
+- `IDENTIFIED`: Recognized installation with consistent package and executable ownership evidence
+- `ABSENT`: Recognized packages and executable are absent
+- `REVIEW_REQUIRED`: Conflicting or incomplete installation evidence requires review
+- `UNKNOWN`: Available evidence does not establish the installation state
+
+Package ownership does not establish service health or application functionality. Docker Compose plugin availability is not confirmed by the presence of the Docker executable.
+
+The inventory operation does not authorize package installation or other system modifications. `execution_allowed` remains `false`.
+
+**Known limitation:** The legacy ports and control-panel discovery routes require dedicated strict response-schema validation. This remains a separate hardening task.

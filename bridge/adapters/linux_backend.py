@@ -309,6 +309,7 @@ class LinuxBackend:
             "discovery.ports",
             "discovery.panels",
             "discovery.application_state",
+            "discovery.application_inventory",
         }
 
         if operation not in allowed:
@@ -333,7 +334,10 @@ class LinuxBackend:
             ):
                 raise ValueError("Invalid swap filesystem target path.")
 
-        elif operation == "discovery.application_state":
+        elif operation in (
+            "discovery.application_state",
+            "discovery.application_inventory",
+        ):
             allowed_applications = {
                 "git",
                 "nginx",
@@ -458,5 +462,36 @@ class LinuxBackend:
             raise RuntimeError(
                 "Invalid application-state discovery response"
             )
+
+        return data
+
+    def discover_application_inventory(self, target_id, application_id):
+        """Collect validated read-only application package inventory."""
+
+        allowed = {
+            "git",
+            "nginx",
+            "docker",
+            "docker_compose",
+        }
+
+        if not isinstance(application_id, str) or application_id not in allowed:
+            raise ValueError("Unsupported application inventory target.")
+
+        data = self._request(
+            "discovery.application_inventory",
+            target_id,
+            parameters={"application_id": application_id},
+        )
+
+        if (
+            data.get("schema_version") != "1.0"
+            or data.get("application_id") != application_id
+            or data.get("read_only") is not True
+            or data.get("execution_allowed") is not False
+            or not isinstance(data.get("packages"), list)
+            or not isinstance(data.get("binary"), dict)
+        ):
+            raise RuntimeError("Invalid application inventory response.")
 
         return data

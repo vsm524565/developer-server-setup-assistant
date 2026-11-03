@@ -43,6 +43,10 @@ PANELS_RUNNER="$BASE_DIR/backend/linux/discovery/panels_runner.sh"
 APPLICATION_STATE_MODULE="$BASE_DIR/backend/linux/modules/software/application_state.sh"
 APPLICATION_STATE_RUNNER="$BASE_DIR/backend/linux/discovery/application_state.sh"
 
+# Read-only application inventory discovery.
+APPLICATION_INVENTORY_MODULE="$BASE_DIR/backend/linux/modules/software/application_inventory.sh"
+APPLICATION_INVENTORY_RUNNER="$BASE_DIR/backend/linux/discovery/application_inventory.sh"
+
 SWAP_IDENTITY_MODULE="$BASE_DIR/backend/linux/discovery/swap_identity.sh"
 SWAP_FILESYSTEM_MODULE="$BASE_DIR/backend/linux/discovery/swap_filesystem.sh"
 
@@ -72,8 +76,9 @@ if [[ "$operation" == "discovery.swap_filesystem" ]]; then
         echo "ERROR: Invalid swap filesystem target path" >&2
         exit 2
     fi
-elif [[ "$operation" == "discovery.application_state" ]]; then
-    if [[ $# -ne 3 ]]; then
+elif [[ "$operation" == "discovery.application_state" ||
+        "$operation" == "discovery.application_inventory" ]]; then
+   if [[ $# -ne 3 ]]; then
         echo "ERROR: Application ID is required" >&2
         exit 2
     fi
@@ -236,6 +241,9 @@ REMOTE_RUNNER
     discovery.application_state)
         remote_command='bash -s'
         ;;
+    discovery.application_inventory)
+        remote_command='bash -s'
+        ;;
     *)
         echo "ERROR: Unsupported SSH operation" >&2
         exit 2
@@ -273,10 +281,12 @@ if [[ ! "$host" =~ ^[a-zA-Z0-9.-]+$ ]] ||
     exit 3
 fi
 
+
 # ---------------------------------------------------------
 # 5. Build reusable discovery bundles
 # ---------------------------------------------------------
 
+# Standard parameterless discovery operations.
 if [[ "$operation" == "discovery.package_manager" ||
       "$operation" == "discovery.runtimes" ||
       "$operation" == "discovery.web_servers" ||
@@ -298,18 +308,18 @@ if [[ "$operation" == "discovery.package_manager" ||
             module="$WEB_SERVERS_MODULE"
             runner="$WEB_SERVERS_RUNNER"
             ;;
+
         discovery.ports)
             module="$PORTS_MODULE"
             runner="$PORTS_RUNNER"
             ;;
+
         discovery.panels)
             module="$PANELS_MODULE"
             runner="$PANELS_RUNNER"
             ;;
-        *)
     esac
 
-    # Both collector and runner must exist and be readable.
     for file in "$module" "$runner"; do
         if [[ ! -f "$file" || ! -r "$file" ]]; then
             echo "ERROR: Discovery component unavailable" >&2
@@ -317,7 +327,6 @@ if [[ "$operation" == "discovery.package_manager" ||
         fi
     done
 
-    # Create a temporary bundle with restrictive permissions.
     remote_script="$(mktemp)"
     trap 'rm -f -- "$remote_script"' EXIT
 
@@ -328,15 +337,16 @@ if [[ "$operation" == "discovery.package_manager" ||
         printf '\n'
     } > "$remote_script"
 
-    # Validate the complete script before remote execution.
     if ! bash -n "$remote_script"; then
         echo "ERROR: Invalid discovery bundle" >&2
         exit 3
     fi
 fi
-# Application-state discovery uses a parameterized read-only bundle.
-# The application ID is allowlisted above.
-# The package manager is selected by the remote server itself.
+
+
+# ---------------------------------------------------------
+# Application-state discovery
+# ---------------------------------------------------------
 
 if [[ "$operation" == "discovery.application_state" ]]; then
 
@@ -363,10 +373,10 @@ if [[ "$operation" == "discovery.application_state" ]]; then
         cat "$APPLICATION_STATE_MODULE"
         printf '\n'
 
-        # This command runs on the remote server.
+        # Package manager is detected on the remote server.
         printf 'application_manager="$(select_package_manager)"\n'
 
-        # %q safely quotes the already-validated application ID.
+        # Application ID is already validated against the allowlist.
         printf 'set -- %q "$application_manager"\n' "$application_id"
 
         cat "$APPLICATION_STATE_RUNNER"
@@ -379,8 +389,73 @@ if [[ "$operation" == "discovery.application_state" ]]; then
         exit 3
     fi
 fi
-if [[ ! -f "$remote_script" || ! -r "$remote_script" ]]; then
+
+
+# ---------------------------------------------------------
+# Application-inventory discovery
+# ---------------------------------------------------------
+
+if [[ "$operation" == "discovery.application_inventory" ]]; then
+
+    for file in \
+        "$PACKAGE_MANAGER_MODULE" \
+        "$APPLICATION_STATE_MODULE" \
+        "$APPLICATION_INVENTORY_MODULE" \
+        "$APPLICATION_INVENTORY_RUNNER"; do
+
+        if [[ ! -f "$file" || ! -r "$file" ]]; then
+            echo "ERROR: Application inventory component unavailable" >&2
+            exit 3
+        fi
+    done
+
+    remote_script="$(mktemp)"
+    trap 'rm -f -- "$remote_script"' EXIT
+
+    {
+        printf 'set -euo pipefail\n'
+
+        cat "$PACKAGE_MANAGER_MODULE"
+        printf '\n'
+
+        cat "$APPLICATION_STATE_MODULE"
+        printf '\n'
+
+        cat "$APPLICATION_INVENTORY_MODULE"
+        printf '\n'
+
+        # Determine APT/DNF on the remote machine.
+        printf 'application_manager="$(select_package_manager)"\n'
+
+        # Forward only the allowlisted application identifier.
+        printf 'set -- %q "$application_manager"\n' "$application_id"
+
+        cat "$APPLICATION_INVENTORY_RUNNER"
+        printf '\n'
+
+    } > "$remote_script"
+
+    if ! bash -n "$remote_script"; then
+        echo "ERROR: Invalid application inventory bundle" >&2
+        exit 3
+    fi
+fi
+
+
+# ---------------------------------------------------------
+# Final discovery bundle validation
+# ---------------------------------------------------------
+
+if [[ -z "${remote_script:-}" ||
+      ! -f "$remote_script" ||
+      ! -r "$remote_script" ]]; then
+
     echo "ERROR: Discovery module unavailable" >&2
+    exit 3
+fi
+
+if ! bash -n "$remote_script"; then
+    echo "ERROR: Discovery bundle failed syntax validation" >&2
     exit 3
 fi
 
@@ -423,6 +498,102 @@ fi
 # ---------------------------------------------------------
 
 case "$operation" in
+
+    discovery.application_inventory)
+        if ! jq -e --arg requested "$application_id" '
+            type == "object"
+            and ((keys | sort) == ([
+                "schema_version", "application_id",
+                "package_manager", "packages", "binary",
+                "read_only", "execution_allowed"
+            ] | sort))
+            and .schema_version == "1.0"
+            and .application_id == $requested
+            and (.package_manager | IN("apt", "dnf"))
+            and .read_only == true
+            and .execution_allowed == false
+
+            and (.packages | type == "array")
+            and (
+                .packages |
+                all(.[];
+                    type == "object"
+                    and ((keys | sort) == ["name", "state", "version"])
+                    and (.name | type == "string" and length > 0)
+                    and (.state |
+                         IN("installed", "absent", "unknown"))
+                    and (
+                        if .state == "installed" then
+                            (.version == null or
+                             (.version | type == "string" and length > 0))
+                        else
+                            .version == null
+                        end
+                    )
+                )
+            )
+
+            and (
+                [.packages[].name] ==
+                (
+                    if $requested == "git" then
+                        ["git"]
+                    elif $requested == "nginx" then
+                        ["nginx"]
+                    elif $requested == "docker" then
+                        [
+                            "docker-ce", "docker-ce-cli",
+                            "docker.io", "moby-engine", "moby-cli"
+                        ]
+                    else
+                        [
+                            "docker-compose-plugin",
+                            "docker-compose-v2",
+                            "docker-compose"
+                        ]
+                    end
+                )
+            )
+
+            and (.binary | type == "object")
+            and ((.binary | keys | sort) ==
+                (["name", "path", "present", "ownership"] | sort))
+            and .binary.name == (
+                if $requested == "git" then "git"
+                elif $requested == "nginx" then "nginx"
+                else "docker"
+                end
+            )
+            and (.binary.present | type == "boolean")
+            and (
+                if .binary.present then
+                    (.binary.path |
+                     type == "string" and startswith("/"))
+                else
+                    .binary.path == null
+                end
+            )
+
+            and (.binary.ownership | type == "object")
+            and ((.binary.ownership | keys | sort) ==
+                (["status", "raw"] | sort))
+            and (.binary.ownership.status |
+                 IN("reported", "unknown"))
+            and (
+                if .binary.ownership.status == "reported" then
+                    .binary.present == true
+                    and (.binary.ownership.raw |
+                         type == "string" and length > 0)
+                else
+                    .binary.ownership.raw == null
+                end
+            )
+        ' <<< "$output" >/dev/null 2>&1; then
+            echo "ERROR: Invalid remote application inventory response" >&2
+            exit 5
+        fi
+        ;;
+
     discovery.application_state)
         if ! jq -e --arg requested "$application_id" '
             type == "object"

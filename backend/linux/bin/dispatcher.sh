@@ -62,11 +62,15 @@ if ! jq -e '
     or .operation == "discovery.ports"
     or .operation == "discovery.panels"
     or .operation == "discovery.application_state"
+    or .operation == "discovery.application_inventory"
     or .operation == "discovery.swap_filesystem")
     and (.target_id | type == "string"
      and test("^[a-zA-Z0-9_-]{1,64}$"))
     and (
-        if .operation == "discovery.application_state" then
+        if (
+            .operation == "discovery.application_state"
+            or .operation == "discovery.application_inventory"
+        ) then
             (.parameters | type == "object")
             and ((.parameters | keys) == ["application_id"])
             and (
@@ -171,7 +175,8 @@ if [[ "$operation" == "discovery.swap_filesystem" ]]; then
     target_path="$(jq -r '.parameters.target_path' <<< "$request")"
     ssh_arguments+=("$target_path")
 
-elif [[ "$operation" == "discovery.application_state" ]]; then
+elif [[ "$operation" == "discovery.application_state" ||
+        "$operation" == "discovery.application_inventory" ]]; then
     application_id="$(
         jq -er '.parameters.application_id' <<< "$request"
     )"
@@ -190,6 +195,101 @@ fi
 if [[ "$discovery_status" == "success" ]]; then
 
     case "$operation" in
+
+        discovery.application_inventory)
+            validation_filter='
+                type == "object"
+                and ((keys | sort) == ([
+                    "schema_version", "application_id",
+                    "package_manager", "packages", "binary",
+                    "read_only", "execution_allowed"
+                ] | sort))
+                and .schema_version == "1.0"
+                and .application_id == $requested_application
+                and (.package_manager | IN("apt", "dnf"))
+                and .read_only == true
+                and .execution_allowed == false
+
+                and (.packages | type == "array")
+                and (
+                    [.packages[].name] ==
+                    (
+                        if $requested_application == "git" then
+                            ["git"]
+                        elif $requested_application == "nginx" then
+                            ["nginx"]
+                        elif $requested_application == "docker" then
+                            [
+                                "docker-ce", "docker-ce-cli",
+                                "docker.io", "moby-engine", "moby-cli"
+                            ]
+                        else
+                            [
+                                "docker-compose-plugin",
+                                "docker-compose-v2",
+                                "docker-compose"
+                            ]
+                        end
+                    )
+                )
+                and (
+                    .packages |
+                    all(.[];
+                        type == "object"
+                        and ((keys | sort) ==
+                             (["name", "state", "version"] | sort))
+                        and (.name | type == "string" and length > 0)
+                        and (.state |
+                             IN("installed", "absent", "unknown"))
+                        and (
+                            if .state == "installed" then
+                                (.version == null or
+                                 (.version | type == "string"
+                                  and length > 0))
+                            else
+                                .version == null
+                            end
+                        )
+                    )
+                )
+
+                and (.binary | type == "object")
+                and ((.binary | keys | sort) == (
+                    ["name", "path", "present", "ownership"] | sort
+                ))
+                and .binary.name == (
+                    if $requested_application == "git" then "git"
+                    elif $requested_application == "nginx" then "nginx"
+                    else "docker"
+                    end
+                )
+                and (.binary.present | type == "boolean")
+                and (
+                    if .binary.present then
+                        (.binary.path |
+                         type == "string" and startswith("/"))
+                    else
+                        .binary.path == null
+                    end
+                )
+
+                and (.binary.ownership | type == "object")
+                and ((.binary.ownership | keys | sort) ==
+                     (["status", "raw"] | sort))
+                and (.binary.ownership.status |
+                     IN("reported", "unknown"))
+                and (
+                    if .binary.ownership.status == "reported" then
+                        .binary.present == true
+                        and (.binary.ownership.raw |
+                             type == "string" and length > 0)
+                    else
+                        .binary.ownership.raw == null
+                    end
+                )
+            '
+            ;;
+
         discovery.application_state)
             validation_filter='
                 type == "object"

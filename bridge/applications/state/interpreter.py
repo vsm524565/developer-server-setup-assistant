@@ -48,6 +48,10 @@ def classify_application_state(
         "docker": "docker-ce",
         "docker_compose": "docker-compose-plugin",
     }
+    if not all(isinstance(value, dict) for value in (
+        package, binary, service, plugin
+    )):
+        raise ValueError("Incomplete application observation structure.")
 
     if package.get("name") != expected_packages[expected_application_id]:
         raise ValueError("Application package identity mismatch.")

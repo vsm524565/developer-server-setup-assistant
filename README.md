@@ -164,3 +164,22 @@ installation methods require additional discovery.
 
 All application-state results are observational and cannot
 authorize package installation.
+### Application Inventory and Installation Identification — Milestone 4.14
+
+DSSA supports read-only application inventory discovery for Git, Nginx, Docker Engine and Docker Compose.
+
+The inventory collector identifies:
+
+- Recognized package candidates and installed package versions
+- Executable presence and resolved path
+- Package-manager-reported executable ownership
+- APT and DNF installation evidence
+- Unrecognized, incomplete or conflicting installation observations
+
+The Python inventory normalizer classifies observations as `IDENTIFIED`, `ABSENT`, `REVIEW_REQUIRED` or `UNKNOWN`.
+
+Docker package families are evaluated separately to distinguish distribution packages, vendor packages and alternatives. Docker Compose remains unverified until plugin-specific runtime evidence is available.
+
+All collected inventory remains planning-only. Application installation, package modification and service configuration are not enabled.
+
+**Validation:** 266 backend tests passed, including 21 inventory normalization tests. Raw and normalized inventory checks passed across six Linux test environments, with 24 assessments each.

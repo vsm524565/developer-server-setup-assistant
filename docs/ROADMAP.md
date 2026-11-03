@@ -359,3 +359,33 @@ Planned work:
 - Establish package availability and repository identity.
 - Bind application states to installation prerequisites.
 - Continue keeping execution authorization separate.
+
+### Milestone 4.14 — Application Inventory and Readiness Evidence
+
+**Status: Implementation and validation complete**
+
+Completed:
+
+- Read-only package and executable inventory collector
+- Application inventory discovery runner
+- Secure SSH and dispatcher integration
+- Controller evidence integration
+- Package version and ownership observations
+- Docker package-family identification
+- Python inventory normalization
+- Incomplete evidence and conflict classification
+- Fail-closed package-record collection
+- 21 inventory normalization unit tests
+- 266 passing backend regression tests
+- 24 passing six-VM raw inventory checks
+- 24 passing six-VM normalized inventory checks
+
+**Deferred work:**
+
+- Docker Compose plugin-specific runtime verification
+- Service/runtime health correlation
+- Advanced symlink and package-ownership normalization
+- Strict response validation for legacy ports and panels discovery
+- Integration of inventory findings into installation-readiness decisions
+
+All Milestone 4.14 operations remain read-only and planning-only.
