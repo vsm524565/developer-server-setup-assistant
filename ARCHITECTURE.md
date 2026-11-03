@@ -480,3 +480,40 @@ Package ownership does not establish service health or application functionality
 The inventory operation does not authorize package installation or other system modifications. `execution_allowed` remains `false`.
 
 **Known limitation:** The legacy ports and control-panel discovery routes require dedicated strict response-schema validation. This remains a separate hardening task.
+### Unified Application Readiness Architecture — Milestone 4.15
+
+The readiness coordinator combines three existing subsystems:
+
+1. Installation recipe planning (Milestone 4.12)
+2. Application-state interpretation (Milestone 4.13)
+3. Package inventory normalization (Milestone 4.14)
+
+Readiness coordination:
+- Builds the existing draft installation plan
+- Collects application-state evidence
+- Collects application-inventory evidence
+- Verifies evidence identity and freshness
+- Rejects duplicate discovery request IDs
+- Normalizes state and inventory observations
+- Evaluates a unified planning-only readiness decision
+
+Implementation:
+- bridge/applications/readiness/evaluator.py
+- bridge/applications/readiness/coordinator.py
+
+The evaluator performs no SSH communication or installations.
+The coordinator delegates discovery to the existing Linux backend.
+
+Evidence is collected in separate requests, not as an atomic
+snapshot. Conflicting or incomplete observations require review.
+
+READY_INSTALLED indicates agreement between the existing
+application-state and package-inventory checks. It is not a
+comprehensive application-health guarantee.
+
+INSTALL_CANDIDATE_DRAFT indicates that a draft recipe is suitable
+for further planning; it is not authorization to execute.
+
+All readiness results retain:
+- planning_only: true
+- execution_allowed: false

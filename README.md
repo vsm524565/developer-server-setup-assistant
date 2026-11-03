@@ -183,3 +183,32 @@ Docker package families are evaluated separately to distinguish distribution pac
 All collected inventory remains planning-only. Application installation, package modification and service configuration are not enabled.
 
 **Validation:** 266 backend tests passed, including 21 inventory normalization tests. Raw and normalized inventory checks passed across six Linux test environments, with 24 assessments each.
+### Unified Application Readiness — Milestone 4.15
+
+DSSA combines installation recipes, application-state discovery
+and package inventory into a unified read-only readiness assessment.
+
+Supported applications:
+- Git
+- Nginx
+- Docker Engine
+- Docker Compose
+
+Readiness outcomes:
+- READY_INSTALLED
+- INSTALL_CANDIDATE_DRAFT
+- REVIEW_REQUIRED
+- BLOCKED
+
+Readiness decisions use target-bound discovery evidence, package
+ownership observations, application-state classification and
+draft installation plans.
+
+Docker and Docker Compose remain conservative when runtime or
+plugin verification is incomplete.
+
+All readiness assessments are planning-only. They do not authorize
+package installation or server modifications.
+
+Validation: 290 backend tests passed and 24 readiness assessments
+passed across six Linux test environments.

@@ -389,3 +389,27 @@ Completed:
 - Integration of inventory findings into installation-readiness decisions
 
 All Milestone 4.14 operations remain read-only and planning-only.
+### Milestone 4.15 — Unified Application Readiness
+
+Status: Implementation and validation complete
+
+Completed:
+- Read-only readiness decision evaluator
+- Live readiness evidence coordinator
+- Installation recipe, state and inventory reconciliation
+- Target and application identity verification
+- Independent evidence freshness checks
+- Duplicate discovery request-ID rejection
+- Dependency and installation-plan blocker handling
+- Contradictory observation handling
+- Docker and Compose conservative readiness decisions
+- 24 successful six-VM readiness assessments
+- 290 passing backend regression tests
+
+Deferred:
+- Docker daemon health verification
+- Docker Compose plugin-specific runtime verification
+- Stronger cross-request snapshot consistency
+- Integration with future authorized installation workflows
+
+Execution remains disabled.
