@@ -47,6 +47,10 @@ APPLICATION_STATE_RUNNER="$BASE_DIR/backend/linux/discovery/application_state.sh
 APPLICATION_INVENTORY_MODULE="$BASE_DIR/backend/linux/modules/software/application_inventory.sh"
 APPLICATION_INVENTORY_RUNNER="$BASE_DIR/backend/linux/discovery/application_inventory.sh"
 
+# Read-only Docker runtime discovery.
+APPLICATION_RUNTIME_MODULE="$BASE_DIR/backend/linux/modules/software/application_runtime.sh"
+APPLICATION_RUNTIME_RUNNER="$BASE_DIR/backend/linux/discovery/application_runtime.sh"
+
 SWAP_IDENTITY_MODULE="$BASE_DIR/backend/linux/discovery/swap_identity.sh"
 SWAP_FILESYSTEM_MODULE="$BASE_DIR/backend/linux/discovery/swap_filesystem.sh"
 
@@ -92,7 +96,21 @@ elif [[ "$operation" == "discovery.application_state" ||
             exit 2
             ;;
     esac
+elif [[ "$operation" == "discovery.application_runtime" ]]; then
+    if [[ $# -ne 3 ]]; then
+        echo "ERROR: Runtime application ID required" >&2
+        exit 2
+    fi
 
+    application_id="$3"
+
+    case "$application_id" in
+        docker|docker_compose) ;;
+        *)
+            echo "ERROR: Unsupported runtime application" >&2
+            exit 2
+            ;;
+    esac
 elif [[ $# -ne 2 ]]; then
     echo "ERROR: Unexpected discovery argument" >&2
     exit 2
@@ -242,6 +260,9 @@ REMOTE_RUNNER
         remote_command='bash -s'
         ;;
     discovery.application_inventory)
+        remote_command='bash -s'
+        ;;
+    discovery.application_runtime)
         remote_command='bash -s'
         ;;
     *)
@@ -443,6 +464,43 @@ fi
 
 
 # ---------------------------------------------------------
+# Docker runtime discovery
+# ---------------------------------------------------------
+
+if [[ "$operation" == "discovery.application_runtime" ]]; then
+
+    for file in \
+        "$APPLICATION_RUNTIME_MODULE" \
+        "$APPLICATION_RUNTIME_RUNNER"; do
+
+        if [[ ! -f "$file" || ! -r "$file" ]]; then
+            echo "ERROR: Runtime discovery component unavailable" >&2
+            exit 3
+        fi
+    done
+
+    remote_script="$(mktemp)"
+    trap 'rm -f -- "$remote_script"' EXIT
+
+    {
+        printf 'set -euo pipefail\n'
+
+        cat "$APPLICATION_RUNTIME_MODULE"
+        printf '\n'
+
+        printf 'set -- %q\n' "$application_id"
+
+        cat "$APPLICATION_RUNTIME_RUNNER"
+        printf '\n'
+    } > "$remote_script"
+
+    if ! bash -n "$remote_script"; then
+        echo "ERROR: Invalid runtime discovery bundle" >&2
+        exit 3
+    fi
+fi
+
+# ---------------------------------------------------------
 # Final discovery bundle validation
 # ---------------------------------------------------------
 
@@ -498,6 +556,85 @@ fi
 # ---------------------------------------------------------
 
 case "$operation" in
+
+    discovery.application_runtime)
+        if ! jq -e --arg requested "$application_id" '
+            type == "object"
+            and ((keys | sort) == ([
+                "schema_version", "application_id",
+                "cli", "service", "socket", "plugin",
+                "daemon_responsive", "read_only",
+                "execution_allowed"
+            ] | sort))
+            and .schema_version == "1.0"
+            and .application_id == $requested
+            and .read_only == true
+            and .execution_allowed == false
+            and .daemon_responsive == null
+
+            and (.cli | type == "object")
+            and ((.cli | keys | sort) ==
+                 (["path", "status", "version_output"] | sort))
+            and (.cli.status | IN("available", "absent", "unknown"))
+            and (
+                if .cli.path == null then
+                    .cli.status == "absent"
+                    and .cli.version_output == null
+                else
+                    (.cli.path | type == "string" and startswith("/"))
+                    and (
+                        if .cli.status == "available" then
+                            (.cli.version_output |
+                             type == "string" and length > 0
+                             and length <= 256)
+                        else
+                            .cli.version_output == null
+                        end
+                    )
+                end
+            )
+
+            and (.service | type == "object")
+            and ((.service | keys) == ["state"])
+            and (.socket | type == "object")
+            and ((.socket | keys) == ["state"])
+            and (.plugin | type == "object")
+            and ((.plugin | keys) == ["state"])
+            and (.service.state | IN(
+                "active", "inactive", "failed",
+                "activating", "deactivating",
+                "unknown", "not_applicable"
+            ))
+            and (.socket.state | IN(
+                "active", "inactive", "failed",
+                "activating", "deactivating",
+                "unknown", "not_applicable"
+            ))
+            and (.plugin.state |
+                 IN("available", "unknown", "not_applicable"))
+
+            and (
+                if $requested == "docker" then
+                    .plugin.state == "not_applicable"
+                    and .service.state != "not_applicable"
+                    and .socket.state != "not_applicable"
+                else
+                    .service.state == "not_applicable"
+                    and .socket.state == "not_applicable"
+                    and (
+                        if .plugin.state == "available" then
+                            .cli.status == "available"
+                        else
+                            .cli.status != "available"
+                        end
+                    )
+                end
+            )
+        ' <<< "$output" >/dev/null 2>&1; then
+            echo "ERROR: Invalid remote application runtime response" >&2
+            exit 5
+        fi
+        ;;
 
     discovery.application_inventory)
         if ! jq -e --arg requested "$application_id" '

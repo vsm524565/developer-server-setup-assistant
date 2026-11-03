@@ -212,3 +212,18 @@ package installation or server modifications.
 
 Validation: 290 backend tests passed and 24 readiness assessments
 passed across six Linux test environments.
+### Docker Runtime Verification — Milestone 4.16
+
+DSSA performs read-only runtime discovery for Docker Engine and
+Docker Compose, independently of package inventory.
+
+The runtime collector observes Docker CLI availability, CLI version,
+systemd service/socket state and Compose plugin availability.
+
+Runtime evidence passes through the existing SSH dispatcher, evidence
+gate, interpreter and runtime-aware readiness coordinator.
+
+CLI availability and active services do not establish Docker daemon
+health. The daemon is not probed, and readiness stays conservative.
+
+All results remain planning-only with execution_allowed=false.

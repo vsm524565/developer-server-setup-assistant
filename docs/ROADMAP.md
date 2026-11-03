@@ -413,3 +413,24 @@ Deferred:
 - Integration with future authorized installation workflows
 
 Execution remains disabled.
+### Milestone 4.16 — Docker Runtime Verification
+
+Status: Completed after final regression and integration validation.
+
+Implemented:
+- Docker Engine CLI runtime discovery
+- Docker service and socket state observations
+- Docker Compose plugin version verification
+- Strict SSH and dispatcher integration
+- Evidence-gated runtime interpretation
+- Runtime-aware readiness reconciliation
+- Eight-record runtime-aware readiness coordination
+- Conservative handling of incomplete runtime evidence
+
+Deferred:
+- Explicit Docker daemon API health verification
+- Compose deployment health verification
+- Broader application runtime support
+- Authorized installation and recovery workflows
+
+All runtime discovery remains read-only.

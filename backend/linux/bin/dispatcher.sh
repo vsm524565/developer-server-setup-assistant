@@ -63,6 +63,7 @@ if ! jq -e '
     or .operation == "discovery.panels"
     or .operation == "discovery.application_state"
     or .operation == "discovery.application_inventory"
+    or .operation == "discovery.application_runtime"
     or .operation == "discovery.swap_filesystem")
     and (.target_id | type == "string"
      and test("^[a-zA-Z0-9_-]{1,64}$"))
@@ -76,6 +77,13 @@ if ! jq -e '
             and (
                 .parameters.application_id |
                 IN("git", "nginx", "docker", "docker_compose")
+            )
+        elif .operation == "discovery.application_runtime" then
+            (.parameters | type == "object")
+            and ((.parameters | keys) == ["application_id"])
+            and (
+                .parameters.application_id |
+                IN("docker", "docker_compose")
             )
         elif .operation == "discovery.swap_filesystem" then
             (.parameters | type == "object")
@@ -176,7 +184,8 @@ if [[ "$operation" == "discovery.swap_filesystem" ]]; then
     ssh_arguments+=("$target_path")
 
 elif [[ "$operation" == "discovery.application_state" ||
-        "$operation" == "discovery.application_inventory" ]]; then
+        "$operation" == "discovery.application_inventory" ||
+        "$operation" == "discovery.application_runtime" ]]; then
     application_id="$(
         jq -er '.parameters.application_id' <<< "$request"
     )"
@@ -195,6 +204,85 @@ fi
 if [[ "$discovery_status" == "success" ]]; then
 
     case "$operation" in
+
+        discovery.application_runtime)
+            validation_filter='
+                type == "object"
+                and ((keys | sort) == ([
+                    "schema_version", "application_id",
+                    "cli", "service", "socket", "plugin",
+                    "daemon_responsive", "read_only",
+                    "execution_allowed"
+                ] | sort))
+                and .schema_version == "1.0"
+                and .application_id == $requested_application
+                and .read_only == true
+                and .execution_allowed == false
+                and .daemon_responsive == null
+
+                and (.cli | type == "object")
+                and ((.cli | keys | sort) ==
+                    (["path", "status", "version_output"] | sort))
+                and (.cli.status |
+                    IN("available", "absent", "unknown"))
+                and (
+                    if .cli.path == null then
+                        .cli.status == "absent"
+                        and .cli.version_output == null
+                    else
+                        (.cli.path |
+                            type == "string" and startswith("/"))
+                        and (
+                            if .cli.status == "available" then
+                                (.cli.version_output |
+                                    type == "string"
+                                    and length > 0
+                                    and length <= 256)
+                            else
+                                .cli.version_output == null
+                            end
+                        )
+                    end
+                )
+
+                and (.service | type == "object")
+                and ((.service | keys) == ["state"])
+                and (.socket | type == "object")
+                and ((.socket | keys) == ["state"])
+                and (.plugin | type == "object")
+                and ((.plugin | keys) == ["state"])
+                and (.service.state | IN(
+                    "active", "inactive", "failed",
+                    "activating", "deactivating",
+                    "unknown", "not_applicable"
+                ))
+                and (.socket.state | IN(
+                    "active", "inactive", "failed",
+                    "activating", "deactivating",
+                    "unknown", "not_applicable"
+                ))
+                and (.plugin.state |
+                    IN("available", "unknown", "not_applicable"))
+
+                and (
+                    if $requested_application == "docker" then
+                        .plugin.state == "not_applicable"
+                        and .service.state != "not_applicable"
+                        and .socket.state != "not_applicable"
+                    else
+                        .service.state == "not_applicable"
+                        and .socket.state == "not_applicable"
+                        and (
+                            if .plugin.state == "available" then
+                                .cli.status == "available"
+                            else
+                                .cli.status != "available"
+                            end
+                        )
+                    end
+                )
+            '
+            ;;
 
         discovery.application_inventory)
             validation_filter='

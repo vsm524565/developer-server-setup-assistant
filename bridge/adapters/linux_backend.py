@@ -310,6 +310,7 @@ class LinuxBackend:
             "discovery.panels",
             "discovery.application_state",
             "discovery.application_inventory",
+            "discovery.application_runtime",
         }
 
         if operation not in allowed:
@@ -363,6 +364,30 @@ class LinuxBackend:
             ):
                 raise ValueError(
                     "Unsupported application-state discovery target."
+                )
+
+        elif operation == "discovery.application_runtime":
+            if not isinstance(parameters, dict):
+                raise ValueError(
+                    "Runtime discovery parameters are required."
+                )
+
+            if set(parameters) != {"application_id"}:
+                raise ValueError(
+                    "Expected only application_id."
+                )
+
+            application_id = parameters["application_id"]
+
+            if (
+                not isinstance(application_id, str)
+                or application_id not in (
+                    "docker",
+                    "docker_compose",
+                )
+            ):
+                raise ValueError(
+                    "Unsupported runtime discovery application."
                 )
 
         elif parameters not in (None, {}):

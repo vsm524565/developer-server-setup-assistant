@@ -517,3 +517,28 @@ for further planning; it is not authorization to execute.
 All readiness results retain:
 - planning_only: true
 - execution_allowed: false
+### Runtime-Aware Application Readiness — Milestone 4.16
+
+Data flow:
+
+Bash runtime collector
+  -> approved SSH discovery runner
+  -> strict dispatcher response validation
+  -> Python evidence gate
+  -> runtime interpreter
+  -> existing application readiness coordinator
+  -> runtime reconciliation policy
+
+Modules:
+- backend/linux/modules/software/application_runtime.sh
+- backend/linux/discovery/application_runtime.sh
+- bridge/applications/runtime/interpreter.py
+- bridge/applications/readiness/runtime_reconciliation.py
+- bridge/applications/readiness/runtime_coordinator.py
+
+A runtime-aware assessment combines seven existing readiness evidence
+records with one runtime evidence record. Request identities must
+be unique and the execution policy must remain disabled.
+
+Docker daemon responsiveness remains unverified. Runtime evidence
+cannot promote Docker or Compose to fully healthy readiness.
