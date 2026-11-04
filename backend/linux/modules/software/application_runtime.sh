@@ -106,12 +106,22 @@ discover_application_runtime() (
         plugin_status="unknown"
 
         if [[ -n "$docker_path" ]]; then
-            if cli_version="$(
-                application_runtime_version \
-                    docker_compose "$docker_path"
+            local compose_output=""
+
+            if compose_output="$(
+                timeout 5 "$docker_path" compose version 2>&1
             )"; then
-                cli_status="available"
-                plugin_status="available"
+                if [[ -n "$compose_output" ]]; then
+                    cli_version="${compose_output:0:256}"
+                    cli_status="available"
+                    plugin_status="available"
+                fi
+
+            elif [[ "$compose_output" == *"unknown command: docker compose"* ||
+                    "$compose_output" == *"is not a docker command"* ]]; then
+
+                # Docker explicitly reports that Compose is unavailable.
+                plugin_status="absent"
             fi
         else
             cli_status="absent"

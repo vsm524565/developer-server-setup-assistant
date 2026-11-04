@@ -542,3 +542,27 @@ be unique and the execution policy must remain disabled.
 
 Docker daemon responsiveness remains unverified. Runtime evidence
 cannot promote Docker or Compose to fully healthy readiness.
+
+#### Runtime Classification Contract — Milestone 4.17
+
+Docker Compose runtime discovery preserves the distinction between:
+
+1. Successful version verification
+2. Explicit command unavailability
+3. Inconclusive execution failure
+
+The Bash collector produces plugin states:
+available, absent and unknown.
+
+The SSH and dispatcher layers independently validate these states,
+including application binding, CLI consistency and disabled execution.
+
+The Python interpreter maps the observations to:
+PLUGIN_AVAILABLE, PLUGIN_ABSENT and UNVERIFIED.
+
+Runtime reconciliation preserves REVIEW_REQUIRED when complete
+application health cannot be established and retains existing
+BLOCKED decisions.
+
+The Docker daemon is not contacted during this discovery workflow.
+Daemon responsiveness remains unverified.

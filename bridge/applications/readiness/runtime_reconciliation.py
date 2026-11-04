@@ -18,7 +18,9 @@ RUNTIME_STATUSES = {
         "CLI_AVAILABLE", "CLI_ABSENT", "UNVERIFIED"
     }),
     "docker_compose": frozenset({
-        "PLUGIN_AVAILABLE", "UNVERIFIED"
+        "PLUGIN_AVAILABLE",
+        "PLUGIN_ABSENT",
+        "UNVERIFIED",
     }),
 }
 
@@ -110,8 +112,11 @@ def reconcile_runtime_readiness(readiness, runtime):
     else:
         if runtime_status == "PLUGIN_AVAILABLE":
             reasons.append("COMPOSE_PLUGIN_VERIFIED")
+        elif runtime_status == "PLUGIN_ABSENT":
+            reasons.append("COMPOSE_PLUGIN_ABSENT")
         else:
             reasons.append("COMPOSE_RUNTIME_UNVERIFIED")
+
 
     result["reasons"] = reasons
     result["runtime_status"] = runtime_status

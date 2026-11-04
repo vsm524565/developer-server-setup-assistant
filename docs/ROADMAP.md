@@ -434,3 +434,29 @@ Deferred:
 - Authorized installation and recovery workflows
 
 All runtime discovery remains read-only.
+
+### Milestone 4.17 — Docker Compose Runtime Classification
+
+Status: Completed
+
+Implemented:
+- Recognized missing Compose command responses
+- Distinguished absent plugins from inconclusive failures
+- Updated SSH runtime response validation
+- Updated dispatcher runtime response validation
+- Added PLUGIN_ABSENT Python interpretation
+- Extended runtime readiness reconciliation
+- Added permanent runtime and transport regression tests
+- Validated all six Linux lab environments
+
+Validation:
+- 321 backend tests passed
+- 16 transport contract scenarios passed
+- 12 six-VM integration assessments passed
+
+Deferred:
+- Docker daemon responsiveness verification
+- Detection of alternative Compose installation layouts
+- Additional installation/runtime reconciliation improvements
+
+Execution remains disabled.

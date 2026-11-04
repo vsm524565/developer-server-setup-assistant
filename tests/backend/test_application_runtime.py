@@ -207,5 +207,51 @@ class TestApplicationRuntime(unittest.TestCase):
         self.assertEqual(data, original)
 
 
+    def test_compose_plugin_absent(self):
+        """Classify explicit Compose command absence."""
+
+        data = runtime_data(
+            "docker_compose",
+            cli_status="unknown",
+            cli_path="/usr/bin/docker",
+            plugin="absent",
+        )
+
+        result = classify(data)
+
+        self.assertEqual(result["status"], "PLUGIN_ABSENT")
+        self.assertIn(
+            "COMPOSE_COMMAND_UNAVAILABLE",
+            result["reasons"],
+        )
+        self.assertFalse(result["execution_allowed"])
+
+    def test_compose_absent_without_docker_cli_rejected(self):
+        """A missing Docker CLI cannot establish plugin absence."""
+
+        data = runtime_data(
+            "docker_compose",
+            cli_status="absent",
+            cli_path=None,
+            plugin="absent",
+        )
+
+        with self.assertRaises(ValueError):
+            classify(data)
+
+    def test_compose_absent_with_verified_cli_rejected(self):
+        """Reject contradictory plugin and CLI observations."""
+
+        data = runtime_data(
+            "docker_compose",
+            cli_status="available",
+            cli_path="/usr/bin/docker",
+            version="Docker Compose version v2.40.0",
+            plugin="absent",
+        )
+
+        with self.assertRaises(ValueError):
+            classify(data)
+
 if __name__ == "__main__":
     unittest.main()

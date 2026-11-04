@@ -262,7 +262,7 @@ if [[ "$discovery_status" == "success" ]]; then
                     "unknown", "not_applicable"
                 ))
                 and (.plugin.state |
-                    IN("available", "unknown", "not_applicable"))
+                    IN("available", "absent", "unknown", "not_applicable"))
 
                 and (
                     if $requested_application == "docker" then
@@ -275,6 +275,9 @@ if [[ "$discovery_status" == "success" ]]; then
                         and (
                             if .plugin.state == "available" then
                                 .cli.status == "available"
+                            elif .plugin.state == "absent" then
+                                .cli.status == "unknown"
+                                and (.cli.path | type == "string")
                             else
                                 .cli.status != "available"
                             end

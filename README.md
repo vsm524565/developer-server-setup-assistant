@@ -227,3 +227,23 @@ CLI availability and active services do not establish Docker daemon
 health. The daemon is not probed, and readiness stays conservative.
 
 All results remain planning-only with execution_allowed=false.
+
+#### Docker Compose Detection Improvements — Milestone 4.17
+
+DSSA distinguishes three Docker Compose runtime conditions:
+
+- PLUGIN_AVAILABLE: The Docker Compose version command succeeds.
+- PLUGIN_ABSENT: The Docker CLI explicitly reports the Compose
+  command as unavailable.
+- UNVERIFIED: Runtime verification remains inconclusive.
+
+PLUGIN_ABSENT does not prove that all standalone Compose
+installations or packages are missing.
+
+Runtime discovery remains read-only. It does not install packages,
+restart services, create containers or probe the Docker daemon.
+
+Validation:
+- 321 passing backend regression tests
+- 16 passing SSH/dispatcher transport contract scenarios
+- 12 successful runtime-aware assessments across six Linux VMs

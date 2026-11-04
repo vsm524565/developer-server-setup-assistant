@@ -75,7 +75,7 @@ def classify_application_runtime(data, *, expected_application_id):
         or service_state not in SYSTEMD_STATES
         or socket_state not in SYSTEMD_STATES
         or plugin_state not in (
-            "available", "unknown", "not_applicable"
+            "available", "absent", "unknown", "not_applicable"
         )
     ):
         raise ValueError("Invalid runtime observation values.")
@@ -147,7 +147,14 @@ def classify_application_runtime(data, *, expected_application_id):
 
             status = "PLUGIN_AVAILABLE"
             reasons.append("COMPOSE_VERSION_VERIFIED")
+        elif plugin_state == "absent":
+            if cli_status != "unknown" or cli_path is None:
+                raise ValueError(
+                    "Invalid Compose plugin absence evidence."
+                )
 
+            status = "PLUGIN_ABSENT"
+            reasons.append("COMPOSE_COMMAND_UNAVAILABLE")
         elif plugin_state == "unknown":
             if cli_status == "available":
                 raise ValueError("Unverified Compose cannot be available.")
