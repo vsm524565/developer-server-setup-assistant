@@ -311,6 +311,7 @@ class LinuxBackend:
             "discovery.application_state",
             "discovery.application_inventory",
             "discovery.application_runtime",
+            "discovery.docker_daemon_preflight",
         }
 
         if operation not in allowed:
@@ -388,6 +389,12 @@ class LinuxBackend:
             ):
                 raise ValueError(
                     "Unsupported runtime discovery application."
+                )
+
+        elif operation == "discovery.docker_daemon_preflight":
+            if parameters != {}:
+                raise ValueError(
+                    "Docker daemon preflight requires empty parameters."
                 )
 
         elif parameters not in (None, {}):

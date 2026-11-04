@@ -460,3 +460,42 @@ Deferred:
 - Additional installation/runtime reconciliation improvements
 
 Execution remains disabled.
+
+### Milestone 4.18 — Passive Docker Daemon Preflight
+
+Status: Implementation and validation complete; publication pending.
+
+Completed:
+
+- Read-only Bash daemon preflight collector.
+- Approved zero-parameter SSH discovery runner.
+- SSH and dispatcher strict response validation.
+- Python discovery evidence allowlisting.
+- Independent evidence-gated Python classification.
+- Passive-only safety and consistency checks.
+- 17 Docker preflight unit tests passed.
+- 338 total backend regression tests passed.
+- 6/6 Linux VM integration assessments passed.
+- 5/5 synthetic systemd-state scenarios passed.
+
+Observed lab results:
+
+- Ubuntu 22/24/26, Debian 13, AlmaLinux 10, Rocky Linux 10:
+  DAEMON_INACTIVE.
+- Ubuntu workstation: PASSIVE_CANDIDATE observed.
+
+Scope exclusions:
+
+- No Docker API health verification.
+- No socket-triggering connection.
+- No daemon installation or service modifications.
+- No rootless Docker endpoint discovery.
+- No change to application execution authorization.
+
+Follow-up work:
+
+- Review safe active API health-check strategies separately.
+- Distinguish missing Docker units from installed inactive services.
+- Extend endpoint discovery for rootless and nonstandard Docker installations.
+- Consider integrating passive results into readiness reconciliation
+  with separate evidence identity and freshness validation.

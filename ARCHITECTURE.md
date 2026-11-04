@@ -566,3 +566,41 @@ BLOCKED decisions.
 
 The Docker daemon is not contacted during this discovery workflow.
 Daemon responsiveness remains unverified.
+
+### Docker Daemon Passive Preflight Architecture (4.18)
+
+Operation: `discovery.docker_daemon_preflight`
+
+Read-only data flow:
+
+1. Python LinuxBackend receives an approved discovery request with `{}` parameters.
+2. Linux dispatcher validates the operation and parameters.
+3. SSH backend constructs and executes the approved remote Bash bundle.
+4. Bash collector reads systemd, process, socket, and listener metadata.
+5. SSH backend and dispatcher independently validate the JSON response.
+6. Python evidence collection attaches controller timestamps and request identity.
+7. Evidence gate evaluates freshness, operation, and target identity.
+8. Python interpreter independently validates and classifies the passive observations.
+
+Implementation components:
+
+- `backend/linux/modules/software/docker_daemon_preflight.sh`
+- `backend/linux/discovery/docker_daemon_preflight.sh`
+- `backend/linux/connection/ssh.sh`
+- `backend/linux/bin/dispatcher.sh`
+- `bridge/adapters/linux_backend.py`
+- `bridge/applications/runtime/docker_daemon_preflight.py`
+- `tests/backend/test_docker_daemon_preflight.py`
+
+Security and reliability boundaries:
+
+- Discovery accepts no execution parameters.
+- The collector does not contact the Docker API.
+- No active probing is authorized by a passive classification.
+- Planning requires accepted, fresh evidence.
+- Raw collector and interpreted results preserve unknown daemon responsiveness.
+- `execution_allowed` remains false throughout the pipeline.
+- Existing Docker runtime readiness reconciliation is unchanged.
+
+The implementation assesses passive evidence only. A separate design,
+safety review, and test plan are required for active API health verification.

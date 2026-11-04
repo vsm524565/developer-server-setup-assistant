@@ -64,6 +64,7 @@ if ! jq -e '
     or .operation == "discovery.application_state"
     or .operation == "discovery.application_inventory"
     or .operation == "discovery.application_runtime"
+    or .operation == "discovery.docker_daemon_preflight"
     or .operation == "discovery.swap_filesystem")
     and (.target_id | type == "string"
      and test("^[a-zA-Z0-9_-]{1,64}$"))
@@ -204,6 +205,109 @@ fi
 if [[ "$discovery_status" == "success" ]]; then
 
     case "$operation" in
+
+        discovery.docker_daemon_preflight)
+            validation_filter='
+                type == "object"
+                and ((keys | sort) == ([
+                    "schema_version", "check", "service",
+                    "socket", "status", "reasons",
+                    "probe_attempted", "daemon_responsive",
+                    "read_only", "execution_allowed"
+                ] | sort))
+                and .schema_version == "1.0"
+                and .check == "docker_daemon_preflight"
+                and .probe_attempted == false
+                and .daemon_responsive == null
+                and .read_only == true
+                and .execution_allowed == false
+
+                and (.service | type == "object")
+                and ((.service | keys | sort) == ([
+                    "state", "main_pid", "process_verified"
+                ] | sort))
+                and (.service.state | IN(
+                    "active", "inactive", "failed",
+                    "activating", "deactivating", "unknown"
+                ))
+                and (.service.main_pid |
+                    type == "number"
+                    and floor == .
+                    and . >= 0)
+                and (.service.process_verified | type == "boolean")
+                and (
+                    if .service.process_verified then
+                        .service.main_pid > 0
+                    else true end
+                )
+
+                and (.socket | type == "object")
+                and ((.socket | keys | sort) == ([
+                    "unit_state", "path", "present",
+                    "permissions", "owner", "group",
+                    "listener_state"
+                ] | sort))
+                and (.socket.unit_state | IN(
+                    "active", "inactive", "failed",
+                    "activating", "deactivating", "unknown"
+                ))
+                and .socket.path == "/run/docker.sock"
+                and (.socket.present | type == "boolean")
+                and (.socket.listener_state |
+                    IN("present", "absent", "unknown"))
+                and (
+                    if .socket.present then
+                        (.socket.permissions == null or
+                         (.socket.permissions |
+                          type == "string"
+                          and test("^[0-7]{3,4}$")))
+                        and (.socket.owner == null or
+                             (.socket.owner |
+                              type == "string" and length > 0))
+                        and (.socket.group == null or
+                             (.socket.group |
+                              type == "string" and length > 0))
+                    else
+                        .socket.permissions == null
+                        and .socket.owner == null
+                        and .socket.group == null
+                    end
+                )
+
+                and (.status | IN(
+                    "PASSIVE_CANDIDATE",
+                    "SERVICE_INACTIVE",
+                    "SERVICE_FAILED",
+                    "UNVERIFIED"
+                ))
+                and (.reasons | type == "array" and length == 1)
+                and (
+                    .reasons[0] == (
+                        if .status == "PASSIVE_CANDIDATE" then
+                            "DAEMON_PROCESS_AND_SOCKET_OBSERVED"
+                        elif .status == "SERVICE_INACTIVE" then
+                            "DOCKER_SERVICE_INACTIVE"
+                        elif .status == "SERVICE_FAILED" then
+                            "DOCKER_SERVICE_FAILED"
+                        else
+                            "INSUFFICIENT_PASSIVE_EVIDENCE"
+                        end
+                    )
+                )
+                and (
+                    if .status == "PASSIVE_CANDIDATE" then
+                        .service.state == "active"
+                        and .service.process_verified == true
+                        and .socket.present == true
+                        and .socket.listener_state == "present"
+                    elif .status == "SERVICE_INACTIVE" then
+                        .service.state == "inactive"
+                    elif .status == "SERVICE_FAILED" then
+                        .service.state == "failed"
+                    else true end
+                )
+            '
+            ;;
 
         discovery.application_runtime)
             validation_filter='

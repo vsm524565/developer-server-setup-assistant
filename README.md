@@ -247,3 +247,46 @@ Validation:
 - 321 passing backend regression tests
 - 16 passing SSH/dispatcher transport contract scenarios
 - 12 successful runtime-aware assessments across six Linux VMs
+
+### Passive Docker Daemon Preflight — Milestone 4.18
+
+DSSA supports read-only Docker daemon preflight through the approved
+`discovery.docker_daemon_preflight` operation.
+
+The preflight observes:
+
+- systemd Docker service and socket-unit states.
+- Docker service MainPID and process identity.
+- `/run/docker.sock` presence, permissions, and ownership.
+- Listening Unix socket metadata without connecting to the socket.
+
+Classification results:
+
+| Classification | Meaning |
+|---|---|
+| PASSIVE_CANDIDATE | Docker process and expected listening socket observed |
+| DAEMON_INACTIVE | systemd reports Docker service inactive |
+| DAEMON_FAILED | systemd reports Docker service failed |
+| DAEMON_UNVERIFIED | Passive observations cannot establish a supported state |
+
+Safety guarantees:
+
+- Does not connect to the Docker API.
+- Does not invoke Docker CLI health commands.
+- Does not start, restart, or install Docker.
+- Does not create or manage containers.
+- Always reports `probe_attempted=false`.
+- Always reports `daemon_responsive=null`.
+- Always reports `execution_allowed=false`.
+
+Important limitations:
+
+- PASSIVE_CANDIDATE does not establish API responsiveness or daemon health.
+- DAEMON_INACTIVE does not distinguish a stopped installed service from
+  an absent Docker systemd unit.
+- The current collector targets the conventional rootful systemd Docker
+  service and `/run/docker.sock`.
+- Rootless Docker and alternative endpoints are not verified.
+- Passive observations are snapshots and may become stale.
+
+Active Docker API verification is outside Milestone 4.18.
