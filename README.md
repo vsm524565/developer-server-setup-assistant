@@ -325,3 +325,26 @@ Safety properties:
 
 No Docker API connections, container operations, installations,
 service starts, or service restarts are performed.
+
+### Milestone 4.20 — Passive Docker Readiness Reconciliation
+
+DSSA combines nine independently identified discovery records into
+a unified Docker planning assessment:
+
+- Seven application-readiness discovery records.
+- One Docker application-runtime record.
+- One passive Docker daemon-preflight record.
+
+The reconciled assessment distinguishes Docker CLI availability,
+systemd service-unit state, and passive daemon process/socket evidence.
+
+Safety guarantees:
+- Evidence freshness and target identity are independently validated.
+- Duplicate evidence request IDs are rejected.
+- Existing readiness blockers are preserved.
+- Passive daemon observations never establish Docker API health.
+- No automatic service actions, installations, or container execution.
+- `daemon_responsive=None`, `planning_only=True`,
+  `execution_allowed=False`.
+
+Validation: 373/373 backend tests and 6/6 Linux VM assessments.

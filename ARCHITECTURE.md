@@ -644,3 +644,30 @@ Transport validation tests execute the actual SSH and dispatcher jq
 expressions against synthetic positive and negative responses.
 
 All operations remain planning-only and execution-disabled.
+
+### Milestone 4.20 — Nine-Source Daemon-Aware Readiness
+
+The daemon-aware coordination layer extends the established
+runtime-aware readiness workflow without changing existing
+Bash collectors, SSH transport, or evidence-gate behavior.
+
+Pipeline:
+
+1. assess_application_readiness() — seven evidence records.
+2. assess_runtime_aware_readiness() — eighth runtime record.
+3. discovery.docker_daemon_preflight — ninth passive record.
+4. classify_docker_daemon_preflight_evidence() — independent
+   validation of operation, target, freshness, and safety policy.
+5. reconcile_daemon_readiness() — pure reconciliation without
+   discovery or infrastructure modifications.
+
+Implementation modules:
+- bridge/applications/readiness/daemon_coordinator.py
+- bridge/applications/readiness/daemon_reconciliation.py
+
+The resulting decision preserves nine unique request IDs,
+never upgrades readiness using passive daemon evidence,
+and never claims verified Docker API responsiveness.
+
+Milestone 4.20 applies to Docker only. Docker Compose continues
+to use its existing independent runtime assessment.

@@ -537,3 +537,31 @@ Remaining future work:
 - Rootless Docker and alternative endpoint discovery.
 - Optional passive-readiness integration.
 - Separately designed and safety-reviewed active daemon verification.
+
+### Milestone 4.20 — Passive Docker Readiness Reconciliation
+
+Status: Complete — publication pending.
+
+Completed:
+- Introduced pure passive daemon readiness reconciliation.
+- Added nine-source Docker readiness coordination.
+- Preserved existing runtime and application readiness behavior.
+- Validated unique evidence identities and source consistency.
+- Preserved blockers and conservative readiness decisions.
+- Added positive, negative, and cross-source regression tests.
+- Passed 373/373 backend tests.
+- Passed full nine-source assessment on six Linux VMs.
+
+Verified environments:
+- Ubuntu 22.04
+- Ubuntu 24.04
+- Ubuntu 26.04
+- Debian 13
+- AlmaLinux 10
+- Rocky Linux 10
+
+All six assessments returned REVIEW_REQUIRED with
+CLI_ABSENT and DAEMON_UNIT_NOT_FOUND.
+
+No Docker API probe, installation, service activation, or
+execution authorization was introduced.
