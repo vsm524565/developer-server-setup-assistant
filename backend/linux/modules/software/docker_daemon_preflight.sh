@@ -12,6 +12,7 @@ discover_docker_daemon_preflight() (
         return 127
     }
 
+    local service_load_state="unknown"
     local service_state="unknown"
     local socket_state="unknown"
     local main_pid=0
@@ -27,6 +28,11 @@ discover_docker_daemon_preflight() (
 
     # Read only systemd service/socket metadata.
     if command -v systemctl >/dev/null 2>&1; then
+        service_load_state="$(
+            systemctl show docker.service \
+                --property=LoadState \
+                --value 2>/dev/null
+        )" || service_load_state="unknown"
         service_state="$(
             systemctl show docker.service \
                 --property=ActiveState \
@@ -50,7 +56,10 @@ discover_docker_daemon_preflight() (
         active|inactive|failed|activating|deactivating) ;;
         *) service_state="unknown" ;;
     esac
-
+    case "$service_load_state" in
+        loaded|not-found|masked|error|bad-setting) ;;
+        *) service_load_state="unknown" ;;
+    esac
     case "$socket_state" in
         active|inactive|failed|activating|deactivating) ;;
         *) socket_state="unknown" ;;
@@ -106,16 +115,33 @@ discover_docker_daemon_preflight() (
         fi
     fi
 
-    # Passive classification: no API health claim.
-    if [[ "$service_state" == "inactive" ]]; then
+    # Classify the systemd unit before evaluating service activity.
+    if [[ "$service_load_state" == "not-found" ]] &&
+       [[ "$service_state" == "inactive" ]]; then
+
+        preflight_status="SERVICE_NOT_FOUND"
+        reason="DOCKER_SERVICE_UNIT_NOT_FOUND"
+
+    elif [[ "$service_load_state" == "masked" ]] &&
+         [[ "$service_state" == "inactive" ]]; then
+
+        preflight_status="SERVICE_MASKED"
+        reason="DOCKER_SERVICE_UNIT_MASKED"
+
+    elif [[ "$service_load_state" == "loaded" ]] &&
+         [[ "$service_state" == "inactive" ]]; then
+
         preflight_status="SERVICE_INACTIVE"
         reason="DOCKER_SERVICE_INACTIVE"
 
-    elif [[ "$service_state" == "failed" ]]; then
+    elif [[ "$service_load_state" == "loaded" ]] &&
+         [[ "$service_state" == "failed" ]]; then
+
         preflight_status="SERVICE_FAILED"
         reason="DOCKER_SERVICE_FAILED"
 
-    elif [[ "$service_state" == "active" ]] &&
+    elif [[ "$service_load_state" == "loaded" ]] &&
+         [[ "$service_state" == "active" ]] &&
          [[ "$process_verified" == true ]] &&
          [[ "$socket_present" == true ]] &&
          [[ "$listener_state" == "present" ]]; then
@@ -137,10 +163,12 @@ discover_docker_daemon_preflight() (
         --arg listener_state "$listener_state" \
         --arg preflight_status "$preflight_status" \
         --arg reason "$reason" \
+        --arg service_load_state "$service_load_state" \
         '{
             schema_version: "1.0",
             check: "docker_daemon_preflight",
             service: {
+                load_state: $service_load_state,
                 state: $service_state,
                 main_pid: $main_pid,
                 process_verified: $process_verified

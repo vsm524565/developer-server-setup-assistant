@@ -8,9 +8,19 @@ SERVICE_STATES = {
     "active", "inactive", "failed",
     "activating", "deactivating", "unknown",
 }
+SERVICE_LOAD_STATES = frozenset({
+    "loaded",
+    "not-found",
+    "masked",
+    "error",
+    "bad-setting",
+    "unknown",
+})
 
 PREFLIGHT_CLASSIFICATIONS = {
     "PASSIVE_CANDIDATE": "PASSIVE_CANDIDATE",
+    "SERVICE_NOT_FOUND": "DAEMON_UNIT_NOT_FOUND",
+    "SERVICE_MASKED": "DAEMON_UNIT_MASKED",
     "SERVICE_INACTIVE": "DAEMON_INACTIVE",
     "SERVICE_FAILED": "DAEMON_FAILED",
     "UNVERIFIED": "DAEMON_UNVERIFIED",
@@ -18,6 +28,8 @@ PREFLIGHT_CLASSIFICATIONS = {
 
 REASONS = {
     "PASSIVE_CANDIDATE": "DAEMON_PROCESS_AND_SOCKET_OBSERVED",
+    "SERVICE_NOT_FOUND": "DOCKER_SERVICE_UNIT_NOT_FOUND",
+    "SERVICE_MASKED": "DOCKER_SERVICE_UNIT_MASKED",
     "SERVICE_INACTIVE": "DOCKER_SERVICE_INACTIVE",
     "SERVICE_FAILED": "DOCKER_SERVICE_FAILED",
     "UNVERIFIED": "INSUFFICIENT_PASSIVE_EVIDENCE",
@@ -51,9 +63,11 @@ def classify_docker_daemon_preflight(data):
 
     if (
         not isinstance(service, dict)
-        or set(service) != {
-            "state", "main_pid", "process_verified"
+                or set(service) != {
+            "load_state", "state", "main_pid", "process_verified"
         }
+        or not isinstance(service["load_state"], str)
+        or service["load_state"] not in SERVICE_LOAD_STATES
         or service["state"] not in SERVICE_STATES
         or type(service["main_pid"]) is not int
         or service["main_pid"] < 0
@@ -104,19 +118,34 @@ def classify_docker_daemon_preflight(data):
     ):
         raise ValueError("Contradictory Docker socket evidence.")
 
-    if service["state"] == "inactive":
+
+    load_state = service["load_state"]
+    active_state = service["state"]
+
+    if load_state == "not-found" and active_state == "inactive":
+        expected_status = "SERVICE_NOT_FOUND"
+
+    elif load_state == "masked" and active_state == "inactive":
+        expected_status = "SERVICE_MASKED"
+
+    elif load_state == "loaded" and active_state == "inactive":
         expected_status = "SERVICE_INACTIVE"
-    elif service["state"] == "failed":
+
+    elif load_state == "loaded" and active_state == "failed":
         expected_status = "SERVICE_FAILED"
+
     elif (
-        service["state"] == "active"
+        load_state == "loaded"
+        and active_state == "active"
         and service["process_verified"]
         and socket["present"]
         and socket["listener_state"] == "present"
     ):
         expected_status = "PASSIVE_CANDIDATE"
+
     else:
         expected_status = "UNVERIFIED"
+
 
     if status != expected_status:
         raise ValueError("Contradictory Docker preflight status.")
@@ -129,6 +158,7 @@ def classify_docker_daemon_preflight(data):
         "check": "docker_daemon_preflight_classification",
         "status": PREFLIGHT_CLASSIFICATIONS[status],
         "source_status": status,
+        "service_load_state": service["load_state"],
         "service_state": service["state"],
         "main_pid": service["main_pid"],
         "process_verified": service["process_verified"],

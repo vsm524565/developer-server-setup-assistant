@@ -618,8 +618,12 @@ case "$operation" in
 
             and (.service | type == "object")
             and ((.service | keys | sort) == ([
-                "state", "main_pid", "process_verified"
+                "load_state", "state", "main_pid", "process_verified"
             ] | sort))
+            and (.service.load_state | IN(
+                "loaded", "not-found", "masked",
+                "error", "bad-setting", "unknown"
+            ))
             and (.service.state | IN(
                 "active", "inactive", "failed",
                 "activating", "deactivating", "unknown"
@@ -650,6 +654,10 @@ case "$operation" in
             and (.socket.listener_state |
                 IN("present", "absent", "unknown"))
             and (
+                .socket.present == true
+                or .socket.listener_state != "present"
+            )
+            and (
                 if .socket.present then
                     (.socket.permissions == null or
                      (.socket.permissions | type == "string"
@@ -669,6 +677,8 @@ case "$operation" in
 
             and (.status | IN(
                 "PASSIVE_CANDIDATE",
+                "SERVICE_NOT_FOUND",
+                "SERVICE_MASKED",
                 "SERVICE_INACTIVE",
                 "SERVICE_FAILED",
                 "UNVERIFIED"
@@ -678,6 +688,10 @@ case "$operation" in
                 .reasons[0] == (
                     if .status == "PASSIVE_CANDIDATE" then
                         "DAEMON_PROCESS_AND_SOCKET_OBSERVED"
+                    elif .status == "SERVICE_NOT_FOUND" then
+                        "DOCKER_SERVICE_UNIT_NOT_FOUND"
+                    elif .status == "SERVICE_MASKED" then
+                        "DOCKER_SERVICE_UNIT_MASKED"
                     elif .status == "SERVICE_INACTIVE" then
                         "DOCKER_SERVICE_INACTIVE"
                     elif .status == "SERVICE_FAILED" then
@@ -687,18 +701,56 @@ case "$operation" in
                     end
                 )
             )
+
             and (
                 if .status == "PASSIVE_CANDIDATE" then
-                    .service.state == "active"
+                    .service.load_state == "loaded"
+                    and .service.state == "active"
                     and .service.process_verified == true
                     and .socket.present == true
                     and .socket.listener_state == "present"
+
+                elif .status == "SERVICE_NOT_FOUND" then
+                    .service.load_state == "not-found"
+                    and .service.state == "inactive"
+
+                elif .status == "SERVICE_MASKED" then
+                    .service.load_state == "masked"
+                    and .service.state == "inactive"
+
                 elif .status == "SERVICE_INACTIVE" then
-                    .service.state == "inactive"
+                    .service.load_state == "loaded"
+                    and .service.state == "inactive"
+
                 elif .status == "SERVICE_FAILED" then
-                    .service.state == "failed"
-                else true end
+                    .service.load_state == "loaded"
+                    and .service.state == "failed"
+
+                else
+                    (
+                        (.service.load_state != "not-found"
+                        or .service.state != "inactive")
+                        and
+                        (.service.load_state != "masked"
+                        or .service.state != "inactive")
+                        and
+                        (.service.load_state != "loaded"
+                        or .service.state != "inactive")
+                        and
+                        (.service.load_state != "loaded"
+                        or .service.state != "failed")
+                        and
+                        (
+                            .service.load_state != "loaded"
+                            or .service.state != "active"
+                            or .service.process_verified != true
+                            or .socket.present != true
+                            or .socket.listener_state != "present"
+                        )
+                    )
+                end
             )
+
         ' <<< "$output" >/dev/null 2>&1; then
             echo "ERROR: Invalid Docker daemon preflight response" >&2
             exit 5

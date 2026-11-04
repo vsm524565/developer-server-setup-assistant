@@ -499,3 +499,41 @@ Follow-up work:
 - Extend endpoint discovery for rootless and nonstandard Docker installations.
 - Consider integrating passive results into readiness reconciliation
   with separate evidence identity and freshness validation.
+
+### Milestone 4.19 — Docker Installation-State Differentiation
+
+Status: Implementation validated; GitHub publication pending.
+
+Completed:
+
+- Added systemd LoadState collection.
+- Distinguished missing, masked, inactive, and failed Docker units.
+- Preserved passive Docker process and socket checks.
+- Updated strict SSH and dispatcher JSON contracts.
+- Extended Python classification and evidence validation.
+- Added permanent negative transport contract tests.
+- Validated 11 synthetic collector scenarios.
+- Validated 36 SSH and dispatcher contract scenarios.
+- Passed 6/6 Linux VM integration assessments.
+- Passed 342/342 backend regression tests.
+
+Lab findings:
+
+- Ubuntu 22/24/26, Debian 13, AlmaLinux 10, Rocky Linux 10:
+  DAEMON_UNIT_NOT_FOUND.
+- Ubuntu workstation:
+  PASSIVE_CANDIDATE with LoadState=loaded.
+
+Safety constraints preserved:
+
+- No Docker API connections or daemon health claims.
+- No service changes or package installations.
+- No container execution.
+- No automatic recovery.
+- No execution authorization.
+
+Remaining future work:
+
+- Rootless Docker and alternative endpoint discovery.
+- Optional passive-readiness integration.
+- Separately designed and safety-reviewed active daemon verification.

@@ -22,6 +22,7 @@ def valid_candidate():
         "schema_version": "1.0",
         "check": "docker_daemon_preflight",
         "service": {
+            "load_state": "loaded",
             "state": "active",
             "main_pid": 2937,
             "process_verified": True,
@@ -100,6 +101,7 @@ class DockerDaemonPreflightTests(unittest.TestCase):
     def test_inactive_service(self):
         data = valid_candidate()
         data["service"] = {
+            "load_state": "loaded",
             "state": "inactive",
             "main_pid": 0,
             "process_verified": False,
@@ -171,6 +173,8 @@ class DockerDaemonPreflightTests(unittest.TestCase):
             ("main_pid", -1),
             ("main_pid", 0),
             ("state", "healthy"),
+            ("load_state", "unexpected"),
+            ("load_state", "not-found"),
         )
 
         for field, value in changes:
@@ -342,6 +346,80 @@ class DockerDaemonPreflightTests(unittest.TestCase):
                         planning,
                         expected_target_id="ubuntu24",
                     )
+
+    def test_service_unit_not_found(self):
+        """Distinguish a missing Docker unit from an inactive unit."""
+
+        data = valid_candidate()
+
+        data["service"] = {
+            "load_state": "not-found",
+            "state": "inactive",
+            "main_pid": 0,
+            "process_verified": False,
+        }
+
+        data["socket"].update({
+            "unit_state": "inactive",
+            "present": False,
+            "permissions": None,
+            "owner": None,
+            "group": None,
+            "listener_state": "absent",
+        })
+
+        data["status"] = "SERVICE_NOT_FOUND"
+        data["reasons"] = ["DOCKER_SERVICE_UNIT_NOT_FOUND"]
+
+        result = classify_docker_daemon_preflight(data)
+
+        self.assertEqual(
+            result["status"],
+            "DAEMON_UNIT_NOT_FOUND",
+        )
+        self.assertEqual(
+            result["service_load_state"],
+            "not-found",
+        )
+        self.assertIsNone(result["daemon_responsive"])
+        self.assertIs(result["execution_allowed"], False)
+
+    def test_service_unit_masked(self):
+        """Classify a masked Docker systemd unit."""
+
+        data = valid_candidate()
+
+        data["service"] = {
+            "load_state": "masked",
+            "state": "inactive",
+            "main_pid": 0,
+            "process_verified": False,
+        }
+
+        data["socket"].update({
+            "unit_state": "inactive",
+            "present": False,
+            "permissions": None,
+            "owner": None,
+            "group": None,
+            "listener_state": "absent",
+        })
+
+        data["status"] = "SERVICE_MASKED"
+        data["reasons"] = ["DOCKER_SERVICE_UNIT_MASKED"]
+
+        result = classify_docker_daemon_preflight(data)
+
+        self.assertEqual(
+            result["status"],
+            "DAEMON_UNIT_MASKED",
+        )
+        self.assertEqual(
+            result["service_load_state"],
+            "masked",
+        )
+        self.assertIsNone(result["daemon_responsive"])
+        self.assertIs(result["execution_allowed"], False)
 
 if __name__ == "__main__":
     unittest.main()

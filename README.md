@@ -290,3 +290,38 @@ Important limitations:
 - Passive observations are snapshots and may become stale.
 
 Active Docker API verification is outside Milestone 4.18.
+
+### Docker Service Unit Differentiation — Milestone 4.19
+
+DSSA extends passive Docker daemon preflight with systemd `LoadState`
+inspection.
+
+The collector distinguishes the following service-unit conditions:
+
+| Classification | Meaning |
+|---|---|
+| DAEMON_UNIT_NOT_FOUND | docker.service is not found by systemd |
+| DAEMON_UNIT_MASKED | docker.service is masked |
+| DAEMON_INACTIVE | docker.service is loaded but inactive |
+| DAEMON_FAILED | docker.service is loaded but failed |
+| PASSIVE_CANDIDATE | Loaded service, verified dockerd process, and listening socket observed |
+| DAEMON_UNVERIFIED | Available passive evidence is inconclusive |
+
+Important limitations:
+
+- A missing docker.service unit does not prove Docker is uninstalled.
+- Rootless Docker and nonstandard service managers are outside this check.
+- PASSIVE_CANDIDATE does not establish Docker API responsiveness.
+- Passive observations may change after collection.
+
+The operation remains read-only and accepts empty parameters only.
+
+Safety properties:
+
+- `probe_attempted=false`
+- `daemon_responsive=null`
+- `read_only=true`
+- `execution_allowed=false`
+
+No Docker API connections, container operations, installations,
+service starts, or service restarts are performed.

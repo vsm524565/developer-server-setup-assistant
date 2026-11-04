@@ -604,3 +604,43 @@ Security and reliability boundaries:
 
 The implementation assesses passive evidence only. A separate design,
 safety review, and test plan are required for active API health verification.
+
+### Milestone 4.19 — Docker Service Unit State Extension
+
+The existing `discovery.docker_daemon_preflight` operation now collects
+systemd Docker service LoadState in addition to ActiveState, MainPID,
+process identity, and socket observations.
+
+The response schema includes:
+
+- `service.load_state`
+- `service.state`
+- `service.main_pid`
+- `service.process_verified`
+
+Supported LoadState values:
+
+- loaded
+- not-found
+- masked
+- error
+- bad-setting
+- unknown
+
+Classification is implemented consistently across:
+
+1. The remote Bash collector.
+2. The SSH response validator.
+3. The dispatcher response validator.
+4. The Python passive-preflight interpreter.
+
+The Python evidence wrapper continues to independently verify request
+identity and evidence freshness.
+
+The extension does not modify application runtime readiness
+reconciliation or introduce active Docker API probing.
+
+Transport validation tests execute the actual SSH and dispatcher jq
+expressions against synthetic positive and negative responses.
+
+All operations remain planning-only and execution-disabled.
