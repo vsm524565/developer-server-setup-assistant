@@ -703,3 +703,42 @@ Evidence freshness is validated upstream by the existing coordinators.
 The explanation layer does not independently authenticate raw evidence.
 
 Docker Compose remains outside this explanation contract.
+
+### Milestone 4.22 — Read-Only Assessment CLI
+
+Components:
+
+- bridge/cli.py
+- bridge/assessment_cli.py
+- bridge/applications/readiness/report_renderer.py
+
+Execution flow:
+
+1. The existing CLI dispatches the "assess" command.
+2. The assessment parser validates the application and target ID.
+3. LinuxBackend performs approved discovery.
+4. The daemon-aware readiness coordinator validates and reconciles
+   nine discovery evidence records.
+5. The explanation layer generates structured findings.
+6. The report renderer validates the reporting contract.
+7. The CLI prints the completed text or JSON report.
+
+The assessment path is separate from the existing setup workflow.
+
+Output isolation:
+
+- Python stdout and inherited FD 1 output are suppressed during
+  synchronous discovery and report preparation.
+- The original stdout descriptor is restored before report output.
+- Assessment failures produce a generic stderr error message.
+- Direct stderr emissions from external tools are not fully sanitized.
+- FD 1 redirection is process-wide and unsuitable for concurrent
+  application execution without additional isolation.
+
+Safety:
+
+- No setup_components() call from assessment CLI.
+- No Docker API health probe.
+- No installation or service modification.
+- No repair or execution authorization.
+- Original nine-source readiness decisions are preserved.

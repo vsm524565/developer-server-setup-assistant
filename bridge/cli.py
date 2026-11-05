@@ -2,6 +2,7 @@
 
 import argparse
 import subprocess
+import sys
 
 from bridge.adapters.linux_backend import LinuxBackend
 
@@ -94,5 +95,12 @@ def main():
         return 130
 
 
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "assess":
+        from bridge.assessment_cli import run_assessment_cli
+
+        raise SystemExit(run_assessment_cli(sys.argv[2:]))
+
     raise SystemExit(main())
+

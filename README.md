@@ -379,3 +379,47 @@ Validation:
 - 14/14 permanent explanation tests.
 - 387/387 complete backend regression tests.
 - 6/6 end-to-end Linux VM assessments.
+
+### Milestone 4.22 — Docker CLI Readiness Reports
+
+DSSA provides a read-only Docker readiness assessment through
+its existing CLI entry point.
+
+Text report:
+
+    python -m bridge.cli assess docker --target ubuntu24 --format text
+
+JSON report:
+
+    python -m bridge.cli assess docker --target ubuntu24 --format json
+
+The command uses the existing nine-source readiness coordinator,
+structured explanation layer, and report renderer.
+
+Supported features:
+- Human-readable terminal reports.
+- Machine-readable JSON reports.
+- Runtime and daemon classifications.
+- Structured findings and investigation guidance.
+- Original source reasons and nine evidence request IDs.
+- Explicit planning-only and execution-disabled policies.
+
+CLI exit codes:
+- 0: Report generated successfully.
+- 1: Assessment or reporting failed.
+- 2: Invalid command arguments.
+- 130: Assessment interrupted.
+
+A successful report may contain REVIEW_REQUIRED or BLOCKED readiness.
+
+Discovery stdout is suppressed during assessment, including output
+from subprocesses inheriting stdout. The validated report is written
+after stdout is restored.
+
+This synchronous CLI isolation does not guarantee sanitization
+of subprocess stderr or arbitrary concurrent output.
+
+The assessment command does not install packages, restart services,
+execute Docker API operations, or invoke component setup.
+
+The existing legacy component CLI remains available.

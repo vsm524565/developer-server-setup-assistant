@@ -586,3 +586,29 @@ Completed:
 
 No additional SSH operations, Docker API probes, installations,
 service changes or execution permissions were introduced.
+
+### Milestone 4.22 — Human-Readable CLI Readiness Reports
+
+Status: Implementation validated; final closure verification pending.
+
+Implemented:
+- Extended the existing CLI with read-only Docker assessments.
+- Added text and JSON report rendering.
+- Added assessment argument validation.
+- Preserved the legacy component CLI.
+- Added deterministic report and evidence validation.
+- Added sanitized assessment failure handling.
+- Added native subprocess stdout isolation.
+- Added permanent renderer and CLI regression tests.
+
+Validated before final closure:
+- 17/17 renderer tests.
+- 10/10 CLI tests.
+- 414/414 backend tests.
+- 6/6 CLI assessments across Ubuntu 22, Ubuntu 24, Ubuntu 26,
+  Debian 13, AlmaLinux 10 and Rocky Linux 10.
+- Native stdout isolation on successful and failed assessments.
+- No setup operation invoked by assessment CLI.
+
+Final full regression, end-to-end testing, and GitHub publication
+are required before marking the milestone complete.
