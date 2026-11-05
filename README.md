@@ -348,3 +348,34 @@ Safety guarantees:
   `execution_allowed=False`.
 
 Validation: 373/373 backend tests and 6/6 Linux VM assessments.
+
+### Milestone 4.21 — Structured Docker Readiness Explanation
+
+DSSA converts its nine-source Docker readiness assessment into
+structured, human-readable operational findings.
+
+The explanation layer reports:
+- Docker CLI availability.
+- Docker systemd service-unit observations.
+- Passive daemon process and socket findings.
+- Unverified Docker API health.
+- Informational investigation guidance.
+
+The result includes stable finding codes, titles, descriptions,
+investigation guidance, source reasons and evidence request IDs.
+
+The explanation function does not perform SSH discovery or modify
+the readiness decision. It is intended for future CLI and frontend
+presentation.
+
+Safety:
+- No Docker API calls.
+- No installation or service changes.
+- No automatic troubleshooting or repair.
+- No execution authorization.
+
+Validation:
+- 18/18 classification combinations.
+- 14/14 permanent explanation tests.
+- 387/387 complete backend regression tests.
+- 6/6 end-to-end Linux VM assessments.

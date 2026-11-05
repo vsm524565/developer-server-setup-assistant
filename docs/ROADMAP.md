@@ -565,3 +565,24 @@ CLI_ABSENT and DAEMON_UNIT_NOT_FOUND.
 
 No Docker API probe, installation, service activation, or
 execution authorization was introduced.
+
+### Milestone 4.21 — Structured Docker Readiness Explanation
+
+Status: Implementation and integration validated;
+GitHub publication pending.
+
+Completed:
+- Created a pure Docker readiness explanation layer.
+- Added structured finding codes and investigation guidance.
+- Supported three Docker runtime classifications.
+- Supported six passive daemon classifications.
+- Preserved original readiness reasons and evidence identities.
+- Added permanent positive and negative regression tests.
+- Verified deterministic and non-mutating behavior.
+- Passed 18/18 classification combinations.
+- Passed 14/14 explanation regression tests.
+- Passed 387/387 backend tests.
+- Passed 6/6 Linux VM integration assessments.
+
+No additional SSH operations, Docker API probes, installations,
+service changes or execution permissions were introduced.

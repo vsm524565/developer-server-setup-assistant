@@ -671,3 +671,35 @@ and never claims verified Docker API responsiveness.
 
 Milestone 4.20 applies to Docker only. Docker Compose continues
 to use its existing independent runtime assessment.
+
+### Milestone 4.21 — Docker Readiness Explanation Layer
+
+Module:
+`bridge/applications/readiness/readiness_explanation.py`
+
+The pure `explain_docker_readiness()` function consumes an existing
+nine-source daemon-aware readiness result.
+
+Pipeline:
+
+1. Existing application readiness assessment.
+2. Existing runtime-aware readiness reconciliation.
+3. Existing passive daemon preflight reconciliation.
+4. Structured readiness explanation generation.
+
+The explanation layer performs structural and policy validation,
+including:
+- Docker application identity.
+- Supported readiness and runtime classifications.
+- Supported daemon preflight classifications.
+- Nine unique evidence request IDs.
+- Matching daemon classification reason.
+- Planning-only and execution-disabled policy.
+
+It returns stable structured findings without changing the input
+result, reclassifying readiness, or executing operations.
+
+Evidence freshness is validated upstream by the existing coordinators.
+The explanation layer does not independently authenticate raw evidence.
+
+Docker Compose remains outside this explanation contract.
