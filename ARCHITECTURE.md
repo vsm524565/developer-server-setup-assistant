@@ -742,3 +742,70 @@ Safety:
 - No installation or service modification.
 - No repair or execution authorization.
 - Original nine-source readiness decisions are preserved.
+
+
+### Milestone 4.23 — Unified Application Workflow Coordinator
+
+The assessment CLI delegates read-only application assessment
+requests to a shared workflow layer.
+
+Components:
+
+- bridge/workflows/contracts.py
+- bridge/workflows/coordinator.py
+- bridge/assessment_cli.py
+
+Execution flow:
+
+1. CLI parses and validates command-line arguments.
+2. CLI constructs an inventory-managed workflow request.
+3. Workflow contract validates the request schema and identity.
+4. Workflow coordinator invokes existing daemon-aware readiness.
+5. Existing backend collects and validates nine evidence sources.
+6. Explanation layer produces structured Docker findings.
+7. Coordinator validates explanation and readiness consistency.
+8. Coordinator returns a planning-only workflow result.
+9. CLI validates the workflow envelope.
+10. Existing report renderer generates text or JSON output.
+
+Workflow contract:
+
+- schema_version: 1.0
+- workflow: readiness_assessment
+- target.kind: inventory
+- application_id: docker
+- max_age_seconds: positive numeric value up to 300
+
+Workflow response:
+
+- schema_version
+- check: application_workflow_result
+- workflow
+- target
+- application_id
+- status
+- result: validated Docker readiness explanation
+- planning_only: true
+- execution_allowed: false
+
+Security boundaries:
+
+- Unsupported operations and applications are rejected.
+- Raw SSH target information is not accepted.
+- Unexpected request fields are rejected.
+- Target and application identities must match throughout.
+- Nine discovery request identities remain unique.
+- Contradictory explanation and readiness results are rejected.
+- No installation approval or execution permission is generated.
+- Docker API health remains unverified.
+- The legacy setup path is not invoked by the assessment workflow.
+
+The existing stdout-isolation mechanism remains in the CLI.
+It prevents Python and inherited subprocess stdout from corrupting
+reports during synchronous discovery.
+
+The coordinator is independent of CLI rendering and can support
+future interfaces without duplicating discovery logic.
+
+The original interactive application is not yet migrated to
+the shared workflow architecture.

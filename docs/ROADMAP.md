@@ -612,3 +612,54 @@ Validated before final closure:
 
 Final full regression, end-to-end testing, and GitHub publication
 are required before marking the milestone complete.
+
+### Milestone 4.23 — Unified Read-Only Workflow
+
+Status: Implementation and integration validated.
+Final end-of-day closure and publication pending.
+
+Implemented:
+
+- Shared workflow request contract
+- Strict inventory target and operation validation
+- Read-only application workflow coordinator
+- Existing nine-source readiness pipeline integration
+- Explanation consistency validation
+- CLI migration to shared coordinator
+- Preservation of text and JSON report compatibility
+- Preservation of legacy entry points
+
+Permanent regression coverage:
+
+- 13 workflow contract tests
+- 11 workflow coordinator tests
+- 12 assessment CLI tests
+- 440 complete backend tests
+
+Integration coverage:
+
+- Ubuntu 22.04
+- Ubuntu 24.04
+- Ubuntu 26.04
+- Debian 13
+- AlmaLinux 10
+- Rocky Linux 10
+
+Six-VM workflow comparison: PASS
+Six-VM migrated CLI assessment: PASS
+Twelve CLI text/JSON executions: PASS
+Unknown inventory target rejection: PASS
+
+Safety:
+
+- Read-only assessment
+- No installation authorization
+- No Docker API health claims
+- Nine unique evidence identities per assessment
+- Legacy setup behavior remains separate
+
+Remaining before completion:
+
+- Final regression and end-to-end closure
+- Documentation and staged-change review
+- Git commit and GitHub publication

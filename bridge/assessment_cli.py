@@ -10,11 +10,8 @@ from contextlib import contextmanager
 import os
 
 from bridge.adapters.linux_backend import LinuxBackend
-from bridge.applications.readiness.daemon_coordinator import (
-    assess_daemon_aware_readiness,
-)
-from bridge.applications.readiness.readiness_explanation import (
-    explain_docker_readiness,
+from bridge.workflows.coordinator import (
+    assess_application_workflow,
 )
 from bridge.applications.readiness.report_renderer import (
     render_docker_report,
@@ -98,14 +95,49 @@ def run_assessment_cli(argv=None):
         with isolated_discovery_stdout():
             backend = LinuxBackend()
 
-            readiness = assess_daemon_aware_readiness(
+            # Build a read-only inventory-managed workflow request.
+            request = {
+                "schema_version": "1.0",
+                "workflow": "readiness_assessment",
+                "target": {
+                    "kind": "inventory",
+                    "id": args.target,
+                },
+                "application_id": args.application,
+                "max_age_seconds": 120,
+            }
+
+            # Reuse the shared coordinator and its evidence validation.
+            workflow = assess_application_workflow(
                 backend,
-                args.target,
-                args.application,
-                max_age_seconds=120,
+                request,
             )
 
-            explanation = explain_docker_readiness(readiness)
+            # Fail closed if the workflow boundary is violated.
+            if (
+                not isinstance(workflow, dict)
+                or workflow.get("schema_version") != "1.0"
+                or workflow.get("check") != "application_workflow_result"
+                or workflow.get("workflow") != "readiness_assessment"
+                or workflow.get("target") != request["target"]
+                or workflow.get("application_id") != args.application
+                or workflow.get("planning_only") is not True
+                or workflow.get("execution_allowed") is not False
+                or not isinstance(workflow.get("result"), dict)
+            ):
+                raise RuntimeError("Invalid assessment workflow result.")
+
+            explanation = workflow["result"]
+
+            if (
+                explanation.get("target_id") != args.target
+                or explanation.get("application_id") != args.application
+                or explanation.get("status") != workflow.get("status")
+                or explanation.get("planning_only") is not True
+                or explanation.get("execution_allowed") is not False
+            ):
+                raise RuntimeError("Assessment workflow identity mismatch.")
+
 
             report = render_docker_report(
                 explanation,

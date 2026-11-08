@@ -423,3 +423,59 @@ The assessment command does not install packages, restart services,
 execute Docker API operations, or invoke component setup.
 
 The existing legacy component CLI remains available.
+
+
+### Milestone 4.23 — Unified Read-Only Workflow
+
+DSSA uses a shared workflow coordinator for inventory-managed
+Docker readiness assessments.
+
+The workflow accepts a validated request containing:
+
+- Schema version
+- Workflow type
+- Inventory target identity
+- Application identifier
+- Evidence freshness window
+
+Currently supported:
+- Workflow: readiness_assessment
+- Application: docker
+- Target kind: inventory
+
+Public CLI commands remain unchanged:
+
+    python -m bridge.cli assess docker --target ubuntu24 --format text
+
+    python -m bridge.cli assess docker --target ubuntu24 --format json
+
+The CLI now delegates assessment orchestration to the shared
+workflow coordinator.
+
+The coordinator reuses the existing nine-source Docker readiness
+pipeline, explanation generator, and explanation validator.
+
+Safety guarantees:
+- Strict request field validation
+- No raw SSH credentials accepted in workflow requests
+- Inventory target identity validation
+- Nine unique discovery evidence identities
+- Evidence freshness and operation validation
+- No Docker API health verification claims
+- Planning-only results
+- Execution authorization disabled
+- No component installation through the assessment workflow
+
+The original interactive main.py workflow and legacy component
+CLI remain separate and unchanged.
+
+The legacy component CLI retains its existing setup capability.
+Use --plan when requesting its read-only planning mode.
+
+Milestone 4.23 validation:
+- 440 backend regression tests passed
+- 12 assessment CLI tests passed
+- 24 workflow contract/coordinator tests passed
+- Six Linux distributions assessed successfully
+- Text and JSON CLI compatibility verified
+- Unknown inventory targets rejected safely
