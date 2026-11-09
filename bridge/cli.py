@@ -95,12 +95,16 @@ def main():
         return 130
 
 
-
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "assess":
         from bridge.assessment_cli import run_assessment_cli
 
         raise SystemExit(run_assessment_cli(sys.argv[2:]))
 
-    raise SystemExit(main())
+    if len(sys.argv) > 1 and sys.argv[1] == "capabilities":
+        from bridge.capability_cli import run_capability_cli
 
+        raise SystemExit(run_capability_cli(sys.argv[2:]))
+
+    # Preserve the existing component setup CLI without modification.
+    raise SystemExit(main())

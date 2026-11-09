@@ -479,3 +479,89 @@ Milestone 4.23 validation:
 - Six Linux distributions assessed successfully
 - Text and JSON CLI compatibility verified
 - Unknown inventory targets rejected safely
+
+### Milestone 4.24 — Workflow Capability Registry and Handler Dispatch
+
+DSSA now uses an explicit capability registry and implemented-handler
+catalog for read-only application workflows.
+
+Architecture:
+
+- Application catalog: defines known DSSA applications.
+- Capability registry: advertises explicitly supported workflows.
+- Workflow contracts: validate requests against registered capabilities.
+- Handler catalog: identifies implemented assessment handlers.
+- Workflow coordinator: verifies capabilities and handler identity
+  before invoking backend discovery.
+
+Currently supported workflow:
+
+- Application: Docker
+- Workflow: readiness_assessment
+- Target type: inventory
+- Handler: docker_readiness_v1
+
+The application catalog currently contains 23 definitions. Catalog
+membership does not automatically enable an assessment workflow.
+
+Safety guarantees:
+
+- Unsupported application/workflow combinations are rejected.
+- Handler resolution occurs before backend discovery.
+- Capability metadata cannot authorize installation.
+- Workflow requests remain inventory-managed.
+- Readiness reports remain planning-only.
+- Docker daemon API health is not claimed as verified.
+- Legacy setup and interactive entry points remain unchanged.
+
+Validation:
+
+- 462 backend tests passed.
+- Six Linux VM Docker readiness assessments passed.
+- Nine unique evidence identities per assessment.
+- Offline capability discovery passed.
+- Lab startup environment verified.
+
+No installation execution functionality was introduced.
+
+### Milestone 4.25 — Offline Workflow Capability Discovery CLI
+
+DSSA provides an offline command for discovering implemented,
+read-only application workflow capabilities.
+
+Commands:
+
+    python -m bridge.cli capabilities
+    python -m bridge.cli capabilities --format text
+    python -m bridge.cli capabilities --format json
+
+The command does not require:
+- Inventory target selection
+- SSH credentials
+- Running lab VMs
+- LinuxBackend initialization
+- Remote discovery
+
+The response is generated using the existing workflow capability
+registry and implemented-handler catalog.
+
+Current supported capability:
+
+- Application: docker
+- Workflow: readiness_assessment
+- Target kind: inventory
+- Planning only: true
+- Execution allowed: false
+
+JSON reports use schema version 1.0 and the check identifier
+workflow_capabilities.
+
+Capability report validation enforces exact fields, unique capability
+identities, stable ordering, implemented handler availability and
+read-only policy.
+
+The existing Docker assessment CLI and legacy component setup CLI
+remain unchanged.
+
+The capability command does not execute installation or active
+health-check operations.

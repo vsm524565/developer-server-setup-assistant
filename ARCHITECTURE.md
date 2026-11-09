@@ -809,3 +809,100 @@ future interfaces without duplicating discovery logic.
 
 The original interactive application is not yet migrated to
 the shared workflow architecture.
+
+### Milestone 4.24 — Capability Registry and Handler Boundaries
+
+DSSA separates application definitions, supported workflow
+capabilities, and implemented workflow handlers.
+
+Core modules:
+
+- bridge/applications/catalog.py
+- bridge/applications/registry.py
+- bridge/workflows/contracts.py
+- bridge/workflows/registry.py
+- bridge/workflows/handlers.py
+- bridge/workflows/coordinator.py
+
+Request lifecycle:
+
+1. Receive an inventory-managed workflow request.
+2. Validate schema, fields, target and freshness constraints.
+3. Confirm that the capability registry supports the request.
+4. Validate the registered capability's read-only policy.
+5. Resolve an explicitly implemented workflow handler.
+6. Reject missing or mismatched handlers.
+7. Execute the existing evidence-gated Docker assessment.
+8. Validate readiness and explanation consistency.
+9. Return a planning-only workflow result.
+
+Current implemented combination:
+
+    docker / readiness_assessment / inventory
+
+Handler identity:
+
+    docker_readiness_v1
+
+Default capability registrations are derived from the implemented
+handler catalog.
+
+Registry operations do not perform SSH discovery or installation.
+
+The coordinator retains a separate capability-policy check even
+though the workflow contract validates registered support.
+
+The Docker-specific evidence and explanation pipeline remains
+unchanged.
+
+Future application handlers must be implemented and tested before
+their capabilities are advertised.
+
+All current workflow results retain:
+
+    planning_only = true
+    execution_allowed = false
+
+### Milestone 4.25 — Offline Capability Discovery Interface
+
+New modules:
+
+- bridge/workflows/discovery.py
+- bridge/capability_cli.py
+
+Modified entry point:
+
+- bridge/cli.py
+
+Workflow:
+
+1. CLI receives the capabilities subcommand.
+2. The capability CLI parses text or JSON formatting arguments.
+3. The discovery service builds the existing workflow registry.
+4. The registry exposes explicitly supported capabilities.
+5. Discovery validates handler availability and read-only policy.
+6. The capability CLI renders a deterministic report.
+
+The capability interface does not construct LinuxBackend, perform
+SSH discovery, or invoke application installation.
+
+JSON report contract:
+
+    schema_version: "1.0"
+    check: "workflow_capabilities"
+    capabilities: list
+
+Each capability contains:
+
+    application_id
+    workflow
+    target_kind
+    planning_only
+    execution_allowed
+
+The capability report validator rejects malformed schemas,
+unauthorized fields, duplicate capabilities, unsupported handlers,
+unsafe policy values and unsorted capability declarations.
+
+The existing assess command and legacy setup CLI entry points are
+preserved.

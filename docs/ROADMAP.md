@@ -670,3 +670,71 @@ Final validation:
 - Unknown inventory target rejected safely.
 - Nine unique evidence identities per assessment.
 - Execution authorization remained disabled.
+
+
+### Milestone 4.24 — Workflow Capability Registry
+
+Status: Implementation and integration validated; GitHub publication pending.
+
+Implemented:
+
+- Explicit workflow capability registry
+- Integration with existing 23-application catalog
+- Registry-backed workflow request validation
+- Read-only capability-policy checks
+- Implemented workflow handler catalog
+- Handler validation before backend discovery
+- Offline capability discovery
+- Existing Docker CLI compatibility preserved
+
+Validation:
+
+- 15 workflow registry tests passed
+- 15 workflow contract tests passed
+- 13 workflow coordinator tests passed
+- 3 handler dispatch tests passed
+- 462 complete backend regression tests passed
+- Six Linux VM assessments passed
+- Nine unique evidence identities per VM
+- Execution authorization remained disabled
+- DSSA startup environment verified
+
+Remaining:
+
+- Final documentation and staged-change review
+- End-of-day regression and CLI compatibility verification
+- Original interactive application compatibility verification
+- Git commit and GitHub publication
+
+### Milestone 4.25 — Offline Capability Discovery CLI
+
+Status: Implementation, unit testing, integration and end-to-end validation complete; GitHub publication pending.
+
+Implementation Set A:
+- Offline workflow discovery service
+- Capability report validation
+- 12 discovery unit tests passed
+
+Implementation Set B:
+- Capability CLI with text and JSON output
+- New capabilities subcommand in bridge/cli.py
+- 12 CLI unit tests passed
+- Existing assess and legacy setup dispatch preserved
+
+Implementation Set C:
+- README documentation
+- Architecture documentation
+- Roadmap documentation
+
+Remaining block-level validation:
+- Full backend regression
+- CLI compatibility and failure-path verification
+- Six-VM integration
+- Original application compatibility
+- Final Git staging and publication
+
+Safety:
+- No installation authority
+- No SSH requirements for capability discovery
+- No backend initialization
+- No active health checks
