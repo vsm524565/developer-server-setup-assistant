@@ -2,16 +2,11 @@
 """Contracts for DSSA's read-only application workflows."""
 
 import re
+from bridge.workflows.registry import build_workflow_registry
 
 SCHEMA_VERSION = "1.0"
 
-SUPPORTED_WORKFLOWS = frozenset({
-    "readiness_assessment",
-})
 
-SUPPORTED_APPLICATIONS = frozenset({
-    "docker",
-})
 
 TARGET_ID_PATTERN = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}"
@@ -42,16 +37,11 @@ def validate_workflow_request(request):
     workflow = request["workflow"]
     application_id = request["application_id"]
 
-    if (
-        not isinstance(workflow, str)
-        or workflow not in SUPPORTED_WORKFLOWS
-    ):
+    # Validate primitive identities before consulting capability metadata.
+    if not isinstance(workflow, str) or not workflow:
         raise ValueError("Unsupported workflow.")
 
-    if (
-        not isinstance(application_id, str)
-        or application_id not in SUPPORTED_APPLICATIONS
-    ):
+    if not isinstance(application_id, str) or not application_id:
         raise ValueError("Unsupported application.")
 
     target = request["target"]
@@ -78,7 +68,15 @@ def validate_workflow_request(request):
         or not 0 < max_age_seconds <= 300
     ):
         raise ValueError("Invalid evidence freshness window.")
+    # Only explicitly registered read-only capabilities are supported.
+    registry = build_workflow_registry()
 
+    if not registry.supports(
+        application_id,
+        workflow,
+        target["kind"],
+    ):
+        raise ValueError("Unsupported workflow capability.")
     return {
         "schema_version": SCHEMA_VERSION,
         "workflow": request["workflow"],

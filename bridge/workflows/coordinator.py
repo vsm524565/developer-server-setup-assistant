@@ -16,7 +16,11 @@ from bridge.applications.readiness.readiness_explanation import (
 from bridge.applications.readiness.report_renderer import (
     validate_explanation,
 )
-
+from bridge.workflows.registry import build_workflow_registry
+from bridge.workflows.handlers import (
+    DOCKER_READINESS_HANDLER,
+    resolve_workflow_handler,
+)
 
 def assess_application_workflow(backend, request):
     """Run an approved workflow through existing evidence-gated services."""
@@ -26,6 +30,38 @@ def assess_application_workflow(backend, request):
     target_id = validated["target"]["id"]
     application_id = validated["application_id"]
     max_age_seconds = validated["max_age_seconds"]
+
+    # Require an explicitly registered read-only workflow capability.
+    registry = build_workflow_registry()
+
+    capability = registry.get(
+        application_id,
+        validated["workflow"],
+        validated["target"]["kind"],
+    )
+
+    if (
+        capability.get("application_id") != application_id
+        or capability.get("workflow") != validated["workflow"]
+        or capability.get("target_kind") != validated["target"]["kind"]
+        or capability.get("planning_only") is not True
+        or capability.get("execution_allowed") is not False
+    ):
+        raise RuntimeError(
+            "Workflow capability violates the read-only policy."
+        )
+
+    # Resolve a real implementation before backend discovery.
+    handler_id = resolve_workflow_handler(
+        application_id,
+        validated["workflow"],
+        validated["target"]["kind"],
+    )
+
+    if handler_id != DOCKER_READINESS_HANDLER:
+        raise ValueError(
+            "No implemented handler for this workflow capability."
+        )
 
     # The existing coordinator owns discovery and evidence validation.
     readiness = assess_daemon_aware_readiness(

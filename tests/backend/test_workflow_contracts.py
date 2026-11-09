@@ -3,6 +3,7 @@
 
 import unittest
 from copy import deepcopy
+from unittest.mock import patch
 
 from bridge.workflows.contracts import (
     validate_workflow_request,
@@ -180,6 +181,37 @@ class TestWorkflowContracts(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     validate_workflow_request(value)
+
+    def test_registry_rejects_capability(self):
+        """Reject a structurally valid request without registry support."""
+        request = valid_request()
+
+        with patch(
+            "bridge.workflows.contracts.build_workflow_registry"
+        ) as builder:
+            builder.return_value.supports.return_value = False
+
+            with self.assertRaises(ValueError):
+                validate_workflow_request(request)
+
+            builder.return_value.supports.assert_called_once_with(
+                "docker",
+                "readiness_assessment",
+                "inventory",
+            )
+
+    def test_invalid_target_rejected_before_registry_lookup(self):
+        """Reject malformed target identities before capability lookup."""
+        request = valid_request()
+        request["target"]["id"] = "../invalid"
+
+        with patch(
+            "bridge.workflows.contracts.build_workflow_registry"
+        ) as builder:
+            with self.assertRaises(ValueError):
+                validate_workflow_request(request)
+
+            builder.assert_not_called()
 
 
 if __name__ == "__main__":

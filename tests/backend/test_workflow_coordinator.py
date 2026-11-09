@@ -263,6 +263,65 @@ class TestWorkflowCoordinator(unittest.TestCase):
 
         self.backend.setup_components.assert_not_called()
 
+    def test_unregistered_capability_rejected_before_discovery(self):
+        """Reject workflows absent from the capability registry."""
+        with patch(
+            "bridge.workflows.coordinator.build_workflow_registry"
+        ) as builder:
+            builder.return_value.get.side_effect = ValueError(
+                "Unsupported workflow capability."
+            )
+
+            with self.assertRaises(ValueError):
+                assess_application_workflow(
+                    self.backend,
+                    self.request,
+                )
+
+            builder.return_value.get.assert_called_once_with(
+                "docker",
+                "readiness_assessment",
+                "inventory",
+            )
+
+        self.assess.assert_not_called()
+        self.explain.assert_not_called()
+        self.validate.assert_not_called()
+
+    def test_unsafe_capability_rejected_before_discovery(self):
+        """Reject execution authority even from a registry response."""
+        for field, value in (
+            ("execution_allowed", True),
+            ("planning_only", False),
+            ("application_id", "nginx"),
+            ("workflow", "installation"),
+            ("target_kind", "ssh"),
+        ):
+            with self.subTest(field=field):
+                capability = {
+                    "application_id": "docker",
+                    "workflow": "readiness_assessment",
+                    "target_kind": "inventory",
+                    "planning_only": True,
+                    "execution_allowed": False,
+                }
+                capability[field] = value
+
+                with patch(
+                    "bridge.workflows.coordinator.build_workflow_registry"
+                ) as builder:
+                    builder.return_value.get.return_value = capability
+
+                    with self.assertRaises(RuntimeError):
+                        assess_application_workflow(
+                            self.backend,
+                            self.request,
+                        )
+
+        self.assess.assert_not_called()
+        self.explain.assert_not_called()
+        self.validate.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
