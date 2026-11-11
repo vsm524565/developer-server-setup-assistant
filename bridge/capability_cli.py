@@ -29,12 +29,16 @@ def build_parser():
     return parser
 
 
-def render_capabilities(report, output_format="text"):
-    """Render a validated report without changing its contents."""
-    validated = validate_capability_report(report)
 
+def render_capabilities(report, output_format="text"):
+    """Render validated capabilities with a strict output contract."""
+
+    # Reject unsupported formats before examining report contents.
     if output_format not in ("text", "json"):
         raise ValueError("Unsupported capability report format.")
+
+    # Complete contract validation before producing any output.
+    validated = validate_capability_report(report)
 
     if output_format == "json":
         return json.dumps(

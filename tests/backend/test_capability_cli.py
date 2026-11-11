@@ -201,6 +201,120 @@ class TestCapabilityCLI(unittest.TestCase):
         self.assertIn("docker", result.stdout)
         self.assertIn("Execution: DISABLED", result.stdout)
 
+    def test_invalid_format_rejected_before_report_validation(self):
+        """Reject unsupported formats without inspecting report contents."""
+        with patch(
+            "bridge.capability_cli.validate_capability_report"
+        ) as validator:
+            with self.assertRaisesRegex(
+                ValueError, "Unsupported capability report format"
+            ):
+                render_capabilities(
+                    {"invalid": "report"},
+                    output_format="xml",
+                )
+
+        validator.assert_not_called()
+
+    def test_malformed_discovery_report_sanitized(self):
+        """Do not emit JSON when discovery returns an invalid contract."""
+        report = valid_report()
+        report["unexpected_field"] = "internal-data"
+
+        code, output, errors, discover = self.execute_cli(
+            ["--format", "json"],
+            report=report,
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(output, "")
+        self.assertIn(
+            "ERROR: Workflow capability discovery failed.",
+            errors,
+        )
+        self.assertNotIn("internal-data", errors)
+        discover.assert_called_once_with()
+
+    def test_unsafe_discovery_report_sanitized(self):
+        """Reject execution-enabled capabilities before printing."""
+        report = valid_report()
+        report["capabilities"][0]["execution_allowed"] = True
+
+        code, output, errors, _ = self.execute_cli(
+            ["--format", "json"],
+            report=report,
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(output, "")
+        self.assertIn("discovery failed", errors)
+        self.assertNotIn("Unsafe workflow capability", errors)
+
+    def test_unsorted_discovery_report_sanitized(self):
+        """Prevent unsorted multi-capability reports from being published."""
+        report = valid_report()
+        report["capabilities"].append({
+            "application_id": "apache",
+            "workflow": "readiness_assessment",
+            "target_kind": "inventory",
+            "planning_only": True,
+            "execution_allowed": False,
+        })
+
+        with patch(
+            "bridge.workflows.discovery.resolve_workflow_handler",
+            return_value="test_readonly_handler",
+        ):
+            code, output, errors, _ = self.execute_cli(
+                ["--format", "json"],
+                report=report,
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(output, "")
+        self.assertIn("discovery failed", errors)
+        self.assertNotIn("not sorted", errors)
+
+    def test_rendering_failure_does_not_publish_output(self):
+        """Keep expected rendering errors on the sanitized error path."""
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with (
+            patch(
+                "bridge.capability_cli.discover_workflow_capabilities",
+                return_value=valid_report(),
+            ),
+            patch(
+                "bridge.capability_cli.render_capabilities",
+                side_effect=ValueError("Sensitive rendering detail"),
+            ),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = run_capability_cli(["--format", "json"])
+
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("discovery failed", stderr.getvalue())
+        self.assertNotIn(
+            "Sensitive rendering detail",
+            stderr.getvalue(),
+        )
+
+    def test_repeated_rendering_is_deterministic(self):
+        """Produce identical text and JSON from an unchanged contract."""
+        report = valid_report()
+
+        for output_format in ("text", "json"):
+            first = render_capabilities(report, output_format)
+            second = render_capabilities(report, output_format)
+
+            self.assertEqual(first, second)
+            self.assertTrue(first.endswith("\n"))
+
+        self.assertEqual(report, valid_report())
+
 
 if __name__ == "__main__":
     unittest.main()

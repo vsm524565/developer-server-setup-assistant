@@ -906,3 +906,44 @@ unsafe policy values and unsorted capability declarations.
 
 The existing assess command and legacy setup CLI entry points are
 preserved.
+
+### Milestone 4.26 — Discovery Contract Hardening
+
+The capability discovery contract is enforced at two boundaries.
+
+**Discovery boundary**
+
+`bridge/workflows/discovery.py` builds the capability report from the
+workflow registry, sorts declarations by their identity tuple and
+validates the complete report.
+
+The validator enforces:
+
+- Exact top-level and capability fields
+- Supported schema version and report check identity
+- Nonempty string capability identities
+- Unique application/workflow/target-kind combinations
+- Strictly sorted capability declarations
+- Resolution to implemented workflow handlers
+- Read-only planning and execution-denied policy
+
+Successful validation returns a deep copy.
+
+**CLI boundary**
+
+`bridge/capability_cli.py` validates the requested output format before
+validating the report. The complete report must pass validation before
+text or JSON is rendered.
+
+Expected discovery and rendering failures use a sanitized error message
+and a nonzero exit code. Unsupported CLI formats are rejected by
+argument parsing.
+
+The capability CLI remains offline. No SSH connection, installation
+backend or execution authorization is introduced by this milestone.
+
+**Compatibility**
+
+The existing capability report schema remains version `1.0`.
+The `assess` command, original component setup CLI and interactive
+`main.py` workflow remain separate from capability discovery.

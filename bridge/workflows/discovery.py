@@ -74,19 +74,20 @@ def validate_capability_report(report):
                 "Capability has no implemented workflow handler."
             )
 
-    if list(seen) != sorted(seen):
-        # Set ordering is not meaningful; check the original report order.
-        keys = [
-            (
-                item["application_id"],
-                item["workflow"],
-                item["target_kind"],
-            )
-            for item in report["capabilities"]
-        ]
 
-        if keys != sorted(keys):
-            raise ValueError("Capability report is not sorted.")
+    # Validate the original declaration order, not set iteration order.
+    keys = [
+        (
+            capability["application_id"],
+            capability["workflow"],
+            capability["target_kind"],
+        )
+        for capability in report["capabilities"]
+    ]
+
+    if keys != sorted(keys):
+        raise ValueError("Capability report is not sorted.")
+
 
     return deepcopy(report)
 
@@ -100,6 +101,15 @@ def discover_workflow_capabilities():
         deepcopy(capability)
         for capability in registry.list_capabilities()
     ]
+
+    # Emit deterministic order even if a registry changes its iteration order.
+    capabilities.sort(
+        key=lambda capability: (
+            capability["application_id"],
+            capability["workflow"],
+            capability["target_kind"],
+        )
+    )
 
     report = {
         "schema_version": SCHEMA_VERSION,

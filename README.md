@@ -565,3 +565,32 @@ remain unchanged.
 
 The capability command does not execute installation or active
 health-check operations.
+
+### Capability Discovery Contract Guarantees — Milestone 4.26
+
+The offline capability discovery interface provides deterministic, read-only
+workflow capability reporting.
+
+```bash
+python -m bridge.cli capabilities --format text
+python -m bridge.cli capabilities --format json
+```
+
+Contract guarantees:
+
+- Capability declarations use schema version `1.0`.
+- Declarations are sorted by application ID, workflow and target kind.
+- Duplicate or unsorted declarations are rejected during validation.
+- Every advertised capability must resolve to an implemented handler.
+- Capabilities must declare `planning_only: true` and
+  `execution_allowed: false`.
+- Discovery returns independent report objects.
+- Unsupported output formats are rejected before report validation.
+- Invalid discovery reports do not produce partial CLI output.
+- Expected discovery and rendering failures return a sanitized error.
+- Capability discovery does not require SSH, inventory access or a
+  remote backend.
+
+The current implemented capability remains Docker readiness assessment
+using inventory targets. Capability discovery does not install software
+or authorize execution.

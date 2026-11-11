@@ -738,3 +738,51 @@ Safety:
 - No SSH requirements for capability discovery
 - No backend initialization
 - No active health checks
+
+### Milestone 4.26 — Workflow Discovery Contract Hardening
+
+Status: Implementation, regression, integration and end-to-end validation complete — November 11, 2026.
+
+**Objective**
+
+Strengthen the offline workflow capability discovery contract without
+introducing new application handlers or installation functionality.
+
+**Set A — Deterministic discovery contract**
+
+- Removed ordering validation dependent on Python set iteration.
+- Enforced unconditional capability declaration ordering.
+- Normalized registry output before publishing discovery reports.
+- Added regression coverage for sorted and unsorted reports,
+  registry ordering and repeated discovery.
+- Targeted discovery tests: 16 passed.
+
+**Set B — CLI contract hardening**
+
+- Reject unsupported formats before report validation.
+- Preserve complete validation before output generation.
+- Added tests for malformed, unsafe and unsorted reports.
+- Added regression tests for sanitized rendering failures,
+  deterministic formatting and invalid-format precedence.
+- Targeted capability CLI tests: 18 passed.
+
+**Set C — Documentation**
+
+- Documented report ordering, validation boundaries,
+  offline behavior and failure-handling guarantees.
+- Preserved schema version `1.0` and existing CLI interfaces.
+
+**Validation completed**
+
+- Full backend regression: 496/496 tests passed.
+- Python compilation and Git whitespace checks passed.
+- Offline capability CLI E2E: text and JSON passed.
+- Deterministic CLI output verified across repeated executions.
+- Unsupported CLI formats rejected.
+- CLI entry-point compatibility verified.
+- Six-VM Docker assessment integration: 12/12 passed.
+- Nine unique evidence identities verified per VM.
+- Read-only execution policy preserved across all assessments.
+- Original interactive `main.py` compatibility passed on Ubuntu 24.04.4.
+- Preflight rejected Nginx/Apache and MySQL/MariaDB conflicts.
+- No installation commands were executed.
