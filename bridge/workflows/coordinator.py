@@ -1,5 +1,5 @@
 
-"""Coordinate DSSA's read-only application workflows."""
+"""Coordinate DSSA's implemented read-only application workflows."""
 
 from copy import deepcopy
 
@@ -10,20 +10,31 @@ from bridge.workflows.contracts import (
 from bridge.applications.readiness.daemon_coordinator import (
     assess_daemon_aware_readiness,
 )
+from bridge.applications.readiness.runtime_coordinator import (
+    assess_runtime_aware_readiness,
+)
 from bridge.applications.readiness.readiness_explanation import (
     explain_docker_readiness,
+)
+from bridge.applications.readiness.compose_explanation import (
+    explain_compose_readiness,
 )
 from bridge.applications.readiness.report_renderer import (
     validate_explanation,
 )
+from bridge.applications.readiness.compose_report import (
+    validate_compose_explanation,
+)
 from bridge.workflows.registry import build_workflow_registry
 from bridge.workflows.handlers import (
     DOCKER_READINESS_HANDLER,
+    COMPOSE_READINESS_HANDLER,
     resolve_workflow_handler,
 )
 
+
 def assess_application_workflow(backend, request):
-    """Run an approved workflow through existing evidence-gated services."""
+    """Dispatch approved read-only workflows through validated evidence."""
 
     validated = validate_workflow_request(request)
 
@@ -31,7 +42,7 @@ def assess_application_workflow(backend, request):
     application_id = validated["application_id"]
     max_age_seconds = validated["max_age_seconds"]
 
-    # Require an explicitly registered read-only workflow capability.
+    # Validate the registered capability before backend discovery.
     registry = build_workflow_registry()
 
     capability = registry.get(
@@ -51,31 +62,44 @@ def assess_application_workflow(backend, request):
             "Workflow capability violates the read-only policy."
         )
 
-    # Resolve a real implementation before backend discovery.
+    # Only explicit implemented handlers may reach discovery.
     handler_id = resolve_workflow_handler(
         application_id,
         validated["workflow"],
         validated["target"]["kind"],
     )
 
-    if handler_id != DOCKER_READINESS_HANDLER:
+    if handler_id == DOCKER_READINESS_HANDLER:
+        if application_id != "docker":
+            raise ValueError("Docker handler identity mismatch.")
+
+        readiness = assess_daemon_aware_readiness(
+            backend,
+            target_id,
+            application_id,
+            max_age_seconds=max_age_seconds,
+        )
+
+    elif handler_id == COMPOSE_READINESS_HANDLER:
+        if application_id != "docker_compose":
+            raise ValueError("Compose handler identity mismatch.")
+
+        readiness = assess_runtime_aware_readiness(
+            backend,
+            target_id,
+            application_id,
+            max_age_seconds=max_age_seconds,
+        )
+
+    else:
         raise ValueError(
             "No implemented handler for this workflow capability."
         )
 
-    # The existing coordinator owns discovery and evidence validation.
-    readiness = assess_daemon_aware_readiness(
-        backend,
-        target_id,
-        application_id,
-        max_age_seconds=max_age_seconds,
-    )
-
-    if not isinstance(readiness, dict):
-        raise RuntimeError("Invalid readiness assessment result.")
-
+    # Both pipelines must preserve identity and deny execution.
     if (
-        readiness.get("target_id") != target_id
+        not isinstance(readiness, dict)
+        or readiness.get("target_id") != target_id
         or readiness.get("application_id") != application_id
         or readiness.get("planning_only") is not True
         or readiness.get("execution_allowed") is not False
@@ -83,26 +107,42 @@ def assess_application_workflow(backend, request):
     ):
         raise RuntimeError("Readiness result violates workflow policy.")
 
-    # Create an explanation without modifying the readiness result.
-    explanation = explain_docker_readiness(readiness)
+    # Apply the correct explanation and validation contract.
+    if handler_id == DOCKER_READINESS_HANDLER:
+        explanation = explain_docker_readiness(readiness)
+        validate_explanation(explanation)
 
-    # Revalidate the explanation before exposing it to callers.
-    validate_explanation(explanation)
+    else:
+        explanation = explain_compose_readiness(readiness)
+        validate_compose_explanation(explanation)
 
+    # Cross-check the explanation against the evidence decision.
     if (
-        explanation["target_id"] != target_id
-        or explanation["application_id"] != application_id
-        or explanation["status"] != readiness["status"]
-        or explanation["evidence_request_ids"]
-            != readiness["evidence_request_ids"]
-        or explanation["source_reasons"]
-            != readiness["reasons"]
-        or explanation["runtime_status"]
-            != readiness["runtime_status"]
-        or explanation["daemon_preflight_status"]
-            != readiness["daemon_preflight_status"]
+        not isinstance(explanation, dict)
+        or explanation.get("target_id") != target_id
+        or explanation.get("application_id") != application_id
+        or explanation.get("status") != readiness.get("status")
+        or explanation.get("evidence_request_ids")
+            != readiness.get("evidence_request_ids")
+        or explanation.get("source_reasons")
+            != readiness.get("reasons")
+        or explanation.get("runtime_status")
+            != readiness.get("runtime_status")
+        or explanation.get("planning_only") is not True
+        or explanation.get("execution_allowed") is not False
+        or explanation.get("daemon_responsive") is not None
     ):
         raise RuntimeError("Workflow explanation contradicts readiness.")
+
+    # Docker Engine additionally requires matching daemon classification.
+    if handler_id == DOCKER_READINESS_HANDLER:
+        if (
+            explanation.get("daemon_preflight_status")
+                != readiness.get("daemon_preflight_status")
+        ):
+            raise RuntimeError(
+                "Docker daemon explanation contradicts readiness."
+            )
 
     return {
         "schema_version": SCHEMA_VERSION,

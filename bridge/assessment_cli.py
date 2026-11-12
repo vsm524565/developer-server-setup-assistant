@@ -16,7 +16,9 @@ from bridge.workflows.coordinator import (
 from bridge.applications.readiness.report_renderer import (
     render_docker_report,
 )
-
+from bridge.applications.readiness.compose_report import (
+    render_compose_report,
+)
 
 TARGET_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 
@@ -41,7 +43,7 @@ def build_parser():
 
     parser.add_argument(
         "application",
-        choices=("docker",),
+        choices=("docker", "docker_compose"),
         help="Application to assess",
     )
 
@@ -139,10 +141,19 @@ def run_assessment_cli(argv=None):
                 raise RuntimeError("Assessment workflow identity mismatch.")
 
 
-            report = render_docker_report(
-                explanation,
-                output_format=args.output_format,
-            )
+            # Use the report contract belonging to the resolved application.
+            if args.application == "docker":
+                report = render_docker_report(
+                    explanation,
+                    output_format=args.output_format,
+                )
+            elif args.application == "docker_compose":
+                report = render_compose_report(
+                    explanation,
+                    output_format=args.output_format,
+                )
+            else:
+                raise RuntimeError("Unsupported assessment renderer.")
 
         sys.stdout.write(report)
         return 0
@@ -164,7 +175,7 @@ def run_assessment_cli(argv=None):
     ):
         # Do not expose SSH credentials or sensitive backend exception data.
         print(
-            "ERROR: Docker readiness assessment failed. "
+            "ERROR: Application readiness assessment failed. "
             "Review the backend diagnostics.",
             file=sys.stderr,
         )

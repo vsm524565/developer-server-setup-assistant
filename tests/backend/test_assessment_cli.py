@@ -219,7 +219,7 @@ class TestAssessmentCLI(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), "")
         self.assertNotIn(secret, stderr.getvalue())
         self.assertIn(
-            "Docker readiness assessment failed",
+            "Application readiness assessment failed",
             stderr.getvalue(),
         )
 

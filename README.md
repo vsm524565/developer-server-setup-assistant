@@ -594,3 +594,79 @@ Contract guarantees:
 The current implemented capability remains Docker readiness assessment
 using inventory targets. Capability discovery does not install software
 or authorize execution.
+
+### Docker Compose Readiness Assessment — Milestone 4.27
+
+DSSA supports read-only readiness assessments for Docker Engine and
+Docker Compose through the existing workflow capability architecture.
+
+#### Supported commands
+
+```bash
+# Discover implemented workflows without SSH connectivity.
+python -m bridge.cli capabilities --format text
+python -m bridge.cli capabilities --format json
+
+# Docker Engine assessment.
+python -m bridge.cli assess docker \
+  --target ubuntu24 --format text
+
+python -m bridge.cli assess docker \
+  --target ubuntu24 --format json
+
+# Docker Compose assessment.
+python -m bridge.cli assess docker_compose \
+  --target ubuntu24 --format text
+
+python -m bridge.cli assess docker_compose \
+  --target ubuntu24 --format json
+```
+
+The target must exist in the configured DSSA inventory.
+
+#### Supported workflow capabilities
+
+| Application | Workflow | Target | Evidence sources |
+|---|---|---|---|
+| `docker` | `readiness_assessment` | `inventory` | 9 |
+| `docker_compose` | `readiness_assessment` | `inventory` | 8 |
+
+Both capabilities enforce:
+
+- `planning_only: true`
+- `execution_allowed: false`
+- Evidence identity and freshness validation
+- Application and target identity validation
+- Structured readiness explanations
+- Deterministic text and JSON reporting
+- Rejection of unsupported workflows and unsafe results
+
+#### Docker Engine versus Docker Compose
+
+Docker Engine readiness uses the daemon-aware pipeline, including
+passive daemon preflight observations.
+
+Docker Compose readiness uses the runtime-aware pipeline to classify:
+
+- `PLUGIN_AVAILABLE`
+- `PLUGIN_ABSENT`
+- `UNVERIFIED`
+
+A detected Docker Compose plugin does not establish Docker Engine
+responsiveness or prove that a Compose project can execute.
+
+Neither assessment installs software, starts services, deploys
+containers, or authorizes configuration changes.
+
+#### Assessment limitations
+
+These workflows provide discovery-based readiness information, not
+active operational health verification.
+
+Docker API responsiveness and Compose project execution remain
+unverified. Actual deployment readiness requires separately
+approved verification and execution workflows.
+
+Only applications with implemented handlers are advertised.
+Other application definitions remain outside the supported
+workflow capability interface.

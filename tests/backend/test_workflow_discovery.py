@@ -28,13 +28,27 @@ def valid_report():
     }
 
 
+def expected_discovery_report():
+    """Describe both currently implemented read-only capabilities."""
+    report = valid_report()
+
+    report["capabilities"].append({
+        "application_id": "docker_compose",
+        "workflow": "readiness_assessment",
+        "target_kind": "inventory",
+        "planning_only": True,
+        "execution_allowed": False,
+    })
+
+    return report
+
 class TestWorkflowDiscovery(unittest.TestCase):
     """Validate offline discovery contracts and safety."""
 
     def test_default_discovery(self):
         self.assertEqual(
             discover_workflow_capabilities(),
-            valid_report(),
+            expected_discovery_report(),
         )
 
     def test_report_validation(self):
@@ -64,7 +78,7 @@ class TestWorkflowDiscovery(unittest.TestCase):
         ):
             self.assertEqual(
                 discover_workflow_capabilities(),
-                valid_report(),
+                expected_discovery_report(),
             )
 
     def test_invalid_schema_rejected(self):

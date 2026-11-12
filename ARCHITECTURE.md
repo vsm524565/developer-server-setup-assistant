@@ -947,3 +947,156 @@ backend or execution authorization is introduced by this milestone.
 The existing capability report schema remains version `1.0`.
 The `assess` command, original component setup CLI and interactive
 `main.py` workflow remain separate from capability discovery.
+
+### Milestone 4.27 — Multi-Application Read-Only Workflow Dispatch
+
+Milestone 4.27 extends the workflow architecture to support two
+implemented readiness assessment handlers without introducing
+installation or execution authority.
+
+#### Workflow entry points
+
+The shared assessment command accepts:
+
+- `docker`
+- `docker_compose`
+
+Both applications use inventory-managed targets and the existing
+workflow request schema version `1.0`.
+
+#### Capability registration
+
+`bridge/workflows/handlers.py` declares the implemented handler
+identities:
+
+- `docker_readiness_v1`
+- `docker_compose_readiness_v1`
+
+`bridge/workflows/registry.py` constructs the capability registry
+from the implemented handler catalog.
+
+Capabilities remain limited to:
+
+- Workflow: `readiness_assessment`
+- Target kind: `inventory`
+- Planning only: `true`
+- Execution allowed: `false`
+
+Unsupported application/workflow combinations are rejected before
+backend discovery.
+
+#### Docker Engine workflow
+
+```text
+Assessment CLI
+    |
+    v
+Workflow request validation
+    |
+    v
+Capability and handler validation
+    |
+    v
+assess_daemon_aware_readiness()
+    |
+    v
+Nine-source Docker readiness
+    |
+    v
+explain_docker_readiness()
+    |
+    v
+validate_explanation()
+    |
+    v
+Docker text / JSON report
+```
+
+The Docker workflow retains passive daemon preflight evidence.
+It does not claim successful Docker API responsiveness.
+
+#### Docker Compose workflow
+
+```text
+Assessment CLI
+    |
+    v
+Workflow request validation
+    |
+    v
+Capability and handler validation
+    |
+    v
+assess_runtime_aware_readiness()
+    |
+    v
+Eight-source Compose readiness
+    |
+    v
+explain_compose_readiness()
+    |
+    v
+validate_compose_explanation()
+    |
+    v
+Compose text / JSON report
+```
+
+The Compose workflow evaluates runtime plugin classification.
+It does not perform daemon preflight or Compose project execution.
+
+#### Compose reporting modules
+
+`bridge/applications/readiness/compose_explanation.py`
+
+- Constructs a structured Compose readiness explanation.
+- Validates application and target identity.
+- Requires eight distinct evidence identities.
+- Requires the matching runtime classification reason.
+- Preserves the execution-denied policy.
+- Produces independent report data.
+
+`bridge/applications/readiness/compose_report.py`
+
+- Validates the explanation schema.
+- Rejects contradictory runtime findings.
+- Rejects malformed evidence and execution authorization.
+- Renders deterministic text and JSON reports.
+- Does not connect to a backend or modify the server.
+
+#### Shared coordinator safety boundary
+
+`bridge/workflows/coordinator.py` resolves the registered handler
+before dispatching to the appropriate readiness coordinator.
+
+After assessment, it checks:
+
+- Target identity
+- Application identity
+- Readiness status agreement
+- Runtime classification agreement
+- Evidence request identity agreement
+- Source reason agreement
+- Planning-only policy
+- Execution-denied policy
+- Unverified daemon responsiveness
+
+Docker Engine additionally requires the daemon preflight
+classification in the explanation to match the readiness result.
+
+The coordinator returns the existing outer
+`application_workflow_result` contract.
+
+#### Compatibility and safety
+
+The existing Docker nine-source workflow remains supported.
+
+The Compose workflow introduces a separate eight-source
+reporting contract rather than adding daemon evidence to Compose.
+
+The original interactive `main.py` application, legacy setup CLI,
+and component installation paths remain separate from these
+read-only assessment workflows.
+
+No installation, service modification, container deployment,
+or automatic remediation is introduced by Milestone 4.27.

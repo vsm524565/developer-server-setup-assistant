@@ -30,6 +30,17 @@ def valid_report():
         }],
     }
 
+def published_report():
+    """Expected capability discovery output for implemented workflows."""
+    report = valid_report()
+    report["capabilities"].append({
+        "application_id": "docker_compose",
+        "workflow": "readiness_assessment",
+        "target_kind": "inventory",
+        "planning_only": True,
+        "execution_allowed": False,
+    })
+    return report
 
 class TestCapabilityCLI(unittest.TestCase):
     """Verify offline CLI behavior, reporting and safety."""
@@ -183,7 +194,7 @@ class TestCapabilityCLI(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
-        self.assertEqual(json.loads(result.stdout), valid_report())
+        self.assertEqual(json.loads(result.stdout), published_report())
 
     def test_public_cli_text_entrypoint(self):
         result = subprocess.run(

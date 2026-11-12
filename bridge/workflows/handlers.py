@@ -5,15 +5,22 @@ from types import MappingProxyType
 
 
 DOCKER_READINESS_HANDLER = "docker_readiness_v1"
-
+COMPOSE_READINESS_HANDLER = "docker_compose_readiness_v1"
 # Only combinations with an implemented coordinator path belong here.
+
 _IMPLEMENTED_HANDLERS = MappingProxyType({
     (
         "docker",
         "readiness_assessment",
         "inventory",
     ): DOCKER_READINESS_HANDLER,
+    (
+        "docker_compose",
+        "readiness_assessment",
+        "inventory",
+    ): COMPOSE_READINESS_HANDLER,
 })
+
 
 
 def list_implemented_handlers():

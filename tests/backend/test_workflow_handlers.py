@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from bridge.workflows.handlers import (
+    COMPOSE_READINESS_HANDLER,
     DOCKER_READINESS_HANDLER,
     list_implemented_handlers,
     resolve_workflow_handler,
@@ -16,9 +17,12 @@ from bridge.workflows.coordinator import assess_application_workflow
 class TestWorkflowHandlers(unittest.TestCase):
     """Ensure advertised workflows have safe implementations."""
 
-    def test_only_docker_readiness_has_a_handler(self):
+
+    def test_docker_and_compose_have_implemented_handlers(self):
+        """Expose only the two implemented read-only workflows."""
         expected = (
             ("docker", "readiness_assessment", "inventory"),
+            ("docker_compose", "readiness_assessment", "inventory"),
         )
 
         self.assertEqual(list_implemented_handlers(), expected)
@@ -28,10 +32,16 @@ class TestWorkflowHandlers(unittest.TestCase):
             DOCKER_READINESS_HANDLER,
         )
 
+        self.assertEqual(
+            resolve_workflow_handler(*expected[1]),
+            COMPOSE_READINESS_HANDLER,
+        )
+
         for key in (
             ("nginx", "readiness_assessment", "inventory"),
             ("docker", "installation", "inventory"),
-            ("docker", "readiness_assessment", "ssh"),
+            ("docker_compose", "installation", "inventory"),
+            ("docker_compose", "readiness_assessment", "ssh"),
         ):
             with self.subTest(key=key):
                 self.assertIsNone(resolve_workflow_handler(*key))

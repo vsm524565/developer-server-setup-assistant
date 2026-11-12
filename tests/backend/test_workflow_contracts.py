@@ -90,7 +90,7 @@ class TestWorkflowContracts(unittest.TestCase):
     def test_reject_unsupported_applications(self):
         values = (
             "nginx",
-            "docker_compose",
+            "redis",
             "",
             None,
             [],

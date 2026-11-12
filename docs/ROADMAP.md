@@ -786,3 +786,100 @@ introducing new application handlers or installation functionality.
 - Original interactive `main.py` compatibility passed on Ubuntu 24.04.4.
 - Preflight rejected Nginx/Apache and MySQL/MariaDB conflicts.
 - No installation commands were executed.
+
+### Milestone 4.27 — Docker Compose Read-Only Workflow
+
+**Date:** November 12, 2026
+Status: Implementation, regression, six-VM integration and E2E validation complete — November 12, 2026.
+
+#### Objective
+
+Extend the existing read-only workflow architecture with a second
+implemented application capability: Docker Compose readiness assessment.
+
+Reuse existing runtime discovery, evidence validation, capability
+registration, and coordinator infrastructure.
+
+Preserve Docker Engine readiness behavior and prevent any installation
+or execution authorization.
+
+#### Set A — Docker Compose Readiness Reporting
+
+Implemented:
+
+- `compose_explanation.py`
+- `compose_report.py`
+- `test_compose_report.py`
+
+Capabilities:
+
+- Eight-source readiness explanation
+- Compose runtime classification
+- Evidence uniqueness and identity validation
+- Execution-denied policy
+- Deterministic text and JSON reporting
+- Conservative interpretation of unverified engine health
+- Independent report data
+
+**Validation:** 14/14 Compose report tests passed.
+
+#### Set B — Workflow Handler and Coordinator Integration
+
+Implemented:
+
+- Explicit `docker_compose_readiness_v1` handler
+- Registry-backed Compose capability registration
+- Separate runtime-aware coordinator dispatch
+- Shared workflow identity and policy validation
+- Compose explanation validation and reconciliation
+- Negative testing for unsafe results and backend failures
+- Updated historical Docker-only test expectations
+
+**Validation:** 68/68 workflow tests passed.
+
+#### Set C — Public Assessment CLI and Documentation
+
+Implementation includes:
+
+- Docker Compose added to supported assessment CLI applications
+- Compose-specific text and JSON renderer dispatch
+- Sanitized assessment failure reporting
+- Public CLI regression tests
+- Updated capability discovery expectations
+- README and architecture documentation
+
+**Validation:** Targeted Set C tests pending.
+
+#### Implemented readiness workflows
+
+| Application | Handler | Evidence | Policy |
+|---|---|---|---|
+| Docker Engine | `docker_readiness_v1` | 9 sources | Read-only |
+| Docker Compose | `docker_compose_readiness_v1` | 8 sources | Read-only |
+
+Both use schema version `1.0`, inventory targets and
+the `readiness_assessment` workflow.
+
+Neither workflow performs installation or verifies deployment success.
+
+**Block 4:** Continue closure assessment after validating and
+publishing Milestone 4.27.
+#### Final validation — November 12, 2026
+
+- [x] Set C CLI regression tests: 37/37 passed.
+- [x] Full backend regression: 523/523 passed.
+- [x] Python compilation and whitespace validation passed.
+- [x] Offline capability discovery E2E passed for both applications.
+- [x] Deterministic text and JSON capability reporting verified.
+- [x] Six-VM Docker Engine integration: 12/12 passed.
+- [x] Six-VM Docker Compose integration: 12/12 passed.
+- [x] Nine unique Docker evidence identities verified per VM.
+- [x] Eight unique Compose evidence identities verified per VM.
+- [x] Read-only execution policy preserved.
+- [x] Original interactive main.py compatibility passed.
+- [x] Unsafe component combinations rejected during preflight.
+- [x] No installation commands executed.
+
+#### GitHub publication
+
+Publication pending final commit and remote SHA verification.

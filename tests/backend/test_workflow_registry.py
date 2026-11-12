@@ -21,6 +21,16 @@ def docker_capability():
         "execution_allowed": False,
     }
 
+def compose_capability():
+    """Create the implemented read-only Compose declaration."""
+    return {
+        "application_id": "docker_compose",
+        "workflow": "readiness_assessment",
+        "target_kind": "inventory",
+        "planning_only": True,
+        "execution_allowed": False,
+    }
+
 
 class TestWorkflowRegistry(unittest.TestCase):
     """Validate capability registration and discovery boundaries."""
@@ -29,12 +39,33 @@ class TestWorkflowRegistry(unittest.TestCase):
         self.catalog = build_application_catalog()
         self.registry = WorkflowCapabilityRegistry(self.catalog)
 
-    def test_default_registry_contains_only_docker(self):
+
+    def test_default_registry_contains_implemented_workflows(self):
+        """Expose Docker and Compose without registering draft workflows."""
         registry = build_workflow_registry()
         capabilities = registry.list_capabilities()
 
-        self.assertEqual(len(capabilities), 1)
-        self.assertEqual(capabilities[0], docker_capability())
+        self.assertEqual(
+            capabilities,
+            (docker_capability(), compose_capability()),
+        )
+
+        self.assertTrue(
+            registry.supports(
+                "docker_compose",
+                "readiness_assessment",
+                "inventory",
+            )
+        )
+
+        self.assertFalse(
+            registry.supports(
+                "nginx",
+                "readiness_assessment",
+                "inventory",
+            )
+        )
+
 
     def test_register_and_retrieve_capability(self):
         self.registry.register(docker_capability())
