@@ -1,5 +1,35 @@
 # Development Roadmap
+## Development Status — November 12, 2026
 
+### Read-Only Architecture Phase (4.10–4.27)
+
+Status: COMPLETE for the implemented and tested scope.
+
+- Common server lifecycle assessment implemented.
+- Application discovery and readiness interpretation implemented.
+- Docker Engine read-only workflow implemented.
+- Docker Compose read-only workflow implemented.
+- Workflow capability registry and offline discovery CLI implemented.
+- Public text and JSON assessment interfaces implemented.
+- Backend regression: 523/523 passed.
+- Six-VM assessment integration: 24/24 passed.
+- Original interactive application compatibility verified.
+- Execution authorization remains disabled.
+
+Latest published checkpoint:
+48f3f8b93e6b4ca6dc3f75ec17d5369a88fd67e7
+
+### Remaining V1 Development
+
+- Validate and complete supported component installation workflows.
+- Validate safe swap management.
+- Implement or complete application-specific verification.
+- Establish execution authorization and failure recovery.
+- Complete installation-oriented end-to-end and break/fix testing.
+- Prepare security review and portfolio release.
+
+The read-only architecture phase is complete.
+The full Developer Server Setup Assistant V1 is not yet complete.
 ## Milestone 0 — Project Foundation
 
 - [x] Define project problem
@@ -883,3 +913,68 @@ publishing Milestone 4.27.
 #### GitHub publication
 
 Publication pending final commit and remote SHA verification.
+### Milestone 4.28 — Git Package-Manager Installation Validation
+
+**Date:** November 12, 2026
+
+**Status:** Completed and validated — November 12, 2026.
+
+#### Objective
+
+Complete and validate Git installation using the existing package-manager-first architecture, without introducing a new installation engine.
+
+#### Implementation
+
+- Reused existing Git APT and DNF installation recipes.
+- Reused the existing Bash Git installer and shared package-management functions.
+- Added verification for already-installed Git packages.
+- Updated the setup coordinator to verify Git when installation is skipped.
+- Preserved structured component failure reporting.
+- Preserved explicit interactive `APPLY` approval for installation.
+- Kept the newer draft application recipes read-only and separate from execution.
+
+#### Automated testing
+
+#### Final validation
+
+- [x] Git installer regression: 6/6 passed.
+- [x] Git coordinator failure regression: 4/4 passed.
+- [x] Existing setup failure regression: 1/1 passed.
+- [x] Full backend regression: 533/533 passed.
+- [x] Six-VM Git planning: 6/6 passed.
+- [x] Debian 13 APT installation and repeat verification passed.
+- [x] AlmaLinux 10 DNF installation and repeat verification passed.
+- [x] Package ownership independently verified.
+- [x] Bash syntax and Python compilation passed.
+- [x] Git whitespace validation passed.
+- [ ] GitHub publication and SHA verification.
+
+#### Integration testing
+
+| Environment | Test | Result |
+|---|---|---|
+| Ubuntu 24.04 | Existing Git detection and verification | Passed |
+| Ubuntu 22.04, 24.04, 26.04 | Git planning | Passed |
+| Debian 13 | APT installation of Git 2.47.3 | Passed |
+| Debian 13 | Repeat execution and package ownership verification | Passed |
+| AlmaLinux 10.2 | DNF installation of Git 2.52.0 | Passed |
+| AlmaLinux 10.2 | Repeat execution and package ownership verification | Passed |
+| Rocky Linux 10.2 | Git installation planning | Passed |
+
+#### Safety and limitations
+
+- No application installation occurs in plan-only mode.
+- Actual installation requires interactive operator approval.
+- Existing package installations are verified rather than unnecessarily reinstalled.
+- Unmanaged Git executables require manual review.
+- Installation failures report that partial changes may remain.
+- The legacy Bash setup approval is not yet integrated with the newer Python evidence-bound execution readiness framework.
+- This milestone does not authorize execution of draft application installation recipes.
+
+#### Remaining closure tasks
+
+- [ ] Full backend regression passes.
+- [ ] Bash syntax and Python compilation pass.
+- [ ] Documentation and staged changes reviewed.
+- [ ] Changes committed and pushed to GitHub.
+- [ ] Local and remote Git SHAs match.

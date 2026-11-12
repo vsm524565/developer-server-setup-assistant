@@ -197,16 +197,44 @@ printf 'Panel discovery: %s\n' "$panel_facts" >&2
 
         case "$action" in
             SKIP)
-                component_result="$(
-                    jq -cn --arg component "$component" '{
-                        component: $component,
-                        package_action: "skipped",
-                        verification: "not_run",
-                        service_action: "unchanged"
-                    }'
-                )"
-                ;;
+                # Verify Git even when installation is unnecessary.
+                if [[ "$component" == "git" ]]; then
+                    if ! package_is_installed "$manager" git ||
+                       ! verify_git; then
+                        echo "ERROR: Existing Git failed verification." >&2
 
+                        completed_results="$(
+                            printf '%s\n' "${results[@]}" | jq -M -s .
+                        )"
+
+                        emit_setup_failure \
+                            "$plan" \
+                            "$completed_results" \
+                            "$component" \
+                            1
+
+                        exit 1
+                    fi
+
+                    component_result="$(
+                        jq -cn '{
+                            component: "git",
+                            package_action: "skipped",
+                            verification: "passed",
+                            service_action: "unchanged"
+                        }'
+                    )"
+                else
+                    component_result="$(
+                        jq -cn --arg component "$component" '{
+                            component: $component,
+                            package_action: "skipped",
+                            verification: "not_run",
+                            service_action: "unchanged"
+                        }'
+                    )"
+                fi
+                ;;
             INSTALL)
                 # Capture failure without terminating the coordinator.
                 # Each installer enables its own strict error handling.

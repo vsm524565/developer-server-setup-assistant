@@ -5,11 +5,17 @@ install_git() (
     set -euo pipefail
     local manager="${1:?Package manager is required}"
 
+    # Verify an existing package before reporting a successful no-op.
     if package_is_installed "$manager" git; then
+        verify_git || {
+            echo "ERROR: Existing Git installation failed verification." >&2
+            exit 1
+        }
+
         jq -cn '{
             component: "git",
             package_action: "skipped",
-            verification: "not_run",
+            verification: "passed",
             service_action: "unchanged"
         }'
         exit 0
