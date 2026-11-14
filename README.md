@@ -88,13 +88,13 @@ The repository pins Python dependencies in `requirements.txt` (including Paramik
 **Developer workstation, ordinary user** — set up a private inventory using the repository's actual inventory schema and an SSH identity already authorized on the disposable target. The examples below assume that the local operator has configured `DSSA_INVENTORY_FILE`, `DSSA_SSH_KEY` and known-hosts entries; the six-VM inventory is not published as a reusable secret-bearing configuration:
 
 ```bash
-export DSSA_INVENTORY_FILE="$HOME/projects/developer-server-setup-assistant/config/inventory/lab-six.json"
-export DSSA_SSH_KEY="$HOME/.ssh/devops_lab_ed25519"
+export DSSA_INVENTORY_FILE="$HOME/.config/dssa/lab-inventory.json"
+export DSSA_SSH_KEY="$HOME/.ssh/your-lab-key"
 test -r "$DSSA_INVENTORY_FILE"
 test -r "$DSSA_SSH_KEY"
 ```
 
-The example paths are local lab conventions, **not files guaranteed in a fresh clone**. See [INSTALLATION](docs/INSTALLATION.md) for the safest reproduction sequence.
+Create a private inventory from [config/inventory/servers.example.json](config/inventory/servers.example.json), replace its placeholders with the authorized disposable host and lab user, store it outside the Git checkout, and run `chmod 600` on that private file. The example paths are not files guaranteed in a fresh clone. See [INSTALLATION](docs/INSTALLATION.md) for the safest reproduction sequence.
 
 ## Running DSSA
 
@@ -140,3 +140,95 @@ The published Milestone 4.28 regression passed **533/533**. During the unpublish
 **Engineering continuation:** [PROJECT_STATE](docs/PROJECT_STATE.md) · [ARCHITECTURE](docs/ARCHITECTURE.md) · [REQUIREMENTS](docs/REQUIREMENTS.md) · [ROADMAP](docs/ROADMAP.md) · [TESTING](docs/TESTING.md) · [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [DECISIONS](docs/DECISIONS.md).
 
 Project engineering convention: *Detect → Decide → Change → Verify*. Only move a capability to completed after implementation, relevant regression and observed integration evidence agree.
+
+
+## Complete setup checklist and configuration reference
+
+All instructions in this section run on the **developer workstation as an ordinary non-root user**, unless explicitly labeled otherwise.
+
+1. Install workstation prerequisites (Python 3 with `venv`, Git, Bash, OpenSSH client, `jq`) using your workstation's supported package manager. This document does not pin system package versions, because the project has not validated a specific set.
+2. Clone the existing repository, select `architecture/layered-platform`, create `.venv`, and install `requirements.txt` using the preceding development checkout instructions.
+3. Inspect [config/inventory/servers.example.json](config/inventory/servers.example.json) and make a **private copy outside the repository**. Update only `host`, `ssh_user`, `ssh_port` and `target_id` for your authorized lab. Do not use production credentials.
+4. Verify the target's host-key fingerprint out of band and put the approved key in `~/.ssh/known_hosts`. Configure `DSSA_SSH_KEY` to point to the approved **private key** and `DSSA_INVENTORY_FILE` to the private inventory. Do not set `StrictHostKeyChecking=no`.
+5. Run the offline capabilities command, read-only assessment, and component `--plan` commands. Review every result, especially `eligible`, component action and reasons.
+6. Only on an explicitly authorized disposable lab VM, if the plan and expected changes match, run the **separate legacy component setup command** and type `APPLY` on the interactive target prompt. This can change packages/services on the **target under sudo/root**; no workstation root permissions are intended. No Docker/Compose apply-mode operation is documented as verified.
+7. Independently inspect the target's package and application health, then repeat plan-only discovery to confirm stable `SKIP` behavior before marking a component complete. Preserve both pre- and post-operation evidence.
+
+### Configuration and sensitive files
+
+| Path / variable | Meaning | Security |
+|---|---|---|
+| `requirements.txt` | Python pinned dependencies, including `paramiko==5.0.0` | Committed |
+| `config/inventory/servers.example.json` | Sanitized inventory schema with lab placeholders | Safe to commit |
+| `config/inventory/servers.json` | Tracked **sanitized example** in documentation branch; original developer branch may contain older lab details | Treat as example, not secrets storage |
+| `DSSA_INVENTORY_FILE` | Absolute path to private JSON with `schema_version:1.0`, `servers`, target ID, platform, host, SSH port/user, enabled | Outside repository, mode `600` |
+| `DSSA_SSH_KEY` | Path to authorized SSH private key | Outside repository, restrictive permissions |
+| `$HOME/.ssh/known_hosts` | Approved SSH host keys | Verify out of band |
+| `backend/linux/bin/setup-components.sh` | Local runner that bundles remote setup functions | Source code; do not invoke against production |
+| `backend/linux/operations/setup.sh` | Remote plan approval, component coordination and structured results | Runs under target privileges |
+| `backend/linux/modules/install/git.sh` | Installed/missing Git handling with APT/DNF | Target-side package changes only after `APPLY` |
+| `backend/linux/modules/install/nginx.sh` | Nginx installer with package/config/readiness checks | Fresh installation not fully validated |
+| `backend/linux/modules/install/docker.sh` | **Uncommitted workstation-only** Docker installer | Not safe/verified to execute |
+
+### Ports and service endpoints
+
+DSSA is an SSH-driven command-line tool. There is **no dedicated DSSA listening port** or web/API service in the published setup.
+
+| Endpoint | Observed purpose |
+|---|---|
+| SSH TCP `22` | Default example target SSH port; inventory can specify another validated port |
+| TCP `80`, `443` | Nginx port-conflict detection and HTTP(S) readiness considerations; **not** guaranteed open by DSSA |
+| `/run/docker.sock` | Conventional rootful Docker Unix socket observed passively by read-only assessment; no Docker API connection established by that check |
+| `docker.service` / `docker.socket` | Systemd units inspected read-only for Docker presence and state; they may be missing |
+| `nginx.service` | Nginx target-side service checked/started by its existing installation workflow, when authorized |
+| Git | CLI binary; **no service or network listening port** |
+
+### Health checks and expected results
+
+**Developer workstation, ordinary user — read-only:**
+
+```bash
+python -m bridge.cli capabilities
+python -m bridge.cli assess docker --target lab-ubuntu-01 --format text
+python -m bridge.cli assess docker_compose --target lab-ubuntu-01 --format json
+python -m bridge.cli --target lab-ubuntu-01 --component git --plan
+```
+
+Replace `lab-ubuntu-01` with the configured local inventory target ID. An expected successful Git plan returns a single `SKIP` if Git is package-managed and installed or `INSTALL` if missing and eligible; `REVIEW` is a valid conservative outcome. Docker readiness may remain `REVIEW_REQUIRED` because passive observations do not establish daemon API health.
+
+**Target VM, via authorized SSH session (read-only commands executed as the ordinary target user):**
+
+```bash
+git --version
+command -v git
+```
+
+For APT package ownership (Debian/Ubuntu VM):
+
+```bash
+dpkg-query -s git | grep -E '^(Package|Status|Version):'
+dpkg -S "$(command -v git)"
+```
+
+For DNF/RPM package ownership (AlmaLinux VM):
+
+```bash
+rpm -q git
+rpm -qf "$(command -v git)"
+```
+
+Historical observed examples: Debian 13 Git 2.47.3 owned by `git`; AlmaLinux 10 Git 2.52.0 with executable owned by `git-core`. These versions are **evidence from specific lab snapshots**, not versions that the installer guarantees.
+
+For Docker, **do not equate** `docker --version`, `docker.service` or the socket's existence with verified daemon readiness; active daemon and API health testing after approved installation remains pending.
+
+### Backup, rollback and interrupted installation
+
+No automated transactional rollback or backup mechanism was established for the published component setup runner. For disposable lab tests, select a VM with a known recovery path and capture the current package/service/configuration state before authorizing changes. A snapshot may be useful when available, but was not a mandatory recorded step in successful Git experiments.
+
+When the setup fails, retain the exact `DSSA_RESPONSE`, exit code and sanitized logs; **do not automatically rerun**. Inspect package installation status, existing repositories, binaries and services, then recover manually according to the host's package manager and actual observed state. Docker installer failures may leave `/etc/apt/sources.list.d/docker.sources` and `/etc/apt/keyrings/docker.asc` or partially installed Docker packages (in the currently uncommitted local implementation); cleanup and rollback have not been tested. Do not delete container data or overwrite existing configuration to force a retry.
+
+Refer to [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) and [PROJECT_STATE](docs/PROJECT_STATE.md) for observed failure causes and the next verified checkpoint.
+
+### Repository visibility and history
+
+The project repository is currently **public** on GitHub. A separate documentation branch retains the existing Git history. Sanitizing current example files does **not** remove secrets or lab identifiers from earlier commits. Before distributing the repository, review Git history and make the repository private through an authorized GitHub settings/API workflow; neither a new duplicate repository nor a history rewrite is part of the documented setup.
