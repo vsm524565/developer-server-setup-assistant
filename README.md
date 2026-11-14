@@ -232,3 +232,159 @@ Refer to [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) and [PROJECT_STATE](docs/PRO
 ### Repository visibility and history
 
 The project repository is currently **public** on GitHub. A separate documentation branch retains the existing Git history. Sanitizing current example files does **not** remove secrets or lab identifiers from earlier commits. Before distributing the repository, review Git history and make the repository private through an authorized GitHub settings/API workflow; neither a new duplicate repository nor a history rewrite is part of the documented setup.
+
+## Reproduction runbook — execution order
+
+This root README contains the minimum complete **verified** workflow. The published source is an engineering prototype; there is no confirmed production bootstrap or automatic rollback path.
+
+### 1. Identify the exact published source
+
+**Developer workstation; ordinary user:**
+
+```bash
+git clone git@github.com:vsm524565/developer-server-setup-assistant.git
+cd developer-server-setup-assistant
+git switch architecture/layered-platform
+git rev-parse HEAD
+git status --short
+```
+
+The most recently confirmed application-development SHA is `46f8637339255b8b2fac1e3a6a2e1f72071197cd`. The separate `docs/engineering-history-20261114` branch carries newer documentation and a sanitized sample inventory; it intentionally does not contain the uncommitted Docker Engine installer. The current local development branch may have uncommitted changes; do not use `git reset` or `git clean` to make it match these docs.
+
+### 2. Install Python and workstation prerequisites
+
+**Developer workstation; ordinary user; package prerequisites may require an administrator separately:**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+command -v bash ssh jq base64 sha256sum
+```
+
+Python dependencies are pinned in `requirements.txt`: `paramiko==5.0.0`, `bcrypt==5.0.0`, `cffi==2.1.1`, `cryptography==50.0.2`, `invoke==3.0.3`, `pycparser==3.0`, and `PyNaCl==1.6.2`. Python 3 is required; a precise interpreter minimum was not established by the recorded evidence. OpenSSH and `jq` must be available locally. The target must support SSH, appropriate sudo access and the operation-specific Linux utilities.
+
+### 3. Configure a private lab inventory
+
+**Developer workstation; ordinary user; no remote mutation:**
+
+```bash
+mkdir -p "$HOME/.config/dssa"
+cp config/inventory/servers.example.json "$HOME/.config/dssa/servers.json"
+chmod 600 "$HOME/.config/dssa/servers.json"
+${EDITOR:-nano} "$HOME/.config/dssa/servers.json"
+export DSSA_INVENTORY_FILE="$HOME/.config/dssa/servers.json"
+export DSSA_SSH_KEY="$HOME/.ssh/your-authorized-lab-key"
+test -r "$DSSA_INVENTORY_FILE" && test -r "$DSSA_SSH_KEY"
+```
+
+Replace `lab-host.example.invalid`, `labuser` and the target ID with those of an authorized disposable lab machine. **Do not commit your edited inventory**. The original tracked `servers.json` exists in older history and may contain lab-specific values; the documentation branch provides sanitized data. Verify the SSH host fingerprint through an independent trusted channel and populate the user's known-hosts file before proceeding. The backend requires strict host-key validation and uses the SSH identity selected by `DSSA_SSH_KEY`.
+
+Inventory schema (`config/inventory/servers.example.json`):
+
+```json
+{
+  "schema_version": "1.0",
+  "servers": [
+    {
+      "target_id": "lab-ubuntu-01",
+      "platform": "linux",
+      "host": "lab-host.example.invalid",
+      "ssh_port": 22,
+      "ssh_user": "labuser",
+      "enabled": true
+    }
+  ]
+}
+```
+
+Only the target ID is used as CLI input. The SSH port is the configured target port (typically TCP 22); DSSA does not expose an HTTP server or allocate an application port. Nginx policy checks listening TCP 80/443, and the proposed Docker runtime uses conventional rootful systemd units `docker.service`/`docker.socket` and Unix socket `/run/docker.sock`. These observations do not imply those services are installed or active.
+
+### 4. Run discovery, plan, and reports
+
+**Developer workstation; ordinary user; requires authorized lab SSH/sudo for target operations:**
+
+```bash
+python -m bridge.cli capabilities
+python -m bridge.cli assess docker --target lab-ubuntu-01 --format text
+python -m bridge.cli assess docker_compose --target lab-ubuntu-01 --format json
+python -m bridge.cli --target lab-ubuntu-01 --component git --plan
+```
+
+The first command performs offline capability discovery; the others use inventory-bound, read-only remote discovery. Supported assessment output includes `planning_only: true` and `execution_allowed: false`. The setup plan contains `eligible` and `steps`, each using `INSTALL`, `SKIP` or `REVIEW`. Exit status 0 confirms that a report was generated, not that the application is ready. A read-only Docker report may remain `REVIEW_REQUIRED` while the daemon's API responsiveness is unverified.
+
+### 5. Optionally test the verified Git setup lifecycle
+
+**Developer workstation invoking remote privileged operation; only on disposable lab VMs with explicit approval and a recovery option:**
+
+```bash
+python -m bridge.cli --target lab-ubuntu-01 --component git --plan
+# ONLY after confirming the eligible plan and authorized lab target:
+python -m bridge.cli --target lab-ubuntu-01 --component git
+```
+
+The second command is **not read-only**. It displays an action plan and asks the operator to type `APPLY`. Inspect the actual package-manager and action first; any other response cancels. Git is the only application with recorded fresh-install and repeat-run validation on both APT and DNF. The legacy Bash workflow sends `DSSA_RESPONSE` with `status:success`, `package_action:installed|skipped`, `verification:passed` and service action. The second approved execution should produce `SKIP` and `verification:passed` on a healthy, package-owned installation.
+
+**Target server; normal user for observational checks only:**
+
+```bash
+git --version
+command -v git
+# Debian/Ubuntu targets:
+dpkg-query -s git | grep -E '^(Package|Status|Version):'
+# RPM targets:
+rpm -q git
+```
+
+Package-manager commands are platform-specific; run only the applicable check. The previously verified Debian and AlmaLinux versions are historical observations, not mandatory or universally available versions.
+
+### 6. Validate locally
+
+**Developer workstation; ordinary user; no remote changes:**
+
+```bash
+env -u DSSA_INVENTORY_FILE -u DSSA_SSH_KEY \
+  python -m unittest discover -s tests/backend -p 'test_*.py' -q
+git diff --check
+```
+
+The published source passed **533/533** backend tests at Milestone 4.28. The uncommitted Docker modifications passed **554/554** at an earlier checkpoint but later failure-injection tests remained unresolved. Do not present either number as a newly executed result when starting from a different checkout.
+
+## Configuration, ports and service reference
+
+| Setting or path | Meaning |
+|---|---|
+| `DSSA_INVENTORY_FILE` | Private JSON inventory path, default `config/inventory/servers.json` in published runner |
+| `DSSA_SSH_KEY` | Identity file, default `~/.ssh/id_ed25519` |
+| `~/.ssh/known_hosts` | Strict target SSH identity trust anchor |
+| `requirements.txt` | Pinning for workstation Python dependencies |
+| `backend/linux/bin/setup-components.sh` | Legacy remote bundle/approval entry point |
+| `backend/linux/planning/components.sh` | Published fixed Git/Nginx planner |
+| `backend/linux/modules/install/git.sh` | Package-manager-first Git installer |
+| `backend/linux/verification/git.sh` | Git binary-level verifier |
+| `backend/linux/operations/setup.sh` | `APPLY` confirmation, results and errors |
+| TCP 22 (example) | Configured inbound SSH port on lab target |
+| TCP 80/443 | Nginx HTTP/HTTPS ports examined by the conflict checks; no external exposure guarantee |
+| `docker.service`, `docker.socket` | Docker runtime observation targets; Docker not yet live-installed through DSSA |
+| `/run/docker.sock` | Conventional Docker Unix socket used only for passive read-only observation in published assessment |
+
+## Backup, failure handling and recovery
+
+For the Git lab installation, the operator used disposable test VMs and verified subsequent package ownership and repeat-run idempotency. **No documented backup artifact, universal restore command, automated rollback or transaction log exists.** Before running an install against a lab, use a provider or hypervisor snapshot/backup procedure appropriate for that environment; snapshot commands are intentionally not invented here.
+
+On any installation failure, retain the `DSSA_RESPONSE` error, exit code, audit record and current package/service state; treat `unknown` partial changes as potentially real. Do not retry without reviewing the target. For the proposed Docker installer, repository/key files under `/etc/apt/sources.list.d/docker.sources` and `/etc/apt/keyrings/docker.asc`, plus data directories `/var/lib/docker`, `/var/lib/containerd` and `/etc/docker`, must be inspected before further changes. Those paths are **design-stage Docker paths** and must not be assumed present or safe to delete.
+
+## Troubleshooting: observed failures and fixes
+
+| Observed symptom | Confirmed cause or status | Resolution / next check |
+|---|---|---|
+| Docker plan incorrectly returned `INSTALL` on all six lab OSs | Missing dispatch to Docker-specific planner | Corrected in **uncommitted** planner; later six-VM plans returned `REVIEW` for unsupported systems |
+| Docker failure-injection suite initially failed four tests with unmanaged `docker` executable | Fixture inherited workstation Docker executable | Test-only executable evidence isolation; production protection retained |
+| `UnboundLocalError: source` during test fixture setup | `source.replace` before `INSTALLER.read_text()` | Correct initialization order |
+| Bash fixture failed with `$2: unbound variable` | Mock `apt-get update` accessed absent optional argument under `set -u` | Use `${2:-}` in mock |
+| Metadata fixture reported post-repository error on initial APT update | Two production error messages swapped | Correct first and second `apt-get update` messages; **final retest not yet observed** |
+| Git already installed | Expected planner `SKIP` | Verify `git --version`; no reinstallation needed |
+| SSH host key not trusted | Host identity not independently validated | Validate fingerprint and update known-hosts through approved procedure |
+| `REVIEW_REQUIRED` in passive Docker report | Missing active daemon API evidence | Do not infer daemon health or approve installation from passive state |
+
+**Status at documentation time:** Git Milestone 4.28 completed; Docker Milestone 4.29 incomplete and unpublished. Consult [PROJECT_STATE](docs/PROJECT_STATE.md) to resume from the correct test and avoid overwriting uncommitted files.
