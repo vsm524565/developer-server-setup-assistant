@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "servers": [
+    {
+      "target_id": "lab-ubuntu-01",
+      "platform": "linux",
+      "host": "lab-host.example.invalid",
+      "ssh_port": 22,
+      "ssh_user": "labuser",
+      "enabled": true
+    }
+  ]
+}
