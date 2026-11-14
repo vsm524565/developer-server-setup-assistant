@@ -4,9 +4,9 @@
     {
       "target_id": "lab-ubuntu-01",
       "platform": "linux",
-      "host": "192.168.56.109",
+      "host": "lab-host.example.invalid",
       "ssh_port": 22,
-      "ssh_user": "vivek",
+      "ssh_user": "labuser",
       "enabled": true
     }
   ]
