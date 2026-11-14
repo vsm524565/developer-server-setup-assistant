@@ -1,5 +1,6 @@
 # Development Roadmap
-## Development Status — November 12, 2026
+
+> **Current source-of-truth checkpoint (2026-11-14):** [PROJECT_STATE](PROJECT_STATE.md). Milestone 4.28 is published at `46f8637339255b8b2fac1e3a6a2e1f72071197cd` (533/533 backend tests). Milestone 4.29 Docker Engine is an **uncommitted, unfinished workstation milestone**; no live Docker installation occurred and the last four failure-injection tests are not all verified passing. Historical checked boxes, “pending” notes and earlier test counts below are preserved as originally recorded and must be interpreted chronologically.\n\n## Development Status — November 12, 2026
 
 ### Read-Only Architecture Phase (4.10–4.27)
 
@@ -978,3 +979,21 @@ Complete and validate Git installation using the existing package-manager-first 
 - [ ] Documentation and staged changes reviewed.
 - [ ] Changes committed and pushed to GitHub.
 - [ ] Local and remote Git SHAs match.
+## Documentation synchronization checkpoint — 2026-11-14
+
+**Published 4.28:** The Git installation milestone was committed as `46f8637339255b8b2fac1e3a6a2e1f72071197cd` and local/GitHub SHA equality was confirmed. Its 533/533 backend regression, Debian 13 APT and AlmaLinux 10 DNF fresh installation, ownership verification and repeat-run idempotency passed. This supersedes older unmarked “publication pending” and “fresh installation unverified” statements **for Git only**.
+
+**Current active milestone 4.29 (workstation, not published):**
+- Docker Engine Ubuntu 24.04 amd64 APT planner/installer/verifier created locally and integrated with legacy Bash setup path.
+- First six-VM Docker plan returned erroneous `INSTALL` on unsupported platforms; dedicated planner dispatch was fixed and retested.
+- Final six-VM planning: Ubuntu 24 `INSTALL`; Ubuntu 22/26, Debian 13, AlmaLinux/Rocky 10 `REVIEW`.
+- Local suites: 7 Docker planner, 1 dispatch, 5 verification and 8 installer tests passed.
+- The operator's 554/554 full regression passed on 2026-11-13, **before** adding the new repository failure-injection fixture.
+- Four additional repository-stage failure tests were being debugged. Latest observed: 3 passed, 1 failed due to swapped initial vs second APT metadata error messages. Correction requested but no new result submitted.
+- No approved live Docker installation or post-install daemon API/idempotency evidence exists.
+- Docker Compose installation remains separate and unverified.
+- Application-source and test changes for 4.29 remain uncommitted on the workstation and **are not included** in this documentation-only branch.
+
+**Next:** Inspect both `apt-get update` error messages, rerun `test_docker_install_failures.py`, harden its isolation, test post-repository and coordinator error paths, rerun full regression, then perform the first explicitly approved disposable-VM Docker installation and repeat-run verification. See [PROJECT_STATE](PROJECT_STATE.md).
+
+**Git safety:** Documentation is committed to `docs/engineering-history-20261114`, branched from the verified development commit. Do not merge, reset, or force-push. Before any local integration, reconcile with uncommitted Docker work and keep unrelated untracked backup/inventory/planning files out of staging.
