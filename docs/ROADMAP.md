@@ -1094,6 +1094,8 @@ Design: `docs/design/approval-records.md`.
 - [x] 24 new tests; regression 638/638, 1 skipped.
 - [x] End to end on rocky10 (read-only plan of `git`): preflight,
       approve, READY on all gates, consume, then BLOCKED as already used.
+- [x] Manual verification by the project owner on rocky10, 2026-11-15:
+      12/12 steps passed (`docs/testing/manual-4.32-approval.md`).
 - Note for 4.34: rocky10 has three host keys in `known_hosts`, and the
       identity gate accepts any of them (SSH still enforces the real
       key). Bind the plan to the key presented by the SSH session.
