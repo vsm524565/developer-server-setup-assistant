@@ -1000,3 +1000,45 @@ fingerprint.
 Next: Milestones 4.30–4.34 replace hard-coded component logic with
 shared JSON definitions, a generic planner, approval records,
 journal-based rollback and a unified `main.py` flow.
+
+
+### Milestone 4.30 — Shared Component Definitions — 2026-11-15
+
+One JSON definition per component in `definitions/components/`, read
+by both layers. Design: `docs/design/component-definitions.md`.
+
+- [x] Git (supported), Nginx (draft) and Docker (draft) definitions.
+      Variants match on package manager; only Docker declares an OS
+      (Ubuntu 24.04 x86_64 vendor repository).
+- [x] Python loader and validation (`bridge/components/`): allowlisted
+      fields, step and check types, safe values, catalog and category
+      cross-check, duplicate JSON keys, dependency cycles.
+- [x] Backend jq validation and single-component planner
+      (`backend/linux/engine/definitions.sh`): read-only fact collection
+      plus a pure jq decision function.
+- [x] Parity tests: same mocked evidence through the legacy planner and
+      the new engine. Intended differences: unsupported platform is
+      BLOCKED (was REVIEW); draft INSTALL is planned as action REVIEW.
+- [x] Python and jq validators agree on 22 rejection cases.
+- [x] Regression: 595/595 passed, 1 skipped (host has Docker) with
+      `lab-ubuntu-01` online.
+- [x] Six-VM read-only check (no sudo): 18/18 new decisions match the
+      legacy planner run on the same VMs.
+
+      | VM | Docker | Git | Nginx |
+      |---|---|---|---|
+      | ubuntu22 | BLOCKED | SKIP | INSTALL → REVIEW (draft) |
+      | ubuntu24 | INSTALL → REVIEW (draft) | SKIP | INSTALL → REVIEW (draft) |
+      | ubuntu26 | BLOCKED | SKIP | INSTALL → REVIEW (draft) |
+      | debian13 | BLOCKED | SKIP | INSTALL → REVIEW (draft) |
+      | alma10 | BLOCKED | SKIP | INSTALL → REVIEW (draft) |
+      | rocky10 | BLOCKED | INSTALL | INSTALL → REVIEW (draft) |
+
+- Found: Alma and Rocky report `VERSION_ID="10.2"`. Matching by package
+  manager (not OS version) keeps Git and Nginx plannable there.
+- Found: the legacy Docker repository check misses a match when
+      `/etc/apt/sources.list` is absent (grep exit 2 under pipefail).
+      Fixed in the new engine; the legacy planner retires in 4.34.
+
+The engine is not yet used by setup. Next: 4.31 generic multi-component
+planner with dependency ordering.

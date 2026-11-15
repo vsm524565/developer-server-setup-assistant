@@ -1,0 +1,146 @@
+{
+  "schema_version": "1.0",
+  "id": "nginx",
+  "display_name": "Nginx",
+  "category": "webserver",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "nginx"
+        ]
+      },
+      "conflicts": {
+        "unmanaged_executables": [
+          "nginx"
+        ],
+        "paths": [
+          "/etc/nginx",
+          "/usr/local/nginx"
+        ],
+        "tcp_ports": [
+          80,
+          443
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "nginx"
+          ]
+        },
+        {
+          "type": "service_start",
+          "unit": "nginx.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "nginx"
+          ]
+        },
+        {
+          "type": "config_test",
+          "command": "nginx -t"
+        },
+        {
+          "type": "service_active",
+          "unit": "nginx.service"
+        },
+        {
+          "type": "http_local",
+          "port": 80,
+          "expect_status": "2xx"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/nginx",
+          "/var/log/nginx",
+          "/var/www/html"
+        ]
+      }
+    },
+    {
+      "variant_id": "dnf-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "nginx"
+        ]
+      },
+      "conflicts": {
+        "unmanaged_executables": [
+          "nginx"
+        ],
+        "paths": [
+          "/etc/nginx",
+          "/usr/local/nginx"
+        ],
+        "tcp_ports": [
+          80,
+          443
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "nginx"
+          ]
+        },
+        {
+          "type": "service_start",
+          "unit": "nginx.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "nginx"
+          ]
+        },
+        {
+          "type": "config_test",
+          "command": "nginx -t"
+        },
+        {
+          "type": "service_active",
+          "unit": "nginx.service"
+        },
+        {
+          "type": "http_local",
+          "port": 80,
+          "expect_status": "2xx"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/nginx",
+          "/var/log/nginx",
+          "/usr/share/nginx"
+        ]
+      }
+    }
+  ]
+}

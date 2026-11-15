@@ -1,0 +1,105 @@
+{
+  "schema_version": "1.0",
+  "id": "docker",
+  "display_name": "Docker Engine",
+  "category": "container",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "ubuntu24-amd64-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [{ "id": "ubuntu", "versions": ["24.04"] }],
+        "architectures": ["x86_64"]
+      },
+      "detection": {
+        "packages_all": [
+          "docker-ce",
+          "docker-ce-cli",
+          "containerd.io",
+          "docker-buildx-plugin"
+        ]
+      },
+      "conflicts": {
+        "packages": [
+          "docker.io",
+          "docker-compose",
+          "docker-compose-v2",
+          "docker-doc",
+          "docker-buildx",
+          "podman-docker",
+          "containerd",
+          "runc",
+          "moby-engine",
+          "moby-cli"
+        ],
+        "partial_packages": true,
+        "unmanaged_executables": ["docker", "dockerd", "containerd"],
+        "paths": [
+          "/var/lib/docker",
+          "/var/lib/containerd",
+          "/etc/docker",
+          "/etc/apt/sources.list.d/docker.sources",
+          "/etc/apt/sources.list.d/docker.list",
+          "/etc/apt/keyrings/docker.asc",
+          "/etc/apt/keyrings/docker.gpg"
+        ],
+        "repository_patterns": ["download.docker.com"],
+        "systemd_units": ["docker.service", "docker.socket"]
+      },
+      "steps": [
+        { "type": "package_metadata_refresh" },
+        {
+          "type": "packages_install",
+          "role": "prerequisite",
+          "packages": ["ca-certificates", "curl", "gnupg"]
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "docker-official-ubuntu",
+          "key_url": "https://download.docker.com/linux/ubuntu/gpg",
+          "key_fingerprint": "9DC858229FC7DD38854AE2D88D81803C0EBFCD88",
+          "key_path": "/etc/apt/keyrings/docker.asc",
+          "source_path": "/etc/apt/sources.list.d/docker.sources",
+          "uris": "https://download.docker.com/linux/ubuntu",
+          "suites": ["noble"],
+          "components": ["stable"],
+          "architectures": ["amd64"]
+        },
+        { "type": "package_metadata_refresh" },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "docker-ce",
+            "docker-ce-cli",
+            "containerd.io",
+            "docker-buildx-plugin"
+          ]
+        },
+        { "type": "service_start", "unit": "docker.service" }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "docker-ce",
+            "docker-ce-cli",
+            "containerd.io",
+            "docker-buildx-plugin"
+          ]
+        },
+        { "type": "executable", "name": "docker", "version_args": ["--version"] },
+        { "type": "service_active", "unit": "docker.service" },
+        { "type": "hook", "name": "verify_docker_daemon" }
+      ],
+      "rollback": {
+        "created_paths": ["/var/lib/docker", "/var/lib/containerd", "/etc/docker"]
+      },
+      "hooks": {
+        "verify": "verify_docker_daemon"
+      }
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "schema_version": "1.0",
+  "id": "git",
+  "display_name": "Git",
+  "category": "tool",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "supported",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "git"
+        ]
+      },
+      "conflicts": {
+        "unmanaged_executables": [
+          "git"
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "git"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "git"
+          ]
+        },
+        {
+          "type": "executable",
+          "name": "git",
+          "version_args": [
+            "--version"
+          ]
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    },
+    {
+      "variant_id": "dnf-os-repository",
+      "support": "supported",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "git"
+        ]
+      },
+      "conflicts": {
+        "unmanaged_executables": [
+          "git"
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "git"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "git"
+          ]
+        },
+        {
+          "type": "executable",
+          "name": "git",
+          "version_args": [
+            "--version"
+          ]
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    }
+  ]
+}
