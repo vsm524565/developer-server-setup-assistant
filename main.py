@@ -1,476 +1,286 @@
+"""Developer Server Setup Assistant: plan -> approve -> apply (Milestone 4.34).
 
+Run with no arguments for a guided session, or use one step at a time:
+
+    python main.py                        guided: target, components, plan, approve, apply
+    python main.py targets                list inventory targets
+    python main.py plan TARGET COMPONENT... [--allow-draft]
+    python main.py approve PLAN_ID
+    python main.py apply PLAN_ID
+    python main.py report PLAN_ID
+    python main.py resume-rollback PLAN_ID
+
+Python never opens SSH and never sees a password: the Bash backend owns
+SSH, and sudo asks for the password on the server's own terminal.
 """
-Developer Server Setup Assistant.
 
-Connects to a remote Ubuntu server, discovers its environment,
-evaluates component dependencies and conflicts, generates a
-read-only installation plan, and verifies selected components.
+import argparse
+import hashlib
+import json
+import os
+import sys
 
-Actual installation execution remains disabled.
-"""
-
-from getpass import getpass
-
-from connection.ssh import SSHConnection
-
-from discovery.components import (
-    ComponentDiscovery,
-    display_component_report,
+from bridge.components import run
+from bridge.components.approval import (
+    CONFIRMATION,
+    ApprovalError,
+    approve_plan,
+    consume_approval,
+    default_state_dir,
+    known_host_fingerprints,
+    plan_digest,
+    preflight_plan,
 )
-from discovery.panel import (
-    PanelDiscovery,
-    display_panel_report,
-)
-from discovery.ports import (
-    PortDiscovery,
-    display_port_report,
-)
-from discovery.system import (
-    SystemDiscovery,
-    display_discovery_report,
-)
-
-from planning.approval import PlanApproval
-from planning.decisions import (
-    ConfigurationPlanner,
-    display_configuration_plan,
-)
-from planning.dependencies import DependencyResolver
-from planning.installation import (
-    InstallationPlanner,
-    display_installation_plan,
-)
-from planning.preflight import (
-    PreflightValidator,
-    display_preflight_report,
-)
-from planning.snapshot import (
-    ServerSnapshotBuilder,
-    SnapshotError,
-)
-from planning.state_consistency import (
-    ServerStateComparator,
-    display_consistency_report,
-)
-from planning.approval_binding import ApprovalBinding
-from planning.approval_session import ApprovalSession
-
-from verification.components import (
-    ComponentVerifier,
-    display_verification_report,
-)
+from bridge.components.loader import load_component_definitions
 
 
-def get_server_details():
-    """Collect and validate remote SSH connection details."""
+# Same override the Bash backend honours (tests, lab checks).
+DEFINITIONS_DIR = os.environ.get("DSSA_DEFINITIONS_DIR") or None
 
-    while True:
-        hostname = input("Enter server IP/hostname: ").strip()
-
-        if hostname:
-            break
-
-        print("Server IP/hostname cannot be empty.")
-
-    while True:
-        port_input = input("Enter SSH port [22]: ").strip()
-
-        if not port_input:
-            port = 22
-            break
-
-        try:
-            port = int(port_input)
-
-            if 1 <= port <= 65535:
-                break
-
-            print("Port must be between 1 and 65535.")
-
-        except ValueError:
-            pass
-
-        print("Enter a valid port number between 1 and 65535.")
-
-    while True:
-        username = input("Enter sudo username: ").strip()
-
-        if username:
-            break
-
-        print("Username cannot be empty.")
-
-    password = getpass("Enter password: ")
-
-    return hostname, port, username, password
+EXIT_MEANING = {
+    0: "every runnable component installed or verified",
+    2: "refused before any change",
+    3: "some components failed and were rolled back, or were skipped",
+    4: "rollback incomplete or engine error: the server needs review",
+    255: "the connection failed; remote completion is not confirmed (use report)",
+}
 
 
-def select_components(available):
-    """Collect and validate the components requested by the operator."""
+# --- display ------------------------------------------------------------------
 
-    names = list(available)
-
-    print("\n=== SELECT COMPONENTS ===")
-
-    for index, name in enumerate(names, start=1):
-        print(f"{index:>2}. {name}")
-
-    while True:
-        selection = input(
-            "\nEnter component numbers separated by commas "
-            "[Enter to skip]: "
-        ).strip()
-
-        if not selection:
-            return []
-
-        try:
-            numbers = [
-                int(value.strip())
-                for value in selection.split(",")
-            ]
-
-            if not all(
-                1 <= number <= len(names)
-                for number in numbers
-            ):
-                raise ValueError
-
-            return list(
-                dict.fromkeys(
-                    names[number - 1]
-                    for number in numbers
-                )
-            )
-
-        except ValueError:
-            print(
-                "Invalid selection. Enter valid component numbers."
-            )
+def show_plan(plan, plan_bytes):
+    print("\n=== PLAN ===")
+    print(f"Plan ID   : {plan['plan_id']}")
+    print(f"Target    : {plan['target']['target_id']}  ({plan['package_manager']})")
+    print(f"Host key  : {plan['target']['host_key_sha256']}")
+    print(f"Created   : {plan['created_at']}  (approve within 30 minutes)")
+    print(f"Plan hash : {plan_digest(plan_bytes)[:19]}…")
+    if plan["allow_draft"]:
+        print("Drafts    : ALLOWED for this lab target")
+    print()
+    for step in plan["steps"]:
+        flag = "  (added as dependency)" if step["added_as_dependency"] else ""
+        print(f"  {step['component']:<12} {step['action']:<8} variant {step['variant_id'] or '-'}{flag}")
+        for reason in step["reasons"]:
+            print(f"      - {reason}")
+    print(f"\nRunnable  : {', '.join(plan['runnable']) or 'none'}")
+    if plan["held"]:
+        print(f"Held      : {', '.join(h['component'] for h in plan['held'])}")
 
 
-def discover_server(connection):
-    """Collect system, panel, component and port information."""
-
-    print("\nDiscovering server environment...")
-
-    system_discovery = SystemDiscovery(connection)
-    server_info = system_discovery.discover()
-
-    supported = display_discovery_report(server_info)
-
-    print("\nChecking existing control panel...")
-
-    panel_discovery = PanelDiscovery(connection)
-    panel_info = panel_discovery.discover()
-    display_panel_report(panel_info)
-
-    print("\nDiscovering existing software...")
-
-    component_discovery = ComponentDiscovery(connection)
-    components = component_discovery.discover()
-    display_component_report(components)
-
-    print("\nDiscovering listening ports...")
-
-    port_discovery = PortDiscovery(connection)
-    ports = port_discovery.discover()
-    display_port_report(ports)
-
-    return {
-        "supported": supported,
-        "system": server_info,
-        "panel": panel_info,
-        "components": components,
-        "ports": ports,
-    }
-
-
-def generate_installation_plan(server_state, requested):
-    """Resolve dependencies and generate a read-only installation plan."""
-
-    resolver = DependencyResolver(server_state["components"])
-    ordered_components = resolver.resolve(requested)
-
-    print("\nResolved component order:")
-    print(" -> ".join(ordered_components))
-
-    configuration_planner = ConfigurationPlanner(
-        supported=server_state["supported"],
-        panel=server_state["panel"],
-        components=server_state["components"],
-        ports=server_state["ports"],
-    )
-
-    decisions = configuration_planner.evaluate(
-        ordered_components
-    )
-
-    display_configuration_plan(decisions)
-
-    installation_planner = InstallationPlanner(
-        components=server_state["components"],
-        decisions=decisions,
-    )
-
-    installation_plan = installation_planner.build(
-        ordered_components
-    )
-
-    display_installation_plan(installation_plan)
-
-    return ordered_components, installation_plan
-
-
-def review_installation_plan(installation_plan):
-    """Collect demonstration-only approval for the proposed plan."""
-
-    approval = PlanApproval(installation_plan)
-    validation = approval.validate()
-
-    approved = approval.request_approval()
-
-    if approved:
-        print("\nPlan approved for this session.")
-
-    elif validation["eligible"] and not validation["has_changes"]:
-        print("\nVerification-only plan. No installation required.")
-
+def show_outcome(outcome, kind="apply"):
+    print("\n=== RESULT ===")
+    summary = outcome.summary
+    if summary is None:
+        print("No result came back from the server.")
     else:
-        print("\nInstallation plan was not approved.")
+        print(f"Status: {summary.get('status', 'unknown')}")
+        for result in summary.get("results", []):
+            line = f"  {result.get('component', '?'):<12} {result.get('outcome', '?')}"
+            detail = result.get("failure") or result.get("reason")
+            if detail:
+                line += f"  - {detail}"
+            print(line)
+            for action in (result.get("rollback") or {}).get("actions", []):
+                print(f"      undo {action.get('action')} {action.get('target')}: {action.get('result')}")
+            for issue in (result.get("rollback") or {}).get("issues", []):
+                print(f"      ISSUE: {issue}")
+            for upgraded in result.get("upgraded_not_reverted") or []:
+                print(f"      upgraded, not reverted: {upgraded}")
+    if outcome.status:
+        print(f"Run state : {outcome.status}")
+    if outcome.directory:
+        print(f"Saved copy: {outcome.directory}")
+    code = outcome.exit_code if outcome.exit_code is not None else outcome.rc
+    if kind == "report":
+        meaning = "result fetched" if code == 0 else "could not fetch the result"
+    elif kind == "resume" and code == 0:
+        meaning = "interrupted components rolled back"
+    else:
+        meaning = EXIT_MEANING.get(code, "see the run log")
+    print(f"Exit code : {code} ({meaning})")
 
-    return approved
+
+def target_host(target, inventory):
+    for entry in run.list_targets(inventory):
+        if entry["target_id"] == target:
+            return entry
+    raise run.RunError(f"Unknown target: {target}")
 
 
-def verify_components(connection, ordered_components):
-    """Run read-only verification for selected components."""
+# --- steps --------------------------------------------------------------------
 
-    verifier = ComponentVerifier(connection)
+def step_plan(target, components, allow_draft, inventory):
+    plan_bytes, plan = run.make_plan(target, components, allow_draft, inventory)
 
-    verification_results = [
-        verifier.verify(component)
-        for component in ordered_components
-    ]
+    # Draft variants run only after the operator types each one's name.
+    drafts = [s["component"] for s in plan["steps"]
+              if s["support"] == "draft" and s["action"] == "INSTALL"]
+    show_plan(plan, plan_bytes)
+    for component in drafts:
+        typed = input(f'\n{component} is a draft variant. Type "{component}" to allow it on {target}: ').strip()
+        if typed != component:
+            print("Not confirmed. The plan was discarded.")
+            return None
+    path = run.save_plan(plan_bytes)
+    print(f"\nPlan saved: {path}")
+    return plan["plan_id"]
 
-    display_verification_report(verification_results)
 
-    return verification_results
+def step_approve(plan_id, inventory):
+    plan_bytes, plan, _ = run.load_plan(plan_id)
+    host = target_host(plan["target"]["target_id"], inventory)["host"]
+    keys = known_host_fingerprints(host)
+    check = preflight_plan(plan_bytes, keys, definitions_dir=DEFINITIONS_DIR)
+    show_plan(plan, plan_bytes)
+    if not check["passed"]:
+        print("\nPreflight failed:")
+        for issue in check["issues"]:
+            print(f"  - {issue}")
+        return False
+    if check["verification_only"]:
+        print("\nVerification-only plan: no approval is needed. Run apply.")
+        return True
+    print(f"\nApproving runs exactly: {', '.join(plan['runnable'])}")
+    typed = input(f"Type {CONFIRMATION} to approve: ").strip()
+    try:
+        record = approve_plan(plan_bytes, keys, typed, definitions_dir=DEFINITIONS_DIR)
+    except ApprovalError as error:
+        print(f"\n{error}")
+        for issue in error.issues:
+            if issue != str(error):
+                print(f"  - {issue}")
+        return False
+    print(f"\nApproved by {record['approved_by']}, valid until {record['expires_at']} (single use).")
+    return True
 
 
-def collect_server_snapshot(connection):
-    """
-    Collect fresh discovery data and build a normalized snapshot.
+def step_apply(plan_id, inventory):
+    plan_bytes, plan, plan_path = run.load_plan(plan_id)
+    target = plan["target"]["target_id"]
+    keys = known_host_fingerprints(target_host(target, inventory)["host"])
+    check = preflight_plan(plan_bytes, keys, definitions_dir=DEFINITIONS_DIR)
 
-    Does not display discovery reports or modify the server.
-    """
+    if check["passed"] and check["verification_only"]:
+        print("Verification-only plan: no approval needed.")
+    else:
+        try:
+            consume_approval(plan_id, keys, definitions_dir=DEFINITIONS_DIR)
+        except ApprovalError as error:
+            print(f"Apply refused: {error}")
+            for issue in error.issues:
+                if issue != str(error):
+                    print(f"  - {issue}")
+            return 2
+        plan_path = default_state_dir() / "approvals" / plan_id / "plan.json"
+        plan_bytes = plan_path.read_bytes()
 
-    system_info = SystemDiscovery(connection).discover()
-    panel_info = PanelDiscovery(connection).discover()
-    components = ComponentDiscovery(connection).discover()
-    ports = PortDiscovery(connection).discover()
+    digest = "sha256:" + hashlib.sha256(plan_bytes).hexdigest()
+    outcome = run.apply_plan(target, plan_path, digest, plan_id, inventory)
+    show_outcome(outcome)
+    return outcome.exit_code if outcome.exit_code is not None else outcome.rc
 
-    return ServerSnapshotBuilder.build(
-        system_info=system_info,
-        panel_info=panel_info,
-        components=components,
-        ports=ports,
-    )
 
-def main():
-    """Coordinate the remote server discovery and planning workflow."""
+def step_remote(kind, plan_id, inventory):
+    _, plan, _ = run.load_plan(plan_id)
+    target = plan["target"]["target_id"]
+    key = plan["target"]["host_key_sha256"]
+    call = run.report if kind == "report" else run.resume_rollback
+    outcome = call(target, plan_id, key, inventory)
+    show_outcome(outcome, kind)
+    return outcome.exit_code if outcome.exit_code is not None else outcome.rc
 
-    hostname, port, username, password = get_server_details()
 
-    connection = SSHConnection(
-        hostname,
-        port,
-        username,
-        password,
-    )
+# --- guided session -----------------------------------------------------------
 
-    print(f"\nConnecting to {hostname}:{port}...")
+def choose(prompt, options):
+    for number, label in enumerate(options, 1):
+        print(f"  {number}. {label}")
+    answer = input(prompt).strip()
+    picked = []
+    for word in answer.replace(",", " ").split():
+        if not word.isdigit() or not 1 <= int(word) <= len(options):
+            raise ValueError(f"Not an option: {word}")
+        if int(word) - 1 not in picked:
+            picked.append(int(word) - 1)
+    return picked
+
+
+def guided(allow_draft, inventory):
+    targets = run.list_targets(inventory)
+    if not targets:
+        print("No enabled targets in the inventory.")
+        return 2
+    print("\nTargets:")
+    picked = choose("Choose one target: ",
+                    [f"{t['target_id']}  ({t['host']}{', lab' if t['lab'] else ''})" for t in targets])
+    if len(picked) != 1:
+        print("Choose exactly one target.")
+        return 2
+    target = targets[picked[0]]["target_id"]
+
+    catalog = load_component_definitions(DEFINITIONS_DIR)
+    ids = sorted(catalog)
+    print("\nComponents:")
+    labels = []
+    for component_id in ids:
+        definition = catalog[component_id]
+        support = {v.support for v in definition.variants}
+        status = "supported" if "supported" in support else "draft"
+        labels.append(f"{component_id:<10} {definition.display_name}  [{status}]")
+    picked = choose("Choose components (numbers, in order): ", labels)
+    if not picked:
+        print("No components selected.")
+        return 0
+
+    plan_id = step_plan(target, [ids[i] for i in picked], allow_draft, inventory)
+    if plan_id is None:
+        return 2
+    if not step_approve(plan_id, inventory):
+        return 2
+    answer = input("\nStart apply now? [y/N] ").strip().lower()
+    if answer != "y":
+        print(f"Not applied. Later: python main.py apply {plan_id}")
+        return 0
+    return step_apply(plan_id, inventory)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="DSSA: plan -> approve -> apply")
+    parser.add_argument("--inventory", help="inventory file (default: config/inventory/servers.json)")
+    parser.add_argument("--allow-draft", action="store_true",
+                        help="lab targets only: allow draft variants after typed confirmation")
+    sub = parser.add_subparsers(dest="command")
+    sub.add_parser("targets")
+    plan_parser = sub.add_parser("plan")
+    plan_parser.add_argument("target")
+    plan_parser.add_argument("components", nargs="+")
+    for name in ("approve", "apply", "report", "resume-rollback"):
+        sub.add_parser(name).add_argument("plan_id")
+    args = parser.parse_args(argv)
 
     try:
-        connection.connect()
-
-        exit_code, hostname_output, error = connection.execute(
-            "hostname"
-        )
-
-        if exit_code != 0:
-            print(
-                "Connected, but server validation failed: "
-                f"{error}"
-            )
-            return
-
-        print("SSH connection successful.")
-        print(f"Remote hostname: {hostname_output}")
-
-        print("Verifying sudo access...")
-
-        connection.verify_sudo()
-
-        print("Sudo access verified.")
-
-        server_state = discover_server(connection)
-        initial_snapshot = ServerSnapshotBuilder.build(
-            system_info=server_state["system"],
-            panel_info=server_state["panel"],
-            components=server_state["components"],
-            ports=server_state["ports"],
-        )
-
-        # Verification is allowed on unsupported systems,
-        # but installation planning remains disabled.
-        if not server_state["supported"]:
-            print(
-                "\nThis operating system is not supported "
-                "for automated server configuration."
-            )
-            print(
-                "Discovery completed. No server changes were made."
-            )
-            return
-
-        requested = select_components(
-            server_state["components"]
-        )
-
-        if not requested:
-            print(
-                "\nNo components selected. Discovery completed."
-            )
-            return
-
-        ordered_components, installation_plan = (
-            generate_installation_plan(
-                server_state,
-                requested,
-            )
-        )
-        preflight = PreflightValidator(
-            server_state=server_state,
-            installation_plan=installation_plan,
-        )
-
-
-        preflight_result = preflight.validate()
-        display_preflight_report(preflight_result)
-
-        if preflight_result["passed"]:
-            print("\nRefreshing server discovery before approval...")
-
-            try:
-                current_snapshot = collect_server_snapshot(connection)
-
-                consistency_result = ServerStateComparator(
-                    initial_snapshot
-                ).compare(current_snapshot)
-
-                display_consistency_report(consistency_result)
-
-
-                if consistency_result["consistent"]:
-                    target = {
-                        "hostname": hostname,
-                    "port": port,
-                    "username": username,
-                    }
-
-                    host_key = connection.get_host_key_fingerprint()
-
-                    binding_fingerprint = ApprovalBinding.create(
-                        target=target,
-                        host_key_sha256=host_key,
-                        snapshot=current_snapshot,
-                        plan=installation_plan,
-                    )
-
-                    print("\n=== PLAN-BOUND APPROVAL CONTEXT ===")
-                    print(f"Target           : {hostname}:{port}")
-                    print(f"SSH User         : {username}")
-                    print(f"SSH Host Key     : {host_key}")
-                    print(f"Plan Fingerprint : {binding_fingerprint}")
-                    print("Execution        : DISABLED")
-
-                    approval_session = ApprovalSession()
-
-                    approved = review_installation_plan(
-                        installation_plan
-                    )
-
-                    if approved:
-                        approval_session.approve(binding_fingerprint)
-
-                        # Validate the recorded approval against its context.
-                        # This is not execution authorization.
-                        binding_valid = approval_session.is_valid(
-                            target,
-                            connection.get_host_key_fingerprint(),
-                            current_snapshot,
-                            installation_plan,
-                        )
-
-                        if binding_valid:
-                            print(
-                                "\nApproval binding validated "
-                                "for the reviewed server and plan."
-                            )
-                        else:
-                            approval_session.invalidate()
-                            print(
-                                "\nApproval binding validation failed. "
-                                "Approval invalidated."
-                                )
-
-                    else:
-                        print("\nNo plan-bound approval recorded.")
-
-                else:
-                    print(
-                        "\nInstallation approval skipped: "
-                        "server state changed. Replanning is required."
-                        )
-
-            except (RuntimeError, SnapshotError, ValueError) as error:
-                print(
-                    "\nInstallation approval skipped: "
-                    "fresh server discovery could not be validated."
-                )
-                print(f"Reason: {error}")
-
-        else:
-            print(
-                "\nInstallation approval skipped: "
-                "preflight validation failed."
-            )
-
-
-        # Stage 3.4: read-only component verification.
-        # Runs regardless of the approval outcome.
-        verify_components(
-            connection,
-            ordered_components,
-        )
-
-        print(
-            "\nWorkflow completed. "
-            "No installation commands were executed."
-        )
-
-    except PermissionError as error:
-        print(f"Sudo verification failed: {error}")
-
-    except ConnectionError as error:
-        print(f"Connection failed: {error}")
-
-    except RuntimeError as error:
-        print(f"Server operation failed: {error}")
-
-    finally:
-        connection.close()
+        if args.command is None:
+            return guided(args.allow_draft, args.inventory)
+        if args.command == "targets":
+            print(json.dumps(run.list_targets(args.inventory), indent=2))
+            return 0
+        if args.command == "plan":
+            return 0 if step_plan(args.target, args.components, args.allow_draft, args.inventory) else 2
+        if args.command == "approve":
+            return 0 if step_approve(args.plan_id, args.inventory) else 2
+        if args.command == "apply":
+            return step_apply(args.plan_id, args.inventory)
+        return step_remote("report" if args.command == "report" else "resume",
+                           args.plan_id, args.inventory)
+    except (run.RunError, ValueError, OSError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print("\nInterrupted. If apply had started, check with: python main.py report PLAN_ID",
+              file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

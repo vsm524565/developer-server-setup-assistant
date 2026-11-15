@@ -181,7 +181,7 @@ without the original session.
 - **D. Verification failure triggers rollback**, like any other
   component failure.
 
-## 13. Retention (proposal)
+## 13. Retention (confirmed 2026-11-15)
 
 Transaction folders stay on the target for 30 days, then are removed
 at the start of a later run. Laptop copies are kept indefinitely.

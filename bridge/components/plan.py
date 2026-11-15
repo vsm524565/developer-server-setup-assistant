@@ -13,7 +13,7 @@ from bridge.components.loader import DEFAULT_DEFINITIONS_DIR
 
 
 PLAN_KEYS = frozenset({
-    "schema_version", "plan_id", "created_at", "target", "package_manager",
+    "schema_version", "plan_id", "created_at", "target", "allow_draft", "package_manager",
     "selection", "definitions", "steps", "runnable", "held",
     "planning_only", "execution_allowed",
 })
@@ -76,6 +76,7 @@ def validate_plan_document(plan):
         "plan: invalid created_at",
     )
     _require(plan["package_manager"] in ("apt", "dnf"), "plan: invalid package manager")
+    _require(isinstance(plan["allow_draft"], bool), "plan: allow_draft must be true or false")
 
     target = plan["target"]
     _exact_keys(target, ("target_id", "host_key_sha256"), "plan.target")
@@ -139,8 +140,9 @@ def validate_plan_document(plan):
         if blocked_by:
             _require(step["action"] == "BLOCKED", f"{where}: blocked step must be BLOCKED")
 
-        # A draft variant must never be planned as INSTALL.
-        if step["support"] == "draft":
+        # A draft variant is planned as INSTALL only when the plan allows
+        # drafts (4.34: lab targets, confirmed by the operator).
+        if step["support"] == "draft" and not plan["allow_draft"]:
             _require(step["action"] != "INSTALL", f"{where}: draft variant planned as INSTALL")
 
         seen.append(component)

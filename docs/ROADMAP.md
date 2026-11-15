@@ -1138,3 +1138,45 @@ Design: `docs/design/journal-and-rollback.md`.
       the next `apt-get update`.
 
 Not yet used by `main.py`. Next: 4.34 unified plan → approve → apply.
+
+### Milestone 4.34 — Unified Plan → Approve → Apply — 2026-11-15
+
+Design: `docs/design/unified-apply.md`.
+
+- [x] `main.py` rewritten: a guided session with no arguments, plus
+      `targets | plan | approve | apply | report | resume-rollback`.
+- [x] `backend/linux/bin/dssa-run.sh` owns SSH. Python never opens SSH
+      or sees a password; `sudo` asks on the server.
+- [x] Host key: the key the server presents is bound into the plan.
+      Every later session trusts only that key (a pinned known_hosts
+      file and HostKeyAlgorithms), which closes the 4.32 note about
+      several keys per host.
+- [x] `engine/apply.sh`: plan and definition digests are re-verified on
+      the target. Before each component its decision is re-checked
+      (drift → `drift_skipped`, dependents `not_attempted`). A failure
+      is rolled back with its dependents skipped and the rest continue;
+      `rollback_incomplete` or an engine error stops the run.
+- [x] `engine/runner.sh`: the run is detached with `setsid` and keeps
+      going if SSH drops. `report` fetches the result later. The
+      journal, snapshot, result and run log are copied to the laptop
+      under `~/.local/state/developer-server-setup-assistant/runs/`.
+- [x] `--allow-draft` only for inventory targets marked `"lab": true`,
+      with each draft component's name typed.
+- [x] `engine/hooks/docker.sh`: `verify_docker_daemon` (read-only).
+      Definitions can call only registered hooks.
+- [x] Retired: the original paramiko `main.py` path (`connection/`,
+      `discovery/`, `planning/`, `verification/`, `execution/`, the root
+      `test_*.py` files, `paramiko`); `setup-components.sh`,
+      `operations/setup.sh`, `modules/install/*`, `verification/*.sh`
+      and the legacy planner; `bridge/cli.py` setup and
+      `LinuxBackend.setup_components`. Removing the legacy
+      `verify_docker` also removes its stdout bug.
+- [x] 25 new tests (mock ssh enforcing host-key pinning, mock sudo, the
+      4.33 mock system); 37 tests of retired code removed; regression
+      654/654, 1 skipped.
+- [x] Manual verification by the project owner on rocky10 (Git) and
+      ubuntu24 (Docker 29.9.3 via `--allow-draft`), 2026-11-15: all steps
+      passed (`docs/testing/manual-4.34-unified-apply.md`). Found and fixed
+      during the run: the laptop `runs/` folder was group-writable.
+- Open: apt marks already-installed prerequisites as manually installed
+      (not in the snapshot, so not restored by rollback).

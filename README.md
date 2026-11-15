@@ -80,6 +80,28 @@ Initial control-panel support:
 ## Current Status
 
 🚧 Project under active development.
+
+### Installing components — plan → approve → apply (Milestone 4.34)
+
+`main.py` is the one way DSSA changes a server:
+
+    python main.py                               # guided session
+    python main.py plan ubuntu24 git             # read-only plan, no sudo
+    python main.py approve PLAN_ID               # type APPROVE (30 min, single use)
+    python main.py apply PLAN_ID                 # sudo asks on the server itself
+    python main.py report PLAN_ID                # fetch the result of a run
+    python main.py resume-rollback PLAN_ID       # undo an interrupted run
+
+Use `--inventory FILE` for another inventory (for example
+`config/inventory/lab-six.json`). `--allow-draft` works only for targets
+marked `"lab": true` and asks you to type each draft component's name.
+
+Python never opens SSH or sees a password: `backend/linux/bin/dssa-run.sh`
+owns every connection and trusts only the host key bound into the plan.
+The original paramiko `main.py` workflow and the legacy
+`setup-components.sh` installer were removed in 4.34; notes below that
+mention them describe earlier milestones. Design:
+`docs/design/unified-apply.md`.
 ### Common Server Lifecycle — Milestone 4.10
 
 The project now includes a reusable, read-only common server lifecycle layer.

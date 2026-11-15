@@ -1,110 +1,33 @@
-"""DSSA CLI for the first integrated Linux installation workflow."""
+"""DSSA bridge CLI: read-only assessment and capability reports.
 
-import argparse
-import subprocess
+Installation moved to ``main.py`` (plan -> approve -> apply, 4.34). The
+former ``--component`` setup path through setup-components.sh is retired.
+"""
+
 import sys
 
-from bridge.adapters.linux_backend import LinuxBackend
+
+USAGE = """Usage:
+  python -m bridge.cli assess ...        read-only application assessment
+  python -m bridge.cli capabilities ...  published capability report
+
+To install components use: python main.py
+"""
 
 
-def main():
-    """Discover, install through Bash, and verify Nginx."""
-    parser = argparse.ArgumentParser(description="DSSA Linux setup")
-    parser.add_argument("--target", required=True)
-    parser.add_argument(
-        "--component",
-        required=True,
-        nargs="+",
-        help="Components to process, separated by spaces",
-    )
-    parser.add_argument(
-        "--plan",
-        action="store_true",
-        help="Generate a read-only component plan",
-    )
-    args = parser.parse_args()
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "assess":
+        from bridge.assessment_cli import run_assessment_cli
 
-    backend = LinuxBackend()
+        return run_assessment_cli(argv[1:])
+    if argv and argv[0] == "capabilities":
+        from bridge.capability_cli import run_capability_cli
 
-    try:
-        print(f"\nTarget: {args.target}")
-        print(f"Selected components: {', '.join(args.component)}")
-        print(
-            "The Bash backend will validate selections, discover the "
-            "environment and process the requested components.",
-            flush=True,
-        )
-
-        response = backend.setup_components(
-            args.target,
-            args.component,
-            plan_only=args.plan,
-        )
-        if response.get("status") == "error":
-            print("\n=== SETUP FAILED ===")
-
-            for result in response["results"]:
-                state = result.get(
-                    "execution_state",
-                    result.get("package_action", "unknown"),
-                )
-                print(
-                    f"{result['component']}: {state} | "
-                    f"verification={result.get('verification', 'unknown')}"
-                )
-
-            for error in response["errors"]:
-                print(
-                    f"{error['code']}: "
-                    f"{error.get('message', 'Backend operation failed.')}"
-                )
-
-            print(f"Backend exit code: {response['backend_exit_code']}")
-            return 1
-        if args.plan:
-            print("\n=== PLAN SUMMARY ===")
-            print(f"Eligible: {response['eligible']}")
-
-            for step in response["steps"]:
-                print(f"{step['component']}: {step['action']}")
-
-            print("No installation was attempted.")
-        else:
-            print("\n=== SETUP SUMMARY ===")
-
-            for result in response["results"]:
-                print(
-                    f"{result['component']}: "
-                    f"{result['package_action']} | "
-                    f"verification={result['verification']}"
-                )
-
-        return 0
-
-    except subprocess.TimeoutExpired:
-        print("\nERROR: Discovery timed out.")
-        return 1
-    except (RuntimeError, OSError, KeyError, TypeError, ValueError) as error:
-        print(f"\nERROR: {error}")
-        return 1
-    except KeyboardInterrupt:
-        print(
-            "\nInterrupted. If installation had started, "
-            "remote completion is not confirmed."
-        )
-        return 130
+        return run_capability_cli(argv[1:])
+    sys.stderr.write(USAGE)
+    return 2
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "assess":
-        from bridge.assessment_cli import run_assessment_cli
-
-        raise SystemExit(run_assessment_cli(sys.argv[2:]))
-
-    if len(sys.argv) > 1 and sys.argv[1] == "capabilities":
-        from bridge.capability_cli import run_capability_cli
-
-        raise SystemExit(run_capability_cli(sys.argv[2:]))
-
-    # Preserve the existing component setup CLI without modification.
     raise SystemExit(main())

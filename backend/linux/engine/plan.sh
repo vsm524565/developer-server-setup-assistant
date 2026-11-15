@@ -88,15 +88,32 @@ DSSA_PLAN_TIME_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
 DSSA_TARGET_ID_RE='^[a-z0-9][a-z0-9_-]{0,63}$'
 DSSA_HOST_KEY_RE='^SHA256:[A-Za-z0-9+/]{43}$'
 
+# A draft INSTALL is planned as REVIEW (4.30). When the request allows
+# drafts (4.34, lab targets only, typed confirmation on the laptop), it
+# becomes INSTALL with a reason saying so. Used at plan time and again at
+# apply time for the drift re-check, so both sides decide the same way.
+DSSA_PLAN_ALLOW_DRAFT_JQ='
+def allow_draft($allow):
+  if $allow and .decision == "INSTALL" and .support == "draft" and .action == "REVIEW"
+  then .action = "INSTALL"
+       | .reasons += ["Draft variant allowed for this lab target by the operator."]
+  else . end;
+'
+
 _dssa_sha256() {
     printf '%s' "$1" | sha256sum | awk '{ print "sha256:" $1 }'
 }
 
 # Laptop side. Usage:
-#   build_plan_request TARGET_ID HOST_KEY_SHA256 DEFINITIONS_DIR COMPONENT...
+#   build_plan_request [--allow-draft] TARGET_ID HOST_KEY_SHA256 DEFINITIONS_DIR COMPONENT...
 # Validates every definition, resolves the dependency closure and embeds
 # only the definitions the plan needs, each with its SHA-256.
 build_plan_request() {
+    local allow_draft=false
+    if [[ "${1:-}" == --allow-draft ]]; then
+        allow_draft=true
+        shift
+    fi
     local target_id="$1"
     local host_key="$2"
     local definitions_dir="$3"
@@ -159,8 +176,10 @@ build_plan_request() {
     printf '%s\n' "${entries[@]}" | jq -cs \
         --arg plan_id "$plan_id" --arg created_at "$created_at" \
         --arg target_id "$target_id" --arg host_key "$host_key" \
+        --argjson allow_draft "$allow_draft" \
         '{schema_version: "1.0", plan_id: $plan_id, created_at: $created_at,
           target: {target_id: $target_id, host_key_sha256: $host_key},
+          allow_draft: $allow_draft,
           selection: ($ARGS.positional
                       | reduce .[] as $s ([]; if index($s) then . else . + [$s] end)),
           definitions: .}' \
@@ -175,14 +194,15 @@ build_definition_plan() {
     local panel_facts="$3"
     local port_facts="$4"
 
-    local id content expected actual definitions='{}' order entry entries='{}'
+    local id content expected actual definitions='{}' order entry entries='{}' allow_draft
 
     jq -e \
         --arg plan_re "$DSSA_PLAN_ID_RE" --arg time_re "$DSSA_PLAN_TIME_RE" \
         --arg target_re "$DSSA_TARGET_ID_RE" --arg key_re "$DSSA_HOST_KEY_RE" '
         type == "object"
         and ((keys - ["schema_version","plan_id","created_at","target",
-                      "selection","definitions"]) | length == 0)
+                      "selection","definitions","allow_draft"]) | length == 0)
+        and ((.allow_draft // false) | type == "boolean")
         and .schema_version == "1.0"
         and (.plan_id | type == "string" and test($plan_re))
         and (.created_at | type == "string" and test($time_re))
@@ -235,12 +255,14 @@ build_definition_plan() {
         return 2
     }
 
+    allow_draft="$(jq -c '.allow_draft // false' <<< "$request")"
     while IFS= read -r id; do
         entry="$(
             plan_component_from_definition \
                 "$(jq -c --arg id "$id" '.[$id]' <<< "$definitions")" \
                 "$manager" "$panel_facts" "$port_facts"
         )" || return $?
+        entry="$(jq -c --argjson allow "$allow_draft" "$DSSA_PLAN_ALLOW_DRAFT_JQ allow_draft(\$allow)" <<< "$entry")" || return 1
         entries="$(jq -c --arg id "$id" --argjson e "$entry" '. + {($id): $e}' <<< "$entries")"
     done < <(jq -r '.[].id' <<< "$order")
 
@@ -257,6 +279,7 @@ build_definition_plan() {
             plan_id: \$request.plan_id,
             created_at: \$request.created_at,
             target: \$request.target,
+            allow_draft: (\$request.allow_draft // false),
             package_manager: \$manager,
             selection: \$request.selection,
             definitions: (\$request.definitions | map({(.id): .sha256}) | add),

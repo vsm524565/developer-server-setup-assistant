@@ -1,11 +1,11 @@
-"""Definition-driven planning reproduces the legacy planner (4.30).
+"""Definition-driven planning decisions (4.30).
 
-Each scenario runs through both the legacy hard-coded planner
-(backend/linux/planning/components.sh) and the new definition engine
-(backend/linux/engine/definitions.sh) with identical mocked evidence.
-
-Intended differences, asserted explicitly:
-- An unsupported platform is legacy REVIEW, new BLOCKED.
+These scenarios were first written as parity tests against the legacy
+hard-coded planner (backend/linux/planning/components.sh). That planner
+was retired in 4.34 with the legacy setup path; the scenarios stay, and
+each still records the action the legacy planner produced
+(``legacy_action``) so the intended differences remain visible:
+- An unsupported platform was legacy REVIEW, now BLOCKED.
 - A draft variant that would INSTALL is planned as action REVIEW.
 """
 
@@ -19,7 +19,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-LEGACY_PLANNER = ROOT / "backend/linux/planning/components.sh"
 ENGINE = ROOT / "backend/linux/engine/definitions.sh"
 DEFINITIONS = ROOT / "definitions/components"
 
@@ -136,40 +135,17 @@ plan_component_from_definition {shlex.quote(definition)} \\
         return _run(script)
 
 
-def run_legacy(scenario):
-    """Plan with the legacy planner using the same mocked evidence."""
-
-    source = LEGACY_PLANNER.read_text()
-    fixture = (
-        f"ID={shlex.quote(scenario.os_id)}\n"
-        f"VERSION_ID={shlex.quote(scenario.version)}\n"
-    )
-    source = source.replace("source /etc/os-release", fixture)
-
-    script = f"""
-set -euo pipefail
-{_mocks(scenario.installed, scenario.executables, scenario.units,
-        scenario.arch, scenario.dpkg_arch)}
-{source}
-plan_component {shlex.quote(scenario.manager)} \\
-    {shlex.quote(scenario.panels)} {shlex.quote(scenario.ports)} \\
-    {shlex.quote(scenario.component)}
-"""
-    return _run(script)
-
-
 def host_lacks(*paths):
     return all(not Path(path).exists() for path in paths)
 
 
-class LegacyParityTests(unittest.TestCase):
-    """New decisions match legacy actions for the same evidence."""
+class DecisionTests(unittest.TestCase):
+    """Definition decisions for the scenarios once checked against legacy."""
 
     def assert_parity(self, scenario, legacy_action, decision, action=None):
-        legacy = run_legacy(scenario)
+        # legacy_action documents what the retired planner decided.
         new = run_new(scenario)
 
-        self.assertEqual(legacy["action"], legacy_action, legacy)
         self.assertEqual(new["decision"], decision, new)
         self.assertEqual(new["action"], action or decision, new)
         self.assertIs(new["planning_only"], True)

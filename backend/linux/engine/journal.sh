@@ -27,6 +27,9 @@
 DSSA_TX_RETENTION_DAYS=30
 DSSA_PLAN_ID_PATTERN='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 DSSA_SUPPORTED_STEPS=" package_metadata_refresh packages_install apt_vendor_repository service_enable service_start "
+# Hooks a definition may name. Hook files (engine/hooks/*.sh) register
+# theirs here, so a definition can never call an arbitrary engine function.
+DSSA_HOOKS="${DSSA_HOOKS:- }"
 DSSA_PROTECTED_PATHS=" / /bin /boot /dev /etc /home /lib /lib64 /opt /proc /root /run /sbin /srv /sys /tmp /usr /var /var/lib /var/log /etc/apt /etc/apt/sources.list.d /etc/systemd /etc/systemd/system "
 
 _tx_fail() { printf 'ERROR: %s\n' "$1" >&2; return 1; }
@@ -459,7 +462,8 @@ tx_run_check() {
         hook)
             local hook
             hook="$(jq -r .name <<< "$check")"
-            declare -F "$hook" >/dev/null || { echo "Verification hook not available: $hook" >&2; return 1; }
+            [[ "$DSSA_HOOKS" == *" $hook "* ]] && declare -F "$hook" >/dev/null ||
+                { echo "Verification hook not available: $hook" >&2; return 1; }
             "$hook" >&2 ;;
         *)
             return 1 ;;
@@ -468,11 +472,11 @@ tx_run_check() {
 
 # --- apply one component ------------------------------------------------------
 
-# Usage: apply_component PLAN_ID MANAGER DEFINITION_JSON VARIANT_ID
+# Usage: apply_component PLAN_ID MANAGER DEFINITION_JSON VARIANT_ID [ALLOW_DRAFT]
 # Runs inside an open transaction. Prints one result JSON.
 # outcome: installed | verified | failed_rolled_back | rollback_incomplete
 apply_component() {
-    local plan_id="$1" manager="$2" definition="$3" variant_id="$4"
+    local plan_id="$1" manager="$2" definition="$3" variant_id="$4" allow_draft="${5:-false}"
     local component variant step type count index failed_step="" failure="" outcome
     local verify_failed=false rollback
 
@@ -485,8 +489,12 @@ apply_component() {
     [[ -n "$variant" ]] || { _tx_fail "Unknown variant: $variant_id"; return 1; }
     [[ "$(jq -r .platform.package_manager <<< "$variant")" == "$manager" ]] ||
         { _tx_fail "Variant does not match package manager."; return 1; }
-    [[ "$(jq -r .support <<< "$variant")" == supported ]] ||
+    # Draft variants run only when the approved plan allows them (4.34,
+    # lab targets only); otherwise they are refused.
+    [[ "$(jq -r .support <<< "$variant")" == supported || "$allow_draft" == true ]] ||
         { _tx_fail "Variant $variant_id is a draft; installation is not allowed."; return 1; }
+    jq -e '(.hooks.precheck // null) == null' <<< "$variant" >/dev/null ||
+        { _tx_fail "Precheck hooks are not supported by this engine."; return 1; }
 
     # Refuse before any change if a step type has no executor yet.
     while IFS= read -r type; do
