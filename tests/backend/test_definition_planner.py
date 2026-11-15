@@ -178,7 +178,7 @@ class DecisionTests(unittest.TestCase):
                     "INSTALL", "INSTALL",
                 )
 
-    # Docker: draft, Ubuntu 24.04 x86_64 vendor repository only.
+    # Docker: supported (4.34), Ubuntu 24.04 x86_64 vendor repository only.
 
     def test_docker_unsupported_platforms_are_blocked(self):
         for manager, os_id, version in (
@@ -240,10 +240,8 @@ class DecisionTests(unittest.TestCase):
         ) and not shutil.which("docker"),
         "legacy planner reads Docker state paths on the host",
     )
-    def test_docker_clean_host_is_draft_install(self):
-        self.assert_parity(
-            Scenario("docker"), "INSTALL", "INSTALL", action="REVIEW",
-        )
+    def test_docker_clean_host_is_install(self):
+        self.assert_parity(Scenario("docker"), "INSTALL", "INSTALL")
 
     # Nginx: draft, matched on package manager only.
 
@@ -289,12 +287,14 @@ class DefinitionOnlyTests(unittest.TestCase):
         self.assertEqual(new["decision"], "REVIEW")
         self.assertIn("download.docker.com", new["reasons"][0])
 
-    def test_docker_clean_root_is_draft_install(self):
+    def test_docker_clean_root_is_install(self):
+        # Supported since the owner's lab run (4.34): no draft hold.
         new = run_new(Scenario("docker"))
         self.assertEqual(new["decision"], "INSTALL")
-        self.assertEqual(new["action"], "REVIEW")
+        self.assertEqual(new["action"], "INSTALL")
+        self.assertEqual(new["support"], "supported")
         self.assertEqual(new["variant_id"], "ubuntu24-amd64-vendor")
-        self.assertIn("draft", new["reasons"][-1])
+        self.assertNotIn("draft", " ".join(new["reasons"]))
 
     def test_nginx_paths_panels_and_ports_report_every_reason(self):
         new = run_new(Scenario(

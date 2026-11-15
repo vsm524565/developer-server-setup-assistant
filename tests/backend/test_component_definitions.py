@@ -63,13 +63,14 @@ class RepositoryDefinitionTests(unittest.TestCase):
             sorted(self.definitions), ["docker", "git", "nginx"],
         )
 
-    def test_only_git_is_supported(self):
+    def test_git_and_docker_are_supported_nginx_is_draft(self):
+        # Docker became supported after the owner's lab run (4.34).
         support = {
             definition.component_id: {v.support for v in definition.variants}
             for definition in self.definitions.values()
         }
         self.assertEqual(support["git"], {"supported"})
-        self.assertEqual(support["docker"], {"draft"})
+        self.assertEqual(support["docker"], {"supported"})
         self.assertEqual(support["nginx"], {"draft"})
 
     def test_git_and_nginx_match_on_package_manager_only(self):

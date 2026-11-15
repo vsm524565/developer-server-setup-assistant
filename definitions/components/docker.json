@@ -7,7 +7,7 @@
   "variants": [
     {
       "variant_id": "ubuntu24-amd64-vendor",
-      "support": "draft",
+      "support": "supported",
       "platform": {
         "package_manager": "apt",
         "os": [{ "id": "ubuntu", "versions": ["24.04"] }],

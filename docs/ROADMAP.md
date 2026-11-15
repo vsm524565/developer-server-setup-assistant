@@ -1180,3 +1180,7 @@ Design: `docs/design/unified-apply.md`.
       during the run: the laptop `runs/` folder was group-writable.
 - Open: apt marks already-installed prerequisites as manually installed
       (not in the snapshot, so not restored by rollback).
+- [x] Docker's `ubuntu24-amd64-vendor` variant marked `supported` after the
+      owner's ubuntu24 run (decision C, separate commit). It now plans as
+      `INSTALL` without `--allow-draft`; other platforms stay `BLOCKED`.
+      Nginx stays draft.
