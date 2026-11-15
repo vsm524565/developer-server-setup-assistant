@@ -978,3 +978,25 @@ Complete and validate Git installation using the existing package-manager-first 
 - [ ] Documentation and staged changes reviewed.
 - [ ] Changes committed and pushed to GitHub.
 - [ ] Local and remote Git SHAs match.
+
+### Milestone 4.29 — Docker Engine Installation (Checkpoint) — 2026-11-15
+
+Docker Engine added to the legacy setup path for Ubuntu 24.04 amd64
+only, using the official vendor repository with a pinned signing-key
+fingerprint.
+
+- [x] Planner: INSTALL only on clean systems. Conflicting packages,
+      partial installs, unmanaged executables, existing Docker state,
+      repositories or systemd units require REVIEW.
+- [x] Installer guards and verifier; existing installs verified, not reinstalled.
+- [x] Repository failure-injection tests (metadata message corrected).
+- [x] Full backend regression: 558/558 passed with lab VM online
+      (2026-11-14). Five `test_dispatcher` tests need the
+      `lab-ubuntu-01` VM (192.168.56.109); 553/553 pass offline.
+- [ ] `verify_docker` writes Docker CLI output to stdout, which breaks
+      the single-JSON component result. Fix in Milestone 4.34.
+- [ ] Live install and repeat run on disposable ubuntu24 VM (4.34).
+
+Next: Milestones 4.30–4.34 replace hard-coded component logic with
+shared JSON definitions, a generic planner, approval records,
+journal-based rollback and a unified `main.py` flow.

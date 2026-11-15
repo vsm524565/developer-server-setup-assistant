@@ -73,7 +73,7 @@ setup_selected_services() (
     # Validate all selections before making any changes.
     for component in "$@"; do
         case "$component" in
-            nginx|git) ;;
+            nginx|git|docker) ;;
             *)
                 printf 'ERROR: Unsupported component: %s\n' \
                     "$component" >&2
@@ -93,6 +93,9 @@ for component in "$@"; do
             ;;
         git)
             required_functions=(install_git verify_git)
+            ;;
+        docker)
+            required_functions=(install_docker verify_docker)
             ;;
     esac
 
@@ -198,10 +201,25 @@ printf 'Panel discovery: %s\n' "$panel_facts" >&2
         case "$action" in
             SKIP)
                 # Verify Git even when installation is unnecessary.
-                if [[ "$component" == "git" ]]; then
-                    if ! package_is_installed "$manager" git ||
-                       ! verify_git; then
-                        echo "ERROR: Existing Git failed verification." >&2
+                if [[ "$component" == "git" || "$component" == "docker" ]]; then
+                    verification_ok=false
+
+                    case "$component" in
+                        git)
+                            if package_is_installed "$manager" git &&
+                            verify_git; then
+                                verification_ok=true
+                            fi
+                            ;;
+                        docker)
+                            if verify_docker "$manager"; then
+                                verification_ok=true
+                            fi
+                            ;;
+                    esac
+
+                    if [[ "$verification_ok" != true ]]; then
+                        echo "ERROR: Existing $component failed verification." >&2
 
                         completed_results="$(
                             printf '%s\n' "${results[@]}" | jq -M -s .
@@ -215,10 +233,9 @@ printf 'Panel discovery: %s\n' "$panel_facts" >&2
 
                         exit 1
                     fi
-
                     component_result="$(
-                        jq -cn '{
-                            component: "git",
+                        jq -cn --arg component "$component" '{
+                            component: $component,
                             package_action: "skipped",
                             verification: "passed",
                             service_action: "unchanged"
@@ -249,6 +266,11 @@ printf 'Panel discovery: %s\n' "$panel_facts" >&2
                     git)
                         component_result="$(
                             install_git "$manager"
+                        )"
+                        ;;
+                    docker)
+                        component_result="$(
+                            install_docker "$manager"
                         )"
                         ;;
                     *)

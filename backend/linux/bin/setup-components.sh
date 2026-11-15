@@ -13,6 +13,8 @@ NGINX_VERIFICATION="$BASE_DIR/backend/linux/verification/nginx.sh"
 SETUP_MODULE="$BASE_DIR/backend/linux/operations/setup.sh"
 GIT_INSTALLER="$BASE_DIR/backend/linux/modules/install/git.sh"
 GIT_VERIFICATION="$BASE_DIR/backend/linux/verification/git.sh"
+DOCKER_INSTALLER="$BASE_DIR/backend/linux/modules/install/docker.sh"
+DOCKER_VERIFICATION="$BASE_DIR/backend/linux/verification/docker.sh"
 PANEL_DISCOVERY="$BASE_DIR/backend/linux/discovery/panel.sh"
 PORT_DISCOVERY="$BASE_DIR/backend/linux/discovery/ports.sh"
 PLANNING_MODULE="$BASE_DIR/backend/linux/planning/components.sh"
@@ -71,7 +73,7 @@ components=("$@")
 # Validate every selection before resolving the target or connecting.
 for component in "${components[@]}"; do
     case "$component" in
-        nginx|git) ;;
+        nginx|git|docker) ;;
         *)
             printf 'ERROR: Unsupported component: %s\n' "$component" >&2
             exit 2
@@ -130,7 +132,10 @@ bundle="$(
     printf '\n'
     cat "$GIT_INSTALLER"
     printf '\n'
-
+    cat "$DOCKER_VERIFICATION"
+    printf '\n'
+    cat "$DOCKER_INSTALLER"
+    printf '\n'
     cat "$PANEL_DISCOVERY"
     printf '\n'
 

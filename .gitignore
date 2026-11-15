@@ -28,3 +28,7 @@ logs/
 
 # Local lab inventory
 /config/inventory/lab-six.json
+
+# Local backups
+.venv-*/
+/config/inventory/*.bak
