@@ -1073,3 +1073,29 @@ Design: `docs/design/multi-component-planning.md`.
       accepted `"required": null`; now rejected by both validators.
 
 Not yet used by setup. Next: 4.32 approval records.
+
+
+### Milestone 4.32 — Approval Records — 2026-11-15
+
+Design: `docs/design/approval-records.md`.
+
+- [x] `bridge/components/approval.py`: `preflight_plan`, `approve_plan`,
+      `check_approval`, `consume_approval`, `known_host_fingerprints`.
+- [x] Records on the control machine running DSSA:
+      `~/.local/state/developer-server-setup-assistant/approvals/<plan_id>/`
+      (0700 directories, 0600 files, exclusive creation, no symlinks).
+- [x] Bound to the SHA-256 of the exact plan bytes; scope equals the
+      plan's `runnable`; 30-minute window from plan creation; single use
+      via an exclusively created `consumed` marker; confirmation `APPROVE`.
+- [x] Seven apply gates: record, binding, freshness, unused, scope,
+      definitions, identity. Verification-only plans need no approval.
+- [x] Approve and consume audited in the JSONL audit log; an approval
+      whose audit write fails is removed.
+- [x] 24 new tests; regression 638/638, 1 skipped.
+- [x] End to end on rocky10 (read-only plan of `git`): preflight,
+      approve, READY on all gates, consume, then BLOCKED as already used.
+- Note for 4.34: rocky10 has three host keys in `known_hosts`, and the
+      identity gate accepts any of them (SSH still enforces the real
+      key). Bind the plan to the key presented by the SSH session.
+
+Not yet used by `main.py`. Next: 4.33 change journal and rollback.
