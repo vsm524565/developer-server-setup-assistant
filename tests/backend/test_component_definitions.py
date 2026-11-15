@@ -166,6 +166,8 @@ class RejectionTests(unittest.TestCase):
             "config test outside allowlist":
                 lambda d: docker_variant(d)["verification"].append(
                     {"type": "config_test", "command": "bash -c id"}),
+            "null dependency flag":
+                lambda d: d.update(depends_on=[{"id": "git", "required": None}]),
             "self dependency":
                 lambda d: d.update(depends_on=[{"id": "docker"}]),
             "duplicate variant IDs":

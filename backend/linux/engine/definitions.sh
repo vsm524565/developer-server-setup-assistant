@@ -141,7 +141,7 @@ and (.display_name | type == "string" and length > 0)
 and (.category | type == "string" and length > 0)
 and (.depends_on | type == "array"
      and all(.[]; only(["id","required"]) and (.id | str(id_re))
-                  and ((.required // true) | type == "boolean")))
+                  and ((has("required") | not) or (.required | type == "boolean"))))
 and (.id as $self | all(.depends_on[]; .id != $self))
 and (.variants | type == "array" and length > 0 and all(.[]; valid_variant))
 and ([.variants[].variant_id] | length == (unique | length))

@@ -1042,3 +1042,34 @@ by both layers. Design: `docs/design/component-definitions.md`.
 
 The engine is not yet used by setup. Next: 4.31 generic multi-component
 planner with dependency ordering.
+
+
+### Milestone 4.31 — Multi-Component Dependency-Aware Planning — 2026-11-15
+
+Design: `docs/design/multi-component-planning.md`.
+
+- [x] `backend/linux/engine/plan.sh`. Laptop side `build_plan_request`
+      embeds only the dependency closure, each definition with its
+      SHA-256. Target side `build_definition_plan` re-verifies digests,
+      re-validates definitions, recomputes the order and plans each
+      component with the 4.30 engine.
+- [x] Required dependencies auto-added (`added_as_dependency`);
+      dependencies first, otherwise selection order; optional
+      dependencies order only.
+- [x] Partial plans: a held component (REVIEW/BLOCKED) blocks only its
+      required dependents (`blocked_by`, transitive). `runnable` and
+      `held` replace legacy all-or-nothing `eligible`.
+- [x] Plan carries target ID, host-key fingerprint and definition
+      digests for 4.32 approval binding.
+- [x] `bridge/components/plan.py`: plan consistency validator and local
+      definition change detection.
+- [x] 19 new tests (ordering, propagation, tampered requests, parity
+      with 4.30, validator); regression 614/614, 1 skipped.
+- [x] Six-VM read-only combined plan (`nginx docker git`): every plan
+      validated, digests matched, results equal 4.30. Git runnable on all
+      six while Nginx (draft) and Docker are held.
+- Fixed in passing: jq `.required // true` treats `false` as missing;
+      replaced with `.required != false`. The 4.30 validator also
+      accepted `"required": null`; now rejected by both validators.
+
+Not yet used by setup. Next: 4.32 approval records.
