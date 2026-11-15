@@ -1101,3 +1101,40 @@ Design: `docs/design/approval-records.md`.
       key). Bind the plan to the key presented by the SSH session.
 
 Not yet used by `main.py`. Next: 4.33 change journal and rollback.
+
+### Milestone 4.33 — Change Journal and Rollback — 2026-11-15
+
+Design: `docs/design/journal-and-rollback.md`.
+
+- [x] `backend/linux/engine/journal.sh`: `begin_transaction`,
+      `apply_component`, `verify_component`, `rollback_component`,
+      `resume_rollback`, `end_transaction`.
+- [x] Whole-server snapshot before any change (all packages, all units,
+      plan paths), on the target under `/var/lib/dssa/transactions/<plan_id>/`
+      (root-only: 0700 folders, 0600 files).
+- [x] Write-ahead journal (intent with pre-state, then done/failed,
+      synced); `flock` run lock; an unfinished run blocks new ones until
+      `resume_rollback`.
+- [x] Journaled executors for the allowlisted steps: metadata refresh,
+      package install, apt vendor repository (pinned key fingerprint),
+      service enable/start. Unsupported steps and draft variants are
+      refused before any change.
+- [x] Rollback of the failed component only: stop/disable new units,
+      remove only packages new since the snapshot (never autoremove; DNF
+      with `clean_requirements_on_remove=False`), restore repo files,
+      remove created paths (protected paths refused), restore unit states
+      only after a clean undo. Upgraded packages are reported, not
+      reverted. A failed undo reports `rollback_incomplete`.
+- [x] Verification failure triggers rollback.
+- [x] Finished transactions older than 30 days are removed at the start
+      of a later run (default, can be changed).
+- [x] 28 new tests with a mock apt/dnf/dpkg/rpm/systemctl (failure
+      injection, interrupted runs, stdin safety, file permissions).
+- [x] Manual verification by the project owner on ubuntu24 and rocky10,
+      2026-11-15: all steps passed (`docs/testing/manual-4.33-rollback.md`).
+      Found and fixed during the run: the journal was world-readable under
+      the default umask.
+- Known limit: removing a vendor repository leaves stale apt lists until
+      the next `apt-get update`.
+
+Not yet used by `main.py`. Next: 4.34 unified plan → approve → apply.
