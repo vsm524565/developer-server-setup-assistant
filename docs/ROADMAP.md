@@ -1178,9 +1178,21 @@ Design: `docs/design/unified-apply.md`.
       ubuntu24 (Docker 29.9.3 via `--allow-draft`), 2026-11-15: all steps
       passed (`docs/testing/manual-4.34-unified-apply.md`). Found and fixed
       during the run: the laptop `runs/` folder was group-writable.
-- Open: apt marks already-installed prerequisites as manually installed
-      (not in the snapshot, so not restored by rollback).
+- Resolved in 4.34.1: apt marked already-installed prerequisites as
+      manually installed.
 - [x] Docker's `ubuntu24-amd64-vendor` variant marked `supported` after the
       owner's ubuntu24 run (decision C, separate commit). It now plans as
       `INSTALL` without `--allow-draft`; other platforms stay `BLOCKED`.
       Nginx stays draft.
+
+### Fix 4.34.1 — Already-Installed Packages Left Untouched — 2026-11-15
+
+- [x] `packages_install` passes only missing packages to apt or dnf;
+      packages present before the step are journaled as
+      `already_installed` and never re-marked or upgraded. If all are
+      present, the package manager is not called.
+- [x] 5 new tests (mixed, all present, no upgrade, rollback keeps the
+      skipped package, DNF); regression 659/659, 1 skipped.
+- [x] Manual verification by the project owner on ubuntu24, 2026-11-16:
+      all 8 steps passed (`docs/testing/manual-4.34.1-already-installed.md`);
+      `curl` stayed `auto` through install and rollback.

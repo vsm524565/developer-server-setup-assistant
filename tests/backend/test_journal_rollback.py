@@ -219,6 +219,72 @@ class SuccessTests(FakeServer):
                          [{"package": "libshared", "before": "1.0", "after": "2.0"}])
 
 
+class AlreadyInstalledTests(FakeServer):
+    """Packages present before the step are never passed to apt or dnf."""
+
+    def definition(self, packages, manager="apt"):
+        definition = simple_definition(created_paths=())
+        variant = definition["variants"][0]
+        variant["platform"]["package_manager"] = manager
+        variant["steps"][1]["packages"] = list(packages)
+        return definition
+
+    def install_calls(self, tool="apt-get"):
+        return [line.split() for line in (self.state / "calls.log").read_text().splitlines()
+                if line.startswith(f"{tool} install")]
+
+    def intent(self):
+        return next(e for e in self.journal()
+                    if e.get("type") == "packages_install" and e["phase"] == "intent")
+
+    def test_only_missing_packages_are_installed(self):
+        rc, result, run = self.apply(self.definition(["libshared", "testtool"]), "apt-test")
+        self.assertEqual(rc, 0, run.stderr)
+        self.assertEqual(result["outcome"], "installed")
+        calls = self.install_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("testtool", calls[0])
+        self.assertNotIn("libshared", calls[0])
+        self.assertEqual(self.intent()["pre"]["already_installed"], ["libshared"])
+        self.assertIn("Already installed, left untouched: libshared", run.stderr)
+
+    def test_all_present_calls_no_package_manager(self):
+        definition = self.definition(["libshared"])
+        definition["variants"][0]["verification"] = [
+            {"type": "packages_installed", "packages": ["libshared"]}]
+        rc, result, _ = self.apply(definition, "apt-test")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.install_calls(), [])
+        done = [e for e in self.journal() if e.get("type") == "packages_install" and e["phase"] == "done"]
+        self.assertEqual(len(done), 1)
+
+    def test_present_package_is_not_upgraded(self):
+        # Asking apt for an installed package would have upgraded it.
+        self.write("upgrades.json", {"libshared": "2.0"})
+        definition = self.definition(["libshared"])
+        definition["variants"][0]["verification"] = [
+            {"type": "packages_installed", "packages": ["libshared"]}]
+        rc, result, _ = self.apply(definition, "apt-test")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.read("packages.json")["libshared"], "1.0")
+        self.assertEqual(result["upgraded_not_reverted"], [])
+
+    def test_rollback_keeps_the_skipped_package(self):
+        self.write("pkg_bins.json", {})  # executable check fails
+        rc, result, _ = self.apply(self.definition(["libshared", "testtool"]), "apt-test")
+        self.assertEqual(rc, 3)
+        self.assertEqual(self.read("packages.json")["libshared"], "1.0")
+        self.assert_back_to_snapshot()
+
+    def test_dnf_skips_installed_packages_too(self):
+        rc, result, run = self.apply(self.definition(["libshared", "testtool"], "dnf"),
+                                     "apt-test", manager="dnf")
+        self.assertEqual(rc, 0, run.stderr)
+        calls = self.install_calls("dnf")
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("libshared", calls[0])
+
+
 class RollbackTests(FakeServer):
 
     def test_verification_failure_rolls_back(self):

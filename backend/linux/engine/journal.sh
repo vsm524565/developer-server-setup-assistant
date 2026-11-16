@@ -282,23 +282,41 @@ _tx_exec_metadata_refresh() {
 
 _tx_exec_packages_install() {
     local plan_id="$1" component="$2" index="$3" manager="$4" step="$5"
-    local tx before after status=0 upgraded
-    local -a packages=()
+    local tx before after status=0 upgraded package
+    local -a packages=() missing=() present=()
     tx="$(_tx_dir "$plan_id")"
 
     mapfile -t packages < <(jq -r '.packages[]' <<< "$step")
+
+    # Packages already installed are left untouched: asking the package
+    # manager for them again would change state the snapshot does not
+    # record (apt marks them "manually installed"; it may also upgrade).
+    for package in "${packages[@]}"; do
+        if package_is_installed "$manager" "$package" >/dev/null 2>&1; then
+            present+=("$package")
+        else
+            missing+=("$package")
+        fi
+    done
+    if (( ${#present[@]} > 0 )); then
+        printf 'Already installed, left untouched: %s\n' "${present[*]}" >&2
+    fi
     before="$tx/pkgsets/$component-$index.before.json"
     after="$tx/pkgsets/$component-$index.after.json"
 
     (umask 077 && tx_package_set "$manager" > "$before") || { _tx_fail "Cannot record package state."; return 1; }
     tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" packages_install intent \
-        "$(jq -cn --arg b "${before##*/}" --argjson p "$(printf '%s\n' "${packages[@]}" | jq -R . | jq -cs .)" \
-            '{packages_before: $b, packages: $p}')")" || return 1
+        "$(jq -cn --arg b "${before##*/}" \
+            --argjson p "$(printf '%s\n' "${packages[@]}" | jq -R . | jq -cs .)" \
+            --argjson present "$(printf '%s\n' "${present[@]}" | jq -R 'select(length > 0)' | jq -cs .)" \
+            '{packages_before: $b, packages: $p, already_installed: $present}')")" || return 1
 
-    case "$manager" in
-        apt) DEBIAN_FRONTEND=noninteractive apt-get install -y -- "${packages[@]}" >&2 ;;
-        dnf) dnf install -y -- "${packages[@]}" >&2 ;;
-    esac || status=$?
+    if (( ${#missing[@]} > 0 )); then
+        case "$manager" in
+            apt) DEBIAN_FRONTEND=noninteractive apt-get install -y -- "${missing[@]}" >&2 ;;
+            dnf) dnf install -y -- "${missing[@]}" >&2 ;;
+        esac || status=$?
+    fi
 
     # Record what actually changed, even after a partial failure.
     (umask 077 && tx_package_set "$manager" > "$after") || status=1
