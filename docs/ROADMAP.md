@@ -1196,3 +1196,32 @@ Design: `docs/design/unified-apply.md`.
 - [x] Manual verification by the project owner on ubuntu24, 2026-11-16:
       all 8 steps passed (`docs/testing/manual-4.34.1-already-installed.md`);
       `curl` stayed `auto` through install and rollback.
+
+### Milestone 4.35 — Hardening — 2026-11-16
+
+Design: `docs/design/hardening.md`.
+
+- [x] Definition files and folders: never writable by others,
+      group-writable only for the owner's private group, owned by the
+      user or root, no symlinks. Checked in Bash (plan and apply) and
+      Python (loader).
+- [x] Rollback runs `apt-get update` once after undoing an apt
+      repository (`refresh_lists`). A failed refresh is noted and the
+      rollback still counts as complete.
+- [x] A failed apt removal adds a `dpkg --configure -a` hint. DSSA
+      never repairs dpkg itself.
+- [x] Runner: a killed run is reported `interrupted`, not `finished`.
+      The staged bundle is removed when a plan that already ran is
+      refused, and old staged files are aged out.
+- [x] 21 new tests (13 permission, 4 list refresh and dpkg hint, 4
+      apply integration including a simulated crash and a killed ssh
+      client).
+- [x] Manual verification by the project owner on ubuntu24 and ubuntu22,
+      2026-11-17: all 15 steps passed (`docs/testing/manual-4.35-hardening.md`).
+      A run finished on the VM after the laptop's connection was cut; a
+      killed run was reported `interrupted`, blocked new runs, and was undone
+      by `resume-rollback`; a repository rollback left no stale apt lists.
+- [x] Fixed during the run: a killed local ssh is reported as 255, a killed
+      run on the target as 4; the terminal is reset after an abnormal ssh
+      exit; resume results show `Status: resumed`. Regression 680/680,
+      1 skipped.

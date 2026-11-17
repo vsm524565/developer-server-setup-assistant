@@ -285,6 +285,48 @@ class AlreadyInstalledTests(FakeServer):
         self.assertNotIn("libshared", calls[0])
 
 
+class ListRefreshTests(FakeServer):
+    """A repository undo refreshes apt's lists once (4.35 D)."""
+
+    def updates(self):
+        return [l for l in (self.state / "calls.log").read_text().splitlines()
+                if l.startswith("apt-get update")]
+
+    def test_repository_undo_refreshes_lists(self):
+        self.write("fail.json", {"start": ["vendorapp.service"]})
+        rc, result, _ = self.apply(vendor_definition(), "apt-vendor")
+        self.assertEqual(rc, 3)
+        actions = [(a["action"], a["result"]) for a in result["rollback"]["actions"]]
+        self.assertIn(("refresh_lists", "ok"), actions)
+        # Two metadata steps during install, one refresh after the undo.
+        self.assertEqual(len(self.updates()), 3)
+        self.assertTrue(result["rollback"]["complete"])
+
+    def test_failed_refresh_is_noted_but_rollback_is_complete(self):
+        # Updates 1 and 2 are the install's own; the third (rollback) fails.
+        self.write("fail.json", {"start": ["vendorapp.service"], "update_from": 3})
+        rc, result, _ = self.apply(vendor_definition(), "apt-vendor")
+        self.assertEqual(rc, 3)
+        self.assertEqual(result["outcome"], "failed_rolled_back")
+        self.assertTrue(result["rollback"]["complete"])
+        self.assertIn(("refresh_lists", "not refreshed"),
+                      [(a["action"], a["result"]) for a in result["rollback"]["actions"]])
+        self.assertTrue(any("lists not refreshed" in i for i in result["rollback"]["issues"]))
+
+    def test_no_refresh_without_a_repository_change(self):
+        self.write("pkg_bins.json", {})  # simple install, verification fails
+        rc, result, _ = self.apply(simple_definition(), "apt-test")
+        self.assertEqual(rc, 3)
+        self.assertNotIn("refresh_lists", [a["action"] for a in result["rollback"]["actions"]])
+        self.assertEqual(len(self.updates()), 1)
+
+    def test_failed_removal_gives_the_dpkg_hint(self):
+        self.write("fail.json", {"start": ["vendorapp.service"], "purge": True})
+        rc, result, _ = self.apply(vendor_definition(), "apt-vendor")
+        self.assertEqual(rc, 4)
+        self.assertTrue(any("dpkg --configure -a" in i for i in result["rollback"]["issues"]))
+
+
 class RollbackTests(FakeServer):
 
     def test_verification_failure_rolls_back(self):

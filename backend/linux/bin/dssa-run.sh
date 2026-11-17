@@ -168,6 +168,16 @@ run_as_root() {
     "$SSH_BIN" "${opts[@]}" -t -- "$host" "$remote"
     rc=$?
     set -e
+    # The target never exits above 128 (a killed run reports 4), so this
+    # means the local ssh itself was killed: like 255, the connection
+    # ended and remote completion is unknown.
+    if (( rc > 128 && rc != 255 )); then
+        rc=255
+    fi
+    # A killed ssh cannot restore the terminal it put in raw mode.
+    if (( rc == 255 )) && [[ -t 0 ]]; then
+        stty sane 2>/dev/null || true
+    fi
     return "$rc"
 }
 
@@ -233,9 +243,11 @@ cmd_apply() {
     pin_host_key "$key"
 
     # Exact definition texts, checked again on the target against the plan.
+    dssa_check_definition_path "$DEFINITIONS_DIR" || die 2 "Unsafe definitions folder."
     while IFS= read -r id; do
         [[ "$id" =~ ^[a-z][a-z0-9_-]{0,63}$ && -f "$DEFINITIONS_DIR/$id.json" ]] ||
             die 2 "Definition missing: $id"
+        dssa_check_definition_path "$DEFINITIONS_DIR/$id.json" || die 2 "Unsafe definition file: $id"
         content="$(cat -- "$DEFINITIONS_DIR/$id.json")"
         [[ "$(_dssa_sha256 "$content")" == "$(jq -r --arg id "$id" '.definitions[$id]' <<< "$plan")" ]] ||
             die 2 "Definition changed since planning: $id"

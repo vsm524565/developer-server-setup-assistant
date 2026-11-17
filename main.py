@@ -73,8 +73,15 @@ def show_outcome(outcome, kind="apply"):
     summary = outcome.summary
     if summary is None:
         print("No result came back from the server.")
+        if outcome.status == "interrupted":
+            print("The run stopped before finishing. Next: python main.py report PLAN_ID,")
+            print("then python main.py resume-rollback PLAN_ID to undo it.")
+        elif outcome.status != "running":
+            print("If the connection dropped, the run may still be going on the server.")
+            print("Check it with: python main.py report PLAN_ID")
     else:
-        print(f"Status: {summary.get('status', 'unknown')}")
+        status = summary.get("status") or ("resumed" if summary.get("resumed") else "unknown")
+        print(f"Status: {status}")
         for result in summary.get("results", []):
             line = f"  {result.get('component', '?'):<12} {result.get('outcome', '?')}"
             detail = result.get("failure") or result.get("reason")

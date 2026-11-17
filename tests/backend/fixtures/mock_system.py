@@ -13,13 +13,16 @@ $MOCK_STATE, and filesystem effects under $DSSA_ROOT:
   pkg_bins.json   {"pkg": ["name", ...]}      executables placed in $MOCK_STATE/bin
   units.json      {"unit": {"file_state", "active"}}
   fail.json       {"install": [pkg], "purge": bool, "purge_extra": [pkg],
-                   "start": [unit], "stop": [unit], "update": bool, "curl": bool}
+                   "start": [unit], "stop": [unit], "update": bool,
+                   "update_from": n (fail the nth and later updates), "curl": bool,
+                   "crash_on_install": [pkg] (kill the detached DSSA run's session)}
   key.asc, fingerprint                        what curl downloads and gpg reports
   calls.log       one line per invocation
 """
 
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -59,6 +62,10 @@ def install(names):
         for dep in deps.get(name, []):
             packages.setdefault(dep, "1.0")
         save("packages.json", packages)
+        if name in load("fail.json", {}).get("crash_on_install", []):
+            packages[name] = "1.0"
+            save("packages.json", packages)
+            return crash_session()
         if fail("install", name):
             print(f"E: mock failure installing {name}", file=sys.stderr)
             return 100
@@ -76,6 +83,24 @@ def install(names):
             target.chmod(0o755)
     save("packages.json", packages)
     return 0
+
+
+def crash_session():
+    """Simulate a target crash: SIGKILL the whole detached run session.
+
+    Acts only when the session leader is a DSSA run bundle (setsid in
+    runner.sh), never on the test runner's own session.
+    """
+    sid = os.getsid(0)
+    try:
+        leader = Path(f"/proc/{sid}/cmdline").read_bytes().replace(b"\0", b" ")
+    except OSError:
+        leader = b""
+    if b"bundle.sh run" not in leader:
+        print("mock: refusing to crash a non-DSSA session", file=sys.stderr)
+        return 99
+    os.killpg(os.getpgid(0), signal.SIGKILL)
+    return 137
 
 
 def purge(names):
@@ -107,7 +132,17 @@ def positional(args):
 def apt_get(args):
     action = positional(args)[0]
     if action == "update":
-        return 100 if fail("update") else 0
+        if fail("update"):
+            return 100
+        # "update_from": N fails the Nth and later update calls.
+        start = load("fail.json", {}).get("update_from")
+        if start is not None:
+            calls = (STATE / "calls.log").read_text().splitlines()
+            count = sum(1 for line in calls if line.startswith("apt-get update"))
+            if count >= start:
+                print("E: mock failure refreshing lists", file=sys.stderr)
+                return 100
+        return 0
     if action == "install":
         return install(positional(args)[1:])
     if action in ("purge", "remove"):

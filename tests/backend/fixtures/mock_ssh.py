@@ -11,6 +11,7 @@ before running anything.
   MOCK_HOST_FP     its SHA256 fingerprint (printed with LogLevel=DEBUG1)
   MOCK_REMOTE_HOME directory used as the remote $HOME and cwd
   MOCK_SSH_LOG     one JSON line per call: options and command
+  MOCK_SSH_KILL_TTY  if set, a terminal (-t) session's client is killed
 """
 
 import json
@@ -71,6 +72,10 @@ def main(argv):
     if options.get("LogLevel") == "DEBUG1":
         print(f"debug1: Server host key: {presented[0]} {os.environ['MOCK_HOST_FP']}",
               file=sys.stderr)
+
+    if tty and os.environ.get("MOCK_SSH_KILL_TTY"):
+        # The laptop's ssh client is killed mid-session (a dropped link).
+        os.kill(os.getpid(), 9)
 
     home = os.environ["MOCK_REMOTE_HOME"]
     env = dict(os.environ, HOME=home)

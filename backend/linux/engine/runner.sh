@@ -43,6 +43,9 @@ _runner_emit_all() {
 
 _runner_retention() {
     local root dir
+    # Staged bundles normally live for seconds; old ones are leftovers.
+    find "$(_tx_state_dir)/stage" -mindepth 1 -maxdepth 1 -type f -name 'bundle.*' \
+        -mtime +"$DSSA_TX_RETENTION_DAYS" -delete 2>/dev/null || true
     root="$(_tx_state_dir)/runs"
     [[ -d "$root" ]] || return 0
     while IFS= read -r dir; do
@@ -65,6 +68,7 @@ runner_start() {
 
     run="$(_runner_dir "$plan_id")"
     mkdir -m 700 -- "$run" 2>/dev/null || {
+        rm -f -- "$bundle"
         _tx_fail "This plan has already been run on this server."
         printf 'DSSA_EXIT 2\n'
         return 2
@@ -81,7 +85,15 @@ runner_start() {
     # tail may stop before the last lines are read; nothing is lost, the
     # whole log travels back below.
     _runner_emit_all "$plan_id"
-    printf 'DSSA_STATUS finished\n'
+    # No summary means the run process died before finishing (for
+    # example killed): its transaction is unfinished, not complete.
+    if [[ -f "$run/summary.json" ]]; then
+        printf 'DSSA_STATUS finished\n'
+    else
+        printf 'DSSA_STATUS interrupted\n'
+        echo "The run stopped before finishing. Check it with report; undo it with resume-rollback." >&2
+        rc=4  # needs review; never pass a signal code (>128) back to the laptop
+    fi
     printf 'DSSA_EXIT %s\n' "$rc"
     return "$rc"
 }

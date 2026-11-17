@@ -100,6 +100,46 @@ def allow_draft($allow):
   else . end;
 '
 
+# --- definition file permissions (4.35) ----------------------------------
+# Definitions decide what runs as root, so whoever can write them can
+# change that. A definition file or folder must be a real file/folder
+# (no symlink), owned by the user running DSSA or root, never writable
+# by others, and group-writable only when the group is the owner's own
+# private group with no other members (the usual umask 002 setup).
+
+_dssa_private_group() {
+    # Usage: _dssa_private_group GID OWNER_UID
+    local gid="$1" uid="$2" group_name members owner_name owner_gid others
+    IFS=: read -r group_name _ _ members < <(getent group "$gid") || return 1
+    [[ -z "$members" ]] || return 1
+    IFS=: read -r owner_name _ _ owner_gid _ < <(getent passwd "$uid") || return 1
+    [[ "$group_name" == "$owner_name" && "$owner_gid" == "$gid" ]] || return 1
+    others="$(getent passwd | awk -F: -v g="$gid" -v u="$uid" '$4 == g && $3 != u { print $1; exit }')"
+    [[ -z "$others" ]]
+}
+
+# Usage: dssa_check_definition_path PATH   (file or folder)
+dssa_check_definition_path() {
+    local path="$1" uid gid mode
+    if [[ -L "$path" || ! -e "$path" ]]; then
+        printf 'ERROR: Definition path missing or a symlink: %s\n' "$path" >&2
+        return 1
+    fi
+    read -r uid gid mode < <(stat -c '%u %g %a' -- "$path") || return 1
+    if [[ "$uid" != "$EUID" && "$uid" != 0 ]]; then
+        printf 'ERROR: Definition path is owned by another user: %s\n' "$path" >&2
+        return 1
+    fi
+    if (( (8#$mode & 8#002) != 0 )); then
+        printf 'ERROR: Definition path is writable by other users: %s (fix: chmod o-w)\n' "$path" >&2
+        return 1
+    fi
+    if (( (8#$mode & 8#020) != 0 )) && ! _dssa_private_group "$gid" "$uid"; then
+        printf 'ERROR: Definition path is writable by a shared group: %s (fix: chmod g-w)\n' "$path" >&2
+        return 1
+    fi
+}
+
 _dssa_sha256() {
     printf '%s' "$1" | sha256sum | awk '{ print "sha256:" $1 }'
 }
@@ -135,8 +175,11 @@ build_plan_request() {
         }
     done
 
+    dssa_check_definition_path "$definitions_dir" || return 2
     for file in "$definitions_dir"/*.json; do
-        [[ -f "$file" && ! -L "$file" ]] || continue
+        [[ -e "$file" || -L "$file" ]] || continue
+        dssa_check_definition_path "$file" || return 2
+        [[ -f "$file" ]] || continue
         content="$(cat -- "$file")"
         validate_component_definition "$content" || {
             printf 'ERROR: Invalid definition: %s\n' "${file##*/}" >&2

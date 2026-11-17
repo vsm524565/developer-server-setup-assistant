@@ -700,7 +700,12 @@ rollback_component() {
                     _issue "Package still installed: $pkg" remove_package "$pkg"
                 fi
             done
-            [[ "$removed" == true ]] || { ok=false; issues+=("Package removal command failed."); }
+            if [[ "$removed" != true ]]; then
+                ok=false
+                issues+=("Package removal command failed.")
+                # DSSA never repairs the package database itself (4.35 B).
+                [[ "$manager" == apt ]] && issues+=("If dpkg was interrupted, run 'sudo dpkg --configure -a' on the server, then remove the packages listed above by hand.")
+            fi
         fi
 
         # Safety net: nothing that existed before the run may be missing.
@@ -715,17 +720,17 @@ rollback_component() {
     fi
 
     # 3. Repository files: remove if absent before, restore a backup if not.
-    local file_entry path state backup
+    local file_entry path state backup repo_changed=false
     while IFS= read -r file_entry; do
         [[ -n "$file_entry" ]] || continue
         path="$(jq -r .path <<< "$file_entry")"
         state="$(jq -r .state <<< "$file_entry")"
         backup="$(jq -r '.backup // empty' <<< "$file_entry")"
         if [[ "$state" == absent ]]; then
-            if rm -f -- "$(_tx_path "$path")"; then _record remove_file "$path" ok
+            if rm -f -- "$(_tx_path "$path")"; then _record remove_file "$path" ok; repo_changed=true
             else _issue "Could not remove $path." remove_file "$path"; fi
         elif [[ -n "$backup" ]]; then
-            if cp -p -- "$tx/backups/$backup" "$(_tx_path "$path")"; then _record restore_file "$path" ok
+            if cp -p -- "$tx/backups/$backup" "$(_tx_path "$path")"; then _record restore_file "$path" ok; repo_changed=true
             else _issue "Could not restore $path." restore_file "$path"; fi
         fi
     done < <(jq -c '[.[] | select(.type == "apt_vendor_repository" and .phase == "intent")] | reverse[]
@@ -740,6 +745,18 @@ rollback_component() {
         fi
     done < <(jq -r '[.[] | select(.type == "apt_vendor_repository" and .phase == "intent"
                      and .pre.keyring_dir.state == "absent") | .pre.keyring_dir.path] | unique[]' <<< "$entries")
+
+    # Package lists from a repository that is gone stay until the next
+    # update (4.35 D). They are a cache, not installed state: a failed
+    # refresh is reported but does not make the rollback incomplete.
+    if [[ "$repo_changed" == true && "$manager" == apt ]]; then
+        if apt-get update >&2; then
+            _record refresh_lists apt ok
+        else
+            _record refresh_lists apt "not refreshed"
+            issues+=("Package lists not refreshed (apt-get update failed); run it when the server is online.")
+        fi
+    fi
 
     # 4. Created paths that did not exist when the run started.
     while IFS= read -r path; do

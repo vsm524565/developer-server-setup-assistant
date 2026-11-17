@@ -267,6 +267,8 @@ class ApplyTests(Lab):
         second = self.dssa("apply", "lab1", str(path), plan_digest(plan_bytes))
         self.assertEqual(second.returncode, 2)
         self.assertIn("already been run", second.stdout + second.stderr)
+        # 4.35: the refused bundle's root-only staged copy is removed too.
+        self.assertEqual(list((self.root / "var/lib/dssa/stage").iterdir()), [])
 
     def test_other_trusted_host_key_is_refused_before_anything_runs(self):
         plan_bytes, plan, path = self.plan("testtool")
@@ -276,6 +278,12 @@ class ApplyTests(Lab):
         self.assertEqual(result.returncode, 255)
         self.assertEqual(self.read_mock("packages.json"), before)
         self.assertFalse((self.root / "var/lib/dssa").exists())
+
+    def test_killed_ssh_client_means_completion_unknown(self):
+        plan_bytes, _, path = self.plan("testtool")
+        os.environ["MOCK_SSH_KILL_TTY"] = "1"
+        result = self.dssa("apply", "lab1", str(path), plan_digest(plan_bytes))
+        self.assertEqual(result.returncode, 255, "signal exits become 'connection failed'")
 
     def test_wrong_plan_digest_refused(self):
         plan_bytes, _, path = self.plan("testtool")
@@ -291,6 +299,20 @@ class ApplyTests(Lab):
         result = self.dssa("apply", "lab1", str(path), plan_digest(plan_bytes))
         self.assertEqual(result.returncode, 2)
         self.assertIn("changed since planning", result.stderr)
+
+    def test_world_writable_definition_refused_at_apply(self):
+        plan_bytes, _, path = self.plan("testtool")
+        (self.defs / "testtool.json").chmod(0o646)
+        result = self.dssa("apply", "lab1", str(path), plan_digest(plan_bytes))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("writable by other users", result.stderr)
+        self.assertFalse((self.root / "var/lib/dssa").exists(), "refused before connecting")
+
+    def test_world_writable_definition_refused_at_plan(self):
+        (self.defs / "othertool.json").chmod(0o646)
+        result = self.dssa("plan", "lab1", "testtool")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("writable by other users", result.stderr)
 
     def test_failure_rolls_back_skips_dependent_and_continues(self):
         plan_bytes, plan, _ = self.plan("testapp", "othertool")
@@ -398,6 +420,26 @@ _tx_exec_packages_install {plan_id} testtool 1 apt '{{"type":"packages_install",
         self.approve(again_bytes)
         outcome, terminal = self.apply(again, again_bytes)
         self.assertEqual(outcome.exit_code, 0, terminal)
+
+    def test_crash_during_apply_reports_interrupted_then_resumes(self):
+        plan_bytes, plan, _ = self.plan("testtool")
+        self.approve(plan_bytes)
+        self.write_mock("fail.json", {"crash_on_install": ["testtool"]})
+        outcome, terminal = self.apply(plan, plan_bytes)
+        self.assertEqual(outcome.status, "interrupted", terminal)
+        self.assertEqual(outcome.exit_code, 4, "a killed run needs review")
+        self.assertIsNone(outcome.summary)
+        self.assertIn("testtool", self.read_mock("packages.json"))
+
+        key = plan["target"]["host_key_sha256"]
+        report = run.report("lab1", plan["plan_id"], key, out=io.BytesIO())
+        self.assertEqual(report.status, "interrupted")
+
+        self.write_mock("fail.json", {})
+        resumed = run.resume_rollback("lab1", plan["plan_id"], key, out=io.BytesIO())
+        self.assertEqual(resumed.exit_code, 0)
+        self.assertEqual(resumed.summary["results"][0]["outcome"], "failed_rolled_back")
+        self.assertNotIn("testtool", self.read_mock("packages.json"))
 
     def test_report_after_a_finished_run(self):
         plan_bytes, plan, _ = self.plan("testtool")
