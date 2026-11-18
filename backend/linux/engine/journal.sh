@@ -12,7 +12,8 @@
 #     alone. Undo actions are idempotent, so an interrupted step is
 #     treated as possibly applied.
 #   - Rollback order: stop/disable new units, remove new packages,
-#     remove repository files, remove created paths, daemon-reload, and
+#     remove repository files, remove created paths, reload firewalld
+#     when its saved config changed, daemon-reload, and
 #     only if all of that succeeded restore pre-existing unit states.
 #   - Upgraded pre-existing packages are reported, never downgraded.
 #   - All command output goes to stderr; public functions print at most
@@ -26,7 +27,7 @@
 
 DSSA_TX_RETENTION_DAYS=30
 DSSA_PLAN_ID_PATTERN='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-DSSA_SUPPORTED_STEPS=" package_metadata_refresh packages_install apt_vendor_repository service_enable service_start "
+DSSA_SUPPORTED_STEPS=" package_metadata_refresh packages_install apt_vendor_repository dnf_vendor_repository firewalld_reload service_enable service_start "
 # Hooks a definition may name. Hook files (engine/hooks/*.sh) register
 # theirs here, so a definition can never call an arbitrary engine function.
 DSSA_HOOKS="${DSSA_HOOKS:- }"
@@ -71,6 +72,34 @@ tx_package_set() {
             _tx_fail "Unsupported package manager."
             ;;
     esac
+}
+
+# Every installed version, one "name.arch<TAB>epoch:version-release" line
+# each, sorted (4.36, dnf only). Unlike tx_package_set this keeps
+# packages installed side by side, such as several kernels. apt has one
+# version per package name, so it prints nothing there.
+tx_package_versions() {
+    [[ "$1" == dnf ]] || return 0
+    rpm -qa --qf '%{NAME}.%{ARCH}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\n' 2>/dev/null |
+        grep -v '^gpg-pubkey\.' | LC_ALL=C sort -u
+}
+
+# Versions added side by side: in AFTER but not BEFORE, for a name.arch
+# that BEFORE already had, while every BEFORE version of it is still
+# installed (a new kernel next to the old one, not an upgrade).
+# Usage: _tx_added_versions BEFORE_FILE AFTER_FILE; prints JSON
+# [{package, version}].
+_tx_added_versions() {
+    jq -cn --rawfile b "$1" --rawfile a "$2" '
+        def lines: split("\n") | map(select(length > 0));
+        ($b | lines) as $B | ($a | lines) as $A
+        | (reduce $A[] as $l ({}; .[$l] = true)) as $inA
+        | (reduce $B[] as $l ({}; .[$l] = true)) as $inB
+        | (reduce $B[] as $l ({}; .[$l | split("\t")[0]] += [$l])) as $old
+        | [$A[] | select($inB[.] != true)
+           | split("\t") as [$n, $v]
+           | select($old[$n] != null and all($old[$n][]; $inA[.] == true))
+           | {package: $n, version: $v}]'
 }
 
 # Unit-file state of one unit: enabled, disabled, static, masked,
@@ -303,8 +332,10 @@ _tx_exec_packages_install() {
     fi
     before="$tx/pkgsets/$component-$index.before.json"
     after="$tx/pkgsets/$component-$index.after.json"
+    local before_versions="${before%.json}.versions" after_versions="${after%.json}.versions" added='[]'
 
     (umask 077 && tx_package_set "$manager" > "$before") || { _tx_fail "Cannot record package state."; return 1; }
+    (umask 077 && tx_package_versions "$manager" > "$before_versions") || { _tx_fail "Cannot record package versions."; return 1; }
     tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" packages_install intent \
         "$(jq -cn --arg b "${before##*/}" \
             --argjson p "$(printf '%s\n' "${packages[@]}" | jq -R . | jq -cs .)" \
@@ -320,17 +351,23 @@ _tx_exec_packages_install() {
 
     # Record what actually changed, even after a partial failure.
     (umask 077 && tx_package_set "$manager" > "$after") || status=1
-    upgraded="$(jq -cn --slurpfile b "$before" --slurpfile a "$after" \
+    (umask 077 && tx_package_versions "$manager" > "$after_versions") || status=1
+    added="$(_tx_added_versions "$before_versions" "$after_versions")" || added='[]'
+    # A version added side by side is not an upgrade: rollback removes it.
+    upgraded="$(jq -cn --slurpfile b "$before" --slurpfile a "$after" --argjson added "$added" \
         '[$b[0] | to_entries[] | select($a[0][.key] != null and $a[0][.key] != .value)
+          | select(.key as $k | $added | any(.package == $k) | not)
           | {package: .key, before: .value, after: $a[0][.key]}]')" || upgraded='[]'
 
     if (( status != 0 )); then
         tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" packages_install failed null \
-            "$(jq -cn --arg a "${after##*/}" --argjson u "$upgraded" '{packages_after: $a, upgraded: $u}')")"
+            "$(jq -cn --arg a "${after##*/}" --argjson u "$upgraded" --argjson v "$added" \
+                '{packages_after: $a, upgraded: $u, added_versions: $v}')")"
         return 1
     fi
     tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" packages_install done null \
-        "$(jq -cn --arg a "${after##*/}" --argjson u "$upgraded" '{packages_after: $a, upgraded: $u}')")"
+        "$(jq -cn --arg a "${after##*/}" --argjson u "$upgraded" --argjson v "$added" \
+            '{packages_after: $a, upgraded: $u, added_versions: $v}')")"
 }
 
 _tx_backup_pre() {
@@ -406,6 +443,117 @@ _tx_exec_apt_vendor_repository() {
         { rm -f -- "$source_real.dssa-tmp"; _repo_failed "Cannot write repository source."; return 1; }
 
     tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" apt_vendor_repository done)"
+}
+
+# rpm's imported signing keys (gpg-pubkey entries) as a JSON array. The
+# package snapshot excludes them, so vendor-repository steps record them.
+tx_rpm_keys() {
+    local out
+    out="$(rpm -q gpg-pubkey --qf '%{NAME}-%{VERSION}-%{RELEASE}\n' 2>/dev/null)" || out=""
+    { grep -E '^gpg-pubkey-[0-9a-f]+-[0-9a-f]+$' <<< "$out" || true; } | sort -u | jq -R . | jq -cs .
+}
+
+# dnf vendor repository (4.36). DSSA writes its own one-stanza repo
+# file (never the vendor's downloaded .repo), so exactly what is trusted
+# is in the definition and the journal. dnf imports the checked key into
+# rpm at the first install; rollback removes keys that are new.
+_tx_exec_dnf_vendor_repository() {
+    local plan_id="$1" component="$2" index="$3" manager="$4" step="$5"
+    local repo_id baseurl key_url fingerprint key_path repo_path key_dir
+    local pre_key pre_repo pre_dir rpm_keys tmp actual key_real repo_real
+
+    [[ "$manager" == dnf ]] || { _tx_fail "DNF repository on non-DNF system."; return 1; }
+    repo_id="$(jq -r .repository_id <<< "$step")"
+    baseurl="$(jq -r .baseurl <<< "$step")"
+    key_url="$(jq -r .key_url <<< "$step")"
+    fingerprint="$(jq -r .key_fingerprint <<< "$step")"
+    key_path="$(jq -r .key_path <<< "$step")"
+    repo_path="$(jq -r .repo_path <<< "$step")"
+    key_dir="$(dirname -- "$key_path")"
+
+    # Every dnf system has its repo folder; DSSA never creates it.
+    [[ -d "$(_tx_path "$(dirname -- "$repo_path")")" ]] ||
+        { _tx_fail "Repository folder $(dirname -- "$repo_path") is missing; not a normal dnf system."; return 1; }
+
+    pre_key="$(_tx_backup_pre "$plan_id" "$key_path" "$component-$index-key")" || return 1
+    pre_repo="$(_tx_backup_pre "$plan_id" "$repo_path" "$component-$index-repo")" || return 1
+    if [[ -d "$(_tx_path "$key_dir")" ]]; then pre_dir=directory; else pre_dir=absent; fi
+    rpm_keys="$(tx_rpm_keys)" || { _tx_fail "Cannot read rpm signing keys."; return 1; }
+
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" dnf_vendor_repository intent \
+        "$(jq -cn --argjson k "$pre_key" --argjson r "$pre_repo" --arg d "$key_dir" --arg ds "$pre_dir" \
+            --argjson keys "$rpm_keys" \
+            '{key: $k, source: $r, keyring_dir: {path: $d, state: $ds}, rpm_keys: $keys}')")" || return 1
+
+    _dnf_repo_failed() {
+        tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" dnf_vendor_repository failed null \
+            "$(jq -cn --arg r "$1" '{reason: $r}')")"
+        _tx_fail "$1"
+    }
+
+    tmp="$(_tx_dir "$plan_id")/backups/$component-$index-download"
+    (umask 077 && curl -fsSL --proto '=https' --connect-timeout 10 --max-time 60 -o "$tmp" -- "$key_url" >&2) ||
+        { _dnf_repo_failed "Signing key download failed."; return 1; }
+    actual="$(gpg --batch --show-keys --with-colons -- "$tmp" 2>/dev/null |
+        awk -F: '$1 == "fpr" { print $10; exit }')"
+    [[ "$actual" == "$fingerprint" ]] ||
+        { _dnf_repo_failed "Signing key fingerprint mismatch."; return 1; }
+
+    key_real="$(_tx_path "$key_path")"
+    repo_real="$(_tx_path "$repo_path")"
+    install -d -m 0755 -- "$(_tx_path "$key_dir")" ||
+        { _dnf_repo_failed "Cannot create key directory."; return 1; }
+    install -m 0644 -- "$tmp" "$key_real" ||
+        { _dnf_repo_failed "Cannot install signing key."; return 1; }
+
+    {
+        printf '[%s]\n' "$repo_id"
+        printf 'name=%s (managed by DSSA)\n' "$repo_id"
+        printf 'baseurl=%s\n' "$baseurl"
+        printf 'enabled=1\n'
+        printf 'gpgcheck=1\n'
+        printf 'gpgkey=file://%s\n' "$key_path"
+    } > "$repo_real.dssa-tmp" && chmod 0644 -- "$repo_real.dssa-tmp" &&
+        mv -f -- "$repo_real.dssa-tmp" "$repo_real" ||
+        { rm -f -- "$repo_real.dssa-tmp"; _dnf_repo_failed "Cannot write repository file."; return 1; }
+
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" dnf_vendor_repository done)"
+}
+
+# firewalld reads which iptables backends exist only when it starts or
+# reloads. When this run installed one of the listed packages (iptables-nft
+# for Docker on EL) while firewalld was running, reload it so the next
+# service can use firewalld's direct rules (4.36). The reload is not
+# undone: it only loads firewalld's saved configuration.
+_tx_exec_firewalld_reload() {
+    local plan_id="$1" component="$2" index="$3" manager="$4" step="$5"
+    local snapshot active=inactive reload=false pkg
+    local -a added=()
+    snapshot="$(_tx_dir "$plan_id")/snapshot.json"
+
+    systemctl is-active --quiet firewalld.service 2>/dev/null && active=active
+    while IFS= read -r pkg; do
+        [[ -n "$pkg" ]] || continue
+        jq -e --arg p "$pkg" '.packages | has($p) | not' "$snapshot" >/dev/null 2>&1 || continue
+        package_is_installed "$manager" "$pkg" >/dev/null 2>&1 && added+=("$pkg")
+    done < <(jq -r '.when_packages_added[]' <<< "$step")
+    [[ "$active" == active && ${#added[@]} -gt 0 ]] && reload=true
+
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" firewalld_reload intent \
+        "$(jq -cn --arg s "$active" --argjson r "$reload" \
+            --argjson a "$(printf '%s\n' "${added[@]}" | jq -R 'select(length > 0)' | jq -cs .)" \
+            '{firewalld: $s, packages_added: $a, reload: $r}')")" || return 1
+
+    if [[ "$reload" == true ]]; then
+        printf 'firewalld: reloading so it sees the newly installed %s\n' "${added[*]}" >&2
+        firewall-cmd --reload >&2 ||
+            { tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" firewalld_reload failed)"; return 1; }
+    elif [[ "$active" != active ]]; then
+        echo "firewalld: not running; no reload needed" >&2
+    else
+        echo "firewalld: no listed package was added by this run; no reload needed" >&2
+    fi
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" firewalld_reload done)"
 }
 
 _tx_exec_service() {
@@ -534,6 +682,8 @@ apply_component() {
             package_metadata_refresh) _tx_exec_metadata_refresh "$plan_id" "$component" "$index" "$manager" ;;
             packages_install) _tx_exec_packages_install "$plan_id" "$component" "$index" "$manager" "$step" ;;
             apt_vendor_repository) _tx_exec_apt_vendor_repository "$plan_id" "$component" "$index" "$manager" "$step" ;;
+            dnf_vendor_repository) _tx_exec_dnf_vendor_repository "$plan_id" "$component" "$index" "$manager" "$step" ;;
+            firewalld_reload) _tx_exec_firewalld_reload "$plan_id" "$component" "$index" "$manager" "$step" ;;
             service_enable|service_start) _tx_exec_service "$plan_id" "$component" "$index" "$type" "$step" ;;
         esac || { failed_step="$index"; failure="Step $((index + 1)) ($type) failed."; break; }
     done
@@ -680,16 +830,51 @@ rollback_component() {
             jq -Rr --slurpfile snap "$snapshot" --argjson current "$current" \
                 'select(length > 0 and $snap[0].packages[.] == null and $current[.] != null)'
         )"
-        if [[ -n "$new_packages" ]]; then
-            local -a remove=()
-            mapfile -t remove <<< "$new_packages"
+
+        # 2b. dnf: versions installed side by side during the run (a new
+        #     kernel next to the old one), never the running kernel (4.36).
+        local -a remove=() remove_versions=() version_labels=()
+        [[ -n "$new_packages" ]] && mapfile -t remove <<< "$new_packages"
+        if [[ "$manager" == dnf ]]; then
+            local versions_now="$tx/pkgsets/rollback-$component.now.versions" before_file vfile afile
+            local running name_arch version label
+            running="$(uname -r 2>/dev/null)" || running=""
+            (umask 077 && tx_package_versions dnf > "$versions_now") || : > "$versions_now"
+            while IFS=$'\t' read -r name_arch version; do
+                [[ -n "$name_arch" ]] || continue
+                label="${name_arch%.*}-${version}.${name_arch##*.}"
+                if [[ -n "$running" && "${version#*:}.${name_arch##*.}" == "$running" ]]; then
+                    _issue "Not removing $label: it is the running kernel." remove_version "$label"
+                    continue
+                fi
+                remove_versions+=("$label")
+                version_labels+=("$name_arch"$'\t'"$version")
+            done < <(
+                jq -r '[.[] | select(.type == "packages_install" and .phase == "intent") | .pre.packages_before]
+                       | unique | .[]' <<< "$entries" |
+                while IFS= read -r before_file; do
+                    vfile="$tx/pkgsets/${before_file%.json}.versions"
+                    [[ -f "$vfile" ]] || continue   # journal from before 4.36
+                    afile="$tx/pkgsets/${before_file%.before.json}.after.versions"
+                    [[ -f "$afile" ]] || afile="$versions_now"   # interrupted step
+                    _tx_added_versions "$vfile" "$afile"
+                done | jq -rs --rawfile now "$versions_now" '
+                    ($now | split("\n") | map(select(length > 0))
+                     | reduce .[] as $l ({}; .[$l] = true)) as $installed
+                    | [.[][]] | unique[]
+                    | select($installed[.package + "\t" + .version] == true)
+                    | [.package, .version] | @tsv'
+            )
+        fi
+
+        if (( ${#remove[@]} > 0 || ${#remove_versions[@]} > 0 )); then
             local removed=true
             case "$manager" in
                 apt) DEBIAN_FRONTEND=noninteractive apt-get purge -y -- "${remove[@]}" >&2 || removed=false ;;
                 # Never let dnf remove "unneeded" dependencies: they may
                 # have been installed before the run.
-                dnf) dnf remove -y --setopt=clean_requirements_on_remove=False -- "${remove[@]}" >&2 ||
-                         removed=false ;;
+                dnf) dnf remove -y --setopt=clean_requirements_on_remove=False -- \
+                         "${remove[@]}" "${remove_versions[@]}" >&2 || removed=false ;;
             esac
             current="$(tx_package_set "$manager")" || current='{}'
             local pkg
@@ -700,6 +885,17 @@ rollback_component() {
                     _issue "Package still installed: $pkg" remove_package "$pkg"
                 fi
             done
+            if (( ${#remove_versions[@]} > 0 )); then
+                local now_text i
+                now_text="$(tx_package_versions dnf)" || now_text=""
+                for i in "${!remove_versions[@]}"; do
+                    if grep -qxF -- "${version_labels[$i]}" <<< "$now_text"; then
+                        _issue "Version still installed: ${remove_versions[$i]}" remove_version "${remove_versions[$i]}"
+                    else
+                        _record remove_version "${remove_versions[$i]}" ok
+                    fi
+                done
+            fi
             if [[ "$removed" != true ]]; then
                 ok=false
                 issues+=("Package removal command failed.")
@@ -733,7 +929,8 @@ rollback_component() {
             if cp -p -- "$tx/backups/$backup" "$(_tx_path "$path")"; then _record restore_file "$path" ok; repo_changed=true
             else _issue "Could not restore $path." restore_file "$path"; fi
         fi
-    done < <(jq -c '[.[] | select(.type == "apt_vendor_repository" and .phase == "intent")] | reverse[]
+    done < <(jq -c '[.[] | select((.type == "apt_vendor_repository" or .type == "dnf_vendor_repository")
+                                  and .phase == "intent")] | reverse[]
                     | .pre.source, .pre.key' <<< "$entries")
 
     # Keyring directories that did not exist before: remove only if empty.
@@ -743,8 +940,25 @@ rollback_component() {
             if rmdir -- "$(_tx_path "$path")" 2>/dev/null; then _record remove_directory "$path" ok
             else _issue "Directory $path is not empty; left in place." remove_directory "$path"; fi
         fi
-    done < <(jq -r '[.[] | select(.type == "apt_vendor_repository" and .phase == "intent"
-                     and .pre.keyring_dir.state == "absent") | .pre.keyring_dir.path] | unique[]' <<< "$entries")
+    done < <(jq -r '[.[] | select((.type == "apt_vendor_repository" or .type == "dnf_vendor_repository")
+                     and .phase == "intent" and .pre.keyring_dir.state == "absent")
+                     | .pre.keyring_dir.path] | unique[]' <<< "$entries")
+
+    # rpm signing keys imported since the first dnf vendor step (4.36 B).
+    local keys_before keys_now key
+    keys_before="$(jq -c '[.[] | select(.type == "dnf_vendor_repository" and .phase == "intent")]
+                          | if length == 0 then null else .[0].pre.rpm_keys end' <<< "$entries")"
+    if [[ "$keys_before" != null ]]; then
+        if keys_now="$(tx_rpm_keys)"; then
+            while IFS= read -r key; do
+                [[ "$key" =~ ^gpg-pubkey-[0-9a-f]+-[0-9a-f]+$ ]] || continue
+                if rpm -e "$key" >&2; then _record remove_rpm_key "$key" ok
+                else _issue "Could not remove rpm signing key $key." remove_rpm_key "$key"; fi
+            done < <(jq -rn --argjson b "$keys_before" --argjson n "$keys_now" '$n - $b | .[]')
+        else
+            _issue "Cannot read rpm signing keys; imported keys not removed." remove_rpm_key "(unknown)"
+        fi
+    fi
 
     # Package lists from a repository that is gone stay until the next
     # update (4.35 D). They are a cache, not installed state: a failed
@@ -759,6 +973,7 @@ rollback_component() {
     fi
 
     # 4. Created paths that did not exist when the run started.
+    local firewalld_changed=false
     while IFS= read -r path; do
         [[ -n "$path" ]] || continue
         local snap_state real
@@ -774,9 +989,23 @@ rollback_component() {
             _issue "Refusing to remove protected path $path." remove_path "$path"
             continue
         fi
-        if rm -rf --one-file-system -- "$real"; then _record remove_path "$path" ok
+        if rm -rf --one-file-system -- "$real"; then
+            _record remove_path "$path" ok
+            [[ "$path" == /etc/firewalld/* ]] && firewalld_changed=true
         else _issue "Could not remove $path." remove_path "$path"; fi
     done < <(jq -r '[.[] | select(.phase == "component_begin") | .created_paths[]] | unique[]' <<< "$entries")
+
+    # 4b. firewalld keeps a removed zone or policy (Docker's "docker" zone)
+    #     until it reloads, and this run may have reloaded it to add rules
+    #     for a service that is now gone. Load the saved config again (4.36).
+    jq -e '[.[] | select(.type == "firewalld_reload")] as $f
+           | any($f[]; .phase == "intent" and .pre.reload == true
+                 and (.step as $i | any($f[]; .step == $i and .phase == "done")))' \
+        <<< "$entries" >/dev/null 2>&1 && firewalld_changed=true
+    if [[ "$firewalld_changed" == true ]] && systemctl is-active --quiet firewalld.service 2>/dev/null; then
+        if firewall-cmd --reload >&2; then _record reload firewalld ok
+        else _issue "firewalld reload failed; its running rules may still include the removed zone." reload firewalld; fi
+    fi
 
     # 5. Managed files: no executor yet, so nothing to restore.
 

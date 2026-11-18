@@ -345,19 +345,47 @@ class ApplyTests(Lab):
         self.assertNotIn("testtool", self.read_mock("packages.json"))
 
     def test_drift_skips_component_and_dependents(self):
+        self.write_mock("packages.json", {"base-files": "1.0", "testtool": "1.0"})
         plan_bytes, plan, _ = self.plan("testapp", "othertool")
+        self.assertEqual(plan["steps"][0]["action"], "SKIP")
         self.approve(plan_bytes)
-        # Someone installs testtool by hand between approval and apply.
-        packages = self.read_mock("packages.json")
-        packages["testtool"] = "1.0"
-        self.write_mock("packages.json", packages)
+        # Someone removes testtool by hand between approval and apply.
+        self.write_mock("packages.json", {"base-files": "1.0"})
         outcome, terminal = self.apply(plan, plan_bytes)
         self.assertEqual(outcome.exit_code, 3, terminal)
         self.assertEqual(self.outcomes(outcome), {
             "testtool": "drift_skipped", "testapp": "not_attempted", "othertool": "installed"})
         drift = outcome.summary["results"][0]
-        self.assertEqual((drift["planned"]["action"], drift["now"]["action"]), ("INSTALL", "SKIP"))
+        self.assertEqual((drift["planned"]["action"], drift["now"]["action"]), ("SKIP", "INSTALL"))
         self.assertNotIn("testapp", self.read_mock("packages.json"))
+
+    def test_install_now_present_is_verified_not_drift(self):
+        plan_bytes, plan, _ = self.plan("testapp", "othertool")
+        self.approve(plan_bytes)
+        # Someone installs testtool by hand: doing less than approved is allowed.
+        packages = self.read_mock("packages.json")
+        packages["testtool"] = "1.0"
+        self.write_mock("packages.json", packages)
+        bin_path = self.state / "bin/testtool"
+        bin_path.write_text("#!/bin/sh\necho mock\n")
+        bin_path.chmod(0o755)
+        outcome, terminal = self.apply(plan, plan_bytes)
+        self.assertEqual(outcome.exit_code, 0, terminal)
+        self.assertEqual(self.outcomes(outcome), {
+            "testtool": "verified", "testapp": "installed", "othertool": "installed"})
+        self.assertIn("already installed at re-check", terminal)
+        self.assertIn("verified only", outcome.summary["results"][0]["note"])
+
+    def test_package_pulled_in_by_earlier_component_is_verified(self):
+        # Like Docker pulling in the Compose plugin as an apt Recommends.
+        self.write_mock("deps.json", {"testtool": ["testapp"]})
+        plan_bytes, plan, _ = self.plan("testapp")
+        self.assertEqual([(s["component"], s["action"]) for s in plan["steps"]],
+                         [("testtool", "INSTALL"), ("testapp", "INSTALL")])
+        self.approve(plan_bytes)
+        outcome, terminal = self.apply(plan, plan_bytes)
+        self.assertEqual(outcome.exit_code, 0, terminal)
+        self.assertEqual(self.outcomes(outcome), {"testtool": "installed", "testapp": "verified"})
 
     def test_verification_only_plan_runs_without_approval(self):
         self.write_mock("packages.json", {"base-files": "1.0", "testtool": "1.0"})
@@ -523,6 +551,26 @@ class MainTests(Lab):
              mock.patch("sys.stdout", new_callable=io.StringIO):
             plan_id = main.step_plan("lab1", ["drafttool"], True, None)
         self.assertTrue((run.plans_dir() / f"{plan_id}.json").exists())
+
+    def test_stale_verification_only_plan_shows_the_real_reason(self):
+        self.write_mock("packages.json", {"base-files": "1.0", "testtool": "1.0"})
+        bin_path = self.state / "bin/testtool"
+        bin_path.write_text("#!/bin/sh\necho mock\n")
+        bin_path.chmod(0o755)
+        plan_bytes, plan, path = self.plan("testtool")
+        stale = json.loads(plan_bytes)
+        stale["created_at"] = "2000-01-01T00:00:00Z"
+        path.write_bytes(json.dumps(stale).encode())
+        with mock.patch.object(run, "load_plan",
+                               return_value=(json.dumps(stale).encode(), stale, path)), \
+             mock.patch.object(run, "apply_plan") as apply_plan, \
+             mock.patch.object(self.main, "target_host", return_value={"host": HOST}), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            code = self.main.step_apply(plan["plan_id"], None)
+        self.assertEqual(code, 2)
+        apply_plan.assert_not_called()
+        self.assertIn("older than 30 minutes", stdout.getvalue())
+        self.assertNotIn("No approval exists", stdout.getvalue())
 
     def test_guided_session_end_to_end(self):
         # targets: 1 = lab1; components sorted: drafttool othertool testapp testtool

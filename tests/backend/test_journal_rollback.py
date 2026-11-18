@@ -24,7 +24,7 @@ SOURCES = [
     ROOT / "backend/linux/engine/definitions.sh",
     ROOT / "backend/linux/engine/journal.sh",
 ]
-TOOLS = ("apt-get", "dnf", "dpkg-query", "dpkg", "rpm", "systemctl", "curl", "gpg")
+TOOLS = ("apt-get", "dnf", "dpkg-query", "dpkg", "rpm", "systemctl", "curl", "gpg", "firewall-cmd")
 FPR = "0123456789ABCDEF0123456789ABCDEF01234567"
 PLAN_A = "11111111-1111-4111-8111-111111111111"
 PLAN_B = "22222222-2222-4222-8222-222222222222"
@@ -139,9 +139,10 @@ class FakeServer(unittest.TestCase):
             text=True, capture_output=True, timeout=60, env=env, check=False,
         )
 
-    def apply(self, definition, variant_id, plan_id=PLAN_A, manager="apt"):
+    def apply(self, definition, variant_id, plan_id=PLAN_A, manager="apt", prelude="", paths=PATHS):
         result = self.bash(f"""
-begin_transaction {plan_id} {manager} {shlex.quote(PATHS)} || exit 90
+{prelude}
+begin_transaction {plan_id} {manager} {shlex.quote(paths)} || exit 90
 result="$(apply_component {plan_id} {manager} {shlex.quote(json.dumps(definition))} {variant_id})"
 rc=$?
 end_transaction {plan_id} "[${{result:-null}}]" || exit 91
@@ -283,6 +284,279 @@ class AlreadyInstalledTests(FakeServer):
         calls = self.install_calls("dnf")
         self.assertEqual(len(calls), 1)
         self.assertNotIn("libshared", calls[0])
+
+
+def dnf_vendor_definition():
+    return {
+        "schema_version": "1.0", "id": "vendorapp", "display_name": "Vendor App",
+        "category": "tool", "depends_on": [],
+        "variants": [{
+            "variant_id": "dnf-vendor", "support": "supported",
+            "platform": {"package_manager": "dnf"},
+            "detection": {"packages_all": ["vendorapp"]},
+            "conflicts": {},
+            "steps": [
+                {"type": "dnf_vendor_repository", "repository_id": "vendor-stable",
+                 "baseurl": "https://repo.example.com/el/10/x86_64/stable",
+                 "key_url": "https://repo.example.com/gpg", "key_fingerprint": FPR,
+                 "key_path": "/etc/pki/rpm-gpg/vendor.asc",
+                 "repo_path": "/etc/yum.repos.d/vendor.repo"},
+                {"type": "package_metadata_refresh"},
+                {"type": "packages_install", "role": "main", "packages": ["vendorapp"]},
+                {"type": "service_enable", "unit": "vendorapp.service"},
+                {"type": "service_start", "unit": "vendorapp.service"},
+            ],
+            "verification": [
+                {"type": "packages_installed", "packages": ["vendorapp"]},
+                {"type": "service_active", "unit": "vendorapp.service"},
+            ],
+            "rollback": {"created_paths": []},
+        }],
+    }
+
+
+class DnfVendorRepositoryTests(FakeServer):
+    """dnf vendor repositories (4.36): DSSA's own repo file, rpm key undo."""
+
+    KEY = f"gpg-pubkey-{FPR[-8:].lower()}-5a1b2c3d"
+
+    def setUp(self):
+        super().setUp()
+        # A real EL system has these folders.
+        (self.root / "etc/yum.repos.d").mkdir(parents=True)
+        (self.root / "etc/pki/rpm-gpg").mkdir(parents=True)
+
+    def test_missing_repo_folder_is_refused(self):
+        (self.root / "etc/yum.repos.d").rmdir()
+        rc, result, run = self.apply_dnf()
+        self.assertEqual(rc, 3)
+        self.assertIn("not a normal dnf system", run.stderr)
+        self.assertFalse((self.root / "etc/yum.repos.d").exists())
+
+    def apply_dnf(self):
+        return self.apply(dnf_vendor_definition(), "dnf-vendor", manager="dnf")
+
+    def repo(self):
+        return self.root / "etc/yum.repos.d/vendor.repo"
+
+    def test_install_writes_its_own_repo_file_and_checked_key(self):
+        rc, result, run = self.apply_dnf()
+        self.assertEqual(rc, 0, run.stderr)
+        self.assertEqual(result["outcome"], "installed")
+        self.assertEqual(self.repo().read_text(), (
+            "[vendor-stable]\n"
+            "name=vendor-stable (managed by DSSA)\n"
+            "baseurl=https://repo.example.com/el/10/x86_64/stable\n"
+            "enabled=1\n"
+            "gpgcheck=1\n"
+            "gpgkey=file:///etc/pki/rpm-gpg/vendor.asc\n"))
+        self.assertEqual((self.root / "etc/pki/rpm-gpg/vendor.asc").read_text(), "mock key\n")
+        self.assertEqual(self.read("rpm_keys.json"), [self.KEY])
+        intent = next(e for e in self.journal()
+                      if e.get("type") == "dnf_vendor_repository" and e["phase"] == "intent")
+        self.assertEqual(intent["pre"]["rpm_keys"], [])
+        self.assertEqual(intent["pre"]["source"]["state"], "absent")
+
+    def test_rollback_removes_repo_key_file_and_rpm_key(self):
+        self.write("fail.json", {"start": ["vendorapp.service"]})
+        rc, result, _ = self.apply_dnf()
+        self.assertEqual(rc, 3)
+        self.assertTrue(result["rollback"]["complete"], result)
+        actions = {(a["action"], a["target"]): a["result"] for a in result["rollback"]["actions"]}
+        self.assertEqual(actions[("remove_file", "/etc/yum.repos.d/vendor.repo")], "ok")
+        self.assertEqual(actions[("remove_file", "/etc/pki/rpm-gpg/vendor.asc")], "ok")
+        self.assertEqual(actions[("remove_rpm_key", self.KEY)], "ok")
+        self.assertNotIn("refresh_lists", [a for a, _ in actions])
+        self.assertFalse(self.repo().exists())
+        self.assertEqual(self.read("rpm_keys.json"), [])
+        # rpm names packages name.arch in the snapshot; compare the start state.
+        self.assertEqual(self.read("packages.json"), INITIAL_PACKAGES)
+
+    def test_key_present_before_the_run_is_kept(self):
+        self.write("rpm_keys.json", [self.KEY])
+        self.write("fail.json", {"start": ["vendorapp.service"]})
+        rc, result, _ = self.apply_dnf()
+        self.assertEqual(rc, 3)
+        self.assertEqual(self.read("rpm_keys.json"), [self.KEY])
+        self.assertNotIn("remove_rpm_key", [a["action"] for a in result["rollback"]["actions"]])
+
+    def test_failed_key_removal_makes_rollback_incomplete(self):
+        self.write("fail.json", {"start": ["vendorapp.service"], "rpm_e": True})
+        rc, result, _ = self.apply_dnf()
+        self.assertEqual(rc, 4)
+        self.assertTrue(any("signing key" in i for i in result["rollback"]["issues"]))
+
+    def test_fingerprint_mismatch_writes_nothing(self):
+        (self.state / "fingerprint").write_text("F" * 40 + "\n")
+        rc, result, _ = self.apply_dnf()
+        self.assertEqual(rc, 3)
+        self.assertIn("Step 1 (dnf_vendor_repository) failed", result["failure"])
+        self.assertFalse(self.repo().exists())
+        self.assertFalse((self.root / "etc/pki/rpm-gpg/vendor.asc").exists())
+
+    def test_existing_repo_file_is_restored(self):
+        self.repo().write_text("original\n")
+        self.write("fail.json", {"install": ["vendorapp"]})
+        rc, _, _ = self.apply_dnf()
+        self.assertEqual(rc, 3)
+        self.assertEqual(self.repo().read_text(), "original\n")
+
+    def test_dnf_step_refused_on_apt(self):
+        definition = dnf_vendor_definition()
+        definition["variants"][0]["platform"]["package_manager"] = "apt"
+        result = self.bash(f"""
+source {ROOT}/backend/linux/engine/definitions.sh
+validate_component_definition {shlex.quote(json.dumps(definition))}
+""")
+        self.assertNotEqual(result.returncode, 0)
+
+
+class SideBySideVersionTests(FakeServer):
+    """Versions installed next to an existing one, like kernels (4.36)."""
+
+    def setUp(self):
+        super().setUp()
+        self.write("packages.json", {**INITIAL_PACKAGES, "kernel-core": "1.0"})
+        # Installing testtool pulls in a second kernel, as kernel-modules-extra
+        # did on alma10; libshared is a real upgrade.
+        self.write("side_deps.json", {"testtool": {"kernel-core": "2.0"}})
+        self.write("upgrades.json", {"libshared": "1.1"})
+
+    def definition(self):
+        d = simple_definition()
+        d["variants"][0]["platform"]["package_manager"] = "dnf"
+        return d
+
+    def test_new_version_is_journaled_not_reported_as_upgrade(self):
+        rc, result, run = self.apply(self.definition(), "apt-test", manager="dnf")
+        self.assertEqual(rc, 0, run.stderr)
+        self.assertEqual(result["upgraded_not_reverted"],
+                         [{"package": "libshared.x86_64", "before": "0:1.0", "after": "0:1.1"}])
+        done = next(e for e in self.journal()
+                    if e.get("type") == "packages_install" and e["phase"] == "done")
+        self.assertEqual(done["detail"]["added_versions"],
+                         [{"package": "kernel-core.x86_64", "version": "0:2.0"}])
+
+    def test_rollback_removes_the_added_version_only(self):
+        self.write("fail.json", {"install": ["testtool"]})
+        rc, result, run = self.apply(self.definition(), "apt-test", manager="dnf")
+        self.assertEqual(rc, 3, run.stderr)
+        self.assertTrue(result["rollback"]["complete"], result)
+        actions = {(a["action"], a["target"]): a["result"] for a in result["rollback"]["actions"]}
+        self.assertEqual(actions[("remove_version", "kernel-core-0:2.0.x86_64")], "ok")
+        self.assertEqual(self.read("side.json"), {"kernel-core": []})
+        self.assertEqual(self.read("packages.json")["kernel-core"], "1.0")
+
+    def test_running_kernel_is_never_removed(self):
+        self.write("fail.json", {"install": ["testtool"]})
+        rc, result, run = self.apply(self.definition(), "apt-test", manager="dnf",
+                                     prelude='uname() { [[ "$1" == -r ]] && echo 2.0.x86_64 || command uname "$@"; }')
+        self.assertEqual(rc, 4, run.stderr)
+        self.assertFalse(result["rollback"]["complete"])
+        self.assertTrue(any("running kernel" in i for i in result["rollback"]["issues"]), result)
+        self.assertEqual(self.read("side.json"), {"kernel-core": ["2.0"]})
+
+    def test_apt_records_no_versions(self):
+        rc, _, run = self.apply(simple_definition(), "apt-test")
+        self.assertEqual(rc, 0, run.stderr)
+        versions = self.tx() / "pkgsets"
+        self.assertEqual([f.read_text() for f in sorted(versions.glob("*.versions"))], ["", ""])
+
+
+class FirewalldTests(FakeServer):
+    """firewalld must see iptables installed by the run, and Docker's
+    saved zone must not outlive a rollback (4.36, alma10)."""
+
+    ZONE = "/etc/firewalld/zones/docker.xml"
+
+    def setUp(self):
+        super().setUp()
+        self.write("units.json", {**INITIAL_UNITS,
+                                  "firewalld.service": {"file_state": "enabled", "active": "active"}})
+        self.write("deps.json", {"vendorapp": ["iptables-nft"]})
+        self.write("start_files.json", {"vendorapp.service": [self.ZONE]})
+
+    def definition(self):
+        d = vendor_definition()
+        variant = d["variants"][0]
+        variant["steps"].insert(5, {"type": "firewalld_reload", "when_packages_added": ["iptables-nft"]})
+        variant["rollback"]["created_paths"].append(self.ZONE)
+        return d
+
+    def run_it(self):
+        paths = json.dumps(json.loads(PATHS) + [self.ZONE])
+        return self.apply(self.definition(), "apt-vendor", paths=paths)
+
+    def reloads(self):
+        return [l for l in (self.state / "calls.log").read_text().splitlines()
+                if l == "firewall-cmd --reload"]
+
+    def step(self):
+        return next(e for e in self.journal()
+                    if e.get("type") == "firewalld_reload" and e["phase"] == "intent")
+
+    def test_reloads_when_the_run_installed_iptables(self):
+        rc, result, run = self.run_it()
+        self.assertEqual(rc, 0, run.stderr)
+        self.assertEqual(self.step()["pre"],
+                         {"firewalld": "active", "packages_added": ["iptables-nft"], "reload": True})
+        self.assertEqual(len(self.reloads()), 1)
+
+    def test_no_reload_when_iptables_was_already_there(self):
+        self.write("packages.json", {**INITIAL_PACKAGES, "iptables-nft": "1.0"})
+        rc, _, run = self.run_it()
+        self.assertEqual(rc, 0, run.stderr)
+        self.assertFalse(self.step()["pre"]["reload"])
+        self.assertEqual(self.reloads(), [])
+
+    def test_no_reload_when_firewalld_is_not_running(self):
+        self.write("units.json", INITIAL_UNITS)
+        rc, _, run = self.run_it()
+        self.assertEqual(rc, 0, run.stderr)
+        self.assertEqual(self.step()["pre"]["firewalld"], "inactive")
+        self.assertEqual(self.reloads(), [])
+
+    def test_failed_reload_fails_the_step_and_rolls_back(self):
+        self.write("fail.json", {"firewalld_reload": True})
+        rc, result, run = self.run_it()
+        self.assertEqual(rc, 3, run.stderr)
+        self.assertEqual(result["failure"], "Step 6 (firewalld_reload) failed.")
+        self.assert_back_to_snapshot()
+
+    def test_rollback_removes_the_zone_and_reloads(self):
+        # Like alma10: the service writes its zone, then fails to start.
+        self.write("fail.json", {"start": ["vendorapp.service"]})
+        (self.root / "etc/firewalld/zones").mkdir(parents=True)
+        self.write("start_files.json", {})
+        rc, result, run = self.run_it()
+        self.assertEqual(rc, 3, run.stderr)
+        self.assertTrue(result["rollback"]["complete"], result)
+        actions = [(a["action"], a["target"], a["result"]) for a in result["rollback"]["actions"]]
+        self.assertIn(("reload", "firewalld", "ok"), actions)
+        self.assert_back_to_snapshot()
+
+    def test_zone_written_by_the_service_is_removed(self):
+        # The service starts and writes its zone; verification then fails.
+        d = self.definition()
+        d["variants"][0]["verification"].append({"type": "packages_installed", "packages": ["missing-pkg"]})
+        paths = json.dumps(json.loads(PATHS) + [self.ZONE])
+        rc, result, run = self.apply(d, "apt-vendor", paths=paths)
+        self.assertEqual(rc, 3, run.stderr)
+        self.assertFalse((self.root / self.ZONE.lstrip("/")).exists())
+        actions = [(a["action"], a["target"]) for a in result["rollback"]["actions"]]
+        self.assertIn(("remove_path", self.ZONE), actions)
+        self.assertLess(actions.index(("remove_path", self.ZONE)), actions.index(("reload", "firewalld")))
+
+    def test_zone_that_existed_before_is_left_in_place(self):
+        zone = self.root / self.ZONE.lstrip("/")
+        zone.parent.mkdir(parents=True)
+        zone.write_text("operator zone\n")
+        self.write("packages.json", {**INITIAL_PACKAGES, "iptables-nft": "1.0"})
+        self.write("fail.json", {"start": ["vendorapp.service"]})
+        rc, result, run = self.run_it()
+        self.assertEqual(rc, 3, run.stderr)
+        self.assertEqual(zone.read_text(), "operator zone\n")
+        self.assertNotIn("reload", [a["action"] for a in result["rollback"]["actions"]])
 
 
 class ListRefreshTests(FakeServer):

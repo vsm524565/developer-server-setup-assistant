@@ -58,13 +58,19 @@ def valid_step:
     and (.components | nonempty_strs(token_re))
     and (.architectures | nonempty_strs(token_re))
   elif .type == "dnf_vendor_repository" then
-    only(["type","repository_id","repo_url","key_url","key_fingerprint","repo_path"])
-    and has_all(["repository_id","repo_url","key_url","key_fingerprint","repo_path"])
-    and (.repository_id | str(id_re)) and (.repo_url | str(url_re))
+    # DSSA writes the repo file itself (4.36); both files stay in their
+    # fixed system folders and baseurl is a literal https URL.
+    only(["type","repository_id","baseurl","key_url","key_fingerprint","key_path","repo_path"])
+    and has_all(["repository_id","baseurl","key_url","key_fingerprint","key_path","repo_path"])
+    and (.repository_id | str(id_re)) and (.baseurl | str(url_re))
     and (.key_url | str(url_re)) and (.key_fingerprint | str(fpr_re))
-    and (.repo_path | safe_path)
+    and (.key_path | safe_path and str("^/etc/pki/rpm-gpg/[A-Za-z0-9._-]{1,128}$"))
+    and (.repo_path | safe_path and str("^/etc/yum\\.repos\\.d/[A-Za-z0-9._-]{1,128}\\.repo$"))
   elif .type == "service_enable" or .type == "service_start" then
     only(["type","unit"]) and (.unit | str(unit_re))
+  elif .type == "firewalld_reload" then
+    only(["type","when_packages_added"]) and has_all(["when_packages_added"])
+    and (.when_packages_added | nonempty_strs(pkg_re))
   elif .type == "managed_file" then
     only(["type","path","template","mode","owner"])
     and has_all(["path","template","mode","owner"])
@@ -115,7 +121,7 @@ def valid_platform:
 
 def valid_variant:
   only(["variant_id","support","platform","detection","conflicts",
-        "steps","verification","rollback","hooks"])
+        "steps","verification","rollback","hooks","requirements"])
   and has_all(["variant_id","support","platform","detection","conflicts",
                "steps","verification","rollback"])
   and (.variant_id | str(id_re))
@@ -127,6 +133,10 @@ def valid_variant:
   and (.verification | type == "array" and length > 0 and all(.[]; valid_check))
   and (.rollback | only(["created_paths"]) and (.created_paths | safe_paths))
   and ((.hooks // {}) | only(["precheck","verify"]) and all(.[]; str(hook_re)))
+  # 4.36: packages that must match the running kernel (dnf only).
+  and ((.requirements // {}) | only(["running_kernel_packages"])
+       and ((.running_kernel_packages // []) | strs(pkg_re)))
+  and (.requirements == null or .platform.package_manager == "dnf")
   and (((.hooks // {}) | [.[]]) as $declared
        | all((.steps + .verification)[] | select(.type == "hook"); .name as $n | $declared | index($n)))
   and (.platform.package_manager as $m
@@ -149,10 +159,16 @@ and ([.variants[].variant_id] | length == (unique | length))
 
 # Variant selection and the plan decision, as a pure jq library.
 DSSA_DEFINITION_DECIDE_JQ='
+# A version with a dot matches exactly ("24.04"). A version without a
+# dot also matches its point releases (4.36): "10" matches "10" and
+# "10.2", so an EL major release keeps matching after a minor update.
+def version_ok($v; $have):
+  $have == $v or (($v | contains(".") | not) and ($have | startswith($v + ".")));
+
 def os_ok($p):
   (.platform.os // null) as $os
   | $os == null
-    or any($os[]; .id == $p.os_id and any(.versions[]; . == $p.os_version));
+    or any($os[]; .id == $p.os_id and any(.versions[]; version_ok(.; $p.os_version)));
 
 def arch_ok($p):
   (.platform.architectures // null) as $a
@@ -204,10 +220,27 @@ def decide($p; $f; $panels; $ports):
       | [($c.packages // [])[] | select($f.packages[.] == true)
           | "Conflicting package requires review: \(.)"] as $package_conflicts
       | [$v.detection.packages_all[] | select($f.packages[.] == true)] as $present
+      # 4.36: a package built for one kernel (kernel-modules-extra) must
+      # exist for the RUNNING kernel. If the repositories only offer a
+      # newer build, dnf installs a whole new kernel and the component
+      # cannot work until a reboot. DSSA never reboots, so it blocks.
+      | [($v.requirements.running_kernel_packages // [])[] as $k
+         | (($f.running_kernel // {})[$k] // {checked: false}) as $r
+         | if $r.installed == true then empty
+           elif $r.checked != true then
+             "Could not check \($k) for the running kernel; plan again when the repositories are reachable."
+           elif $r.latest == null then
+             "\($k) is not available in the enabled repositories."
+           elif $r.latest == $r.release then empty
+           else
+             "Running kernel \($r.release) is older than the newest \($k) (\($r.latest)): installing would add a new kernel, and \($d.display_name) could not start until a reboot. Update the server and reboot first, then plan again."
+           end] as $kernel_blocks
       | if ($package_conflicts | length) > 0 then
           result("REVIEW"; $package_conflicts; $v)
         elif ($present | length) == ($v.detection.packages_all | length) then
           result("SKIP"; ["\($d.display_name) is installed; verification required."]; $v)
+        elif ($kernel_blocks | length) > 0 then
+          result("BLOCKED"; $kernel_blocks; $v)
         else
           ( (if ($c.partial_packages // false) and ($present | length) > 0
              then ["Partial \($d.display_name) installation requires review: \($present | join(", "))"]
@@ -319,6 +352,36 @@ dssa_unit_known() {
         awk '{ print $1 }' | grep -Fxq -- "$unit"
 }
 
+# State of one package that must match the running kernel (4.36, dnf).
+# Read-only, no root needed. Prints
+#   {"release": "<uname -r>", "installed": bool, "latest": "<v-r.arch>"|null, "checked": bool}
+# "latest" is the newest build the enabled repositories offer.
+dssa_running_kernel_package_state() {
+    local package="$1" release arch installed=false latest="" checked=true version
+
+    release="$(uname -r)" || release=""
+    arch="$(uname -m)" || arch=""
+    while IFS= read -r version; do
+        [[ -n "$release" && "$version" == "$release" ]] && installed=true
+    done < <(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' -- "$package" 2>/dev/null || true)
+
+    if [[ "$installed" != true ]]; then
+        if latest="$(timeout 120 dnf -q repoquery --latest-limit 1 --arch "$arch" \
+                --qf '%{version}-%{release}.%{arch}' -- "$package" 2>/dev/null)"; then
+            latest="$(head -n 1 <<< "$latest" | tr -d '[:space:]')"
+        else
+            checked=false
+            latest=""
+        fi
+    fi
+    [[ -n "$release" ]] || checked=false
+
+    jq -cn --arg release "$release" --argjson installed "$installed" \
+        --arg latest "$latest" --argjson checked "$checked" \
+        '{release: $release, installed: $installed,
+          latest: (if $latest == "" then null else $latest end), checked: $checked}'
+}
+
 # Facts that select a variant.
 collect_platform_facts() {
     local manager="$1"
@@ -348,6 +411,7 @@ collect_variant_facts() {
     local manager="$2"
     local item
     local -a packages=() executables=() paths=() patterns=() units=()
+    local kernel='{}' state
 
     while IFS= read -r item; do
         [[ -n "$item" ]] || continue
@@ -396,6 +460,12 @@ collect_variant_facts() {
         fi
     done < <(jq -r '(.conflicts.systemd_units // [])[]' <<< "$variant")
 
+    while IFS= read -r item; do
+        [[ -n "$item" ]] || continue
+        state="$(dssa_running_kernel_package_state "$item")" || state='{"checked": false}'
+        kernel="$(jq -c --arg k "$item" --argjson s "$state" '. + {($k): $s}' <<< "$kernel")"
+    done < <(jq -r '(.requirements.running_kernel_packages // [])[]' <<< "$variant")
+
     # Convert name=bool pairs into objects. Names never contain "=".
     _dssa_pairs() {
         jq -Rn '[inputs | select(length > 0) | capture("^(?<k>[^=]+)=(?<v>true|false)$")
@@ -408,8 +478,9 @@ collect_variant_facts() {
         --argjson paths "$(printf '%s\n' "${paths[@]}" | _dssa_pairs)" \
         --argjson patterns "$(printf '%s\n' "${patterns[@]}" | _dssa_pairs)" \
         --argjson units "$(printf '%s\n' "${units[@]}" | _dssa_pairs)" \
+        --argjson kernel "$kernel" \
         '{packages: $packages, executables: $executables, paths: $paths,
-          repository_patterns: $patterns, units: $units}'
+          repository_patterns: $patterns, units: $units, running_kernel: $kernel}'
 }
 
 # Pure decision: definition + facts -> plan entry. No probing.

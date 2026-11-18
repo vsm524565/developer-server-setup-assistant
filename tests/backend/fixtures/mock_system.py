@@ -2,25 +2,35 @@
 """Mock package manager and systemd for journal/rollback tests (4.33).
 
 One script, dispatched by the name it is invoked as (apt-get, dpkg-query,
-dpkg, rpm, dnf, systemctl, curl, gpg). State lives in JSON files under
+dpkg, rpm, dnf, systemctl, curl, gpg, firewall-cmd). State lives in JSON files under
 $MOCK_STATE, and filesystem effects under $DSSA_ROOT:
 
   packages.json   {"name": "version"}         installed packages
-  deps.json       {"pkg": ["dep", ...]}       pulled in on install
+  deps.json       {"pkg": ["dep", ...]}       pulled in on install (with their bins)
   upgrades.json   {"pkg": "new-version"}      applied when any install runs
   pkg_units.json  {"pkg": ["unit", ...]}      units a package provides
   pkg_paths.json  {"pkg": ["/path", ...]}     directories created on install
   pkg_bins.json   {"pkg": ["name", ...]}      executables placed in $MOCK_STATE/bin
+  side.json       {"pkg": ["version", ...]}   extra versions installed side by
+                                              side (rpm -qa lists them; kernels)
+  side_deps.json  {"pkg": {"name": "version"}} side versions added on install
   units.json      {"unit": {"file_state", "active"}}
+  start_files.json {"unit": ["/path", ...]}    files a unit writes when it starts
+                                              (dockerd adds a firewalld zone)
   fail.json       {"install": [pkg], "purge": bool, "purge_extra": [pkg],
                    "start": [unit], "stop": [unit], "update": bool,
                    "update_from": n (fail the nth and later updates), "curl": bool,
-                   "crash_on_install": [pkg] (kill the detached DSSA run's session)}
+                   "crash_on_install": [pkg] (kill the detached DSSA run's session),
+                   "firewalld_reload": bool}
   key.asc, fingerprint                        what curl downloads and gpg reports
+  rpm_keys.json   ["gpg-pubkey-…", ...]        rpm's imported signing keys; dnf
+                                              imports one at install when a
+                                              repo file names a gpgkey
   calls.log       one line per invocation
 """
 
 import json
+import re
 import os
 import signal
 import sys
@@ -58,9 +68,16 @@ def install(names):
     for package, version in load("upgrades.json", {}).items():
         if package in packages:
             packages[package] = version
+    side = load("side.json", {})
     for name in names:
+        for other, version in load("side_deps.json", {}).get(name, {}).items():
+            side.setdefault(other, []).append(version)
+        save("side.json", side)
         for dep in deps.get(name, []):
             packages.setdefault(dep, "1.0")
+            for binary in load("pkg_bins.json", {}).get(dep, []):
+                (STATE / "bin" / binary).write_text("#!/bin/sh\necho mock-version\n")
+                (STATE / "bin" / binary).chmod(0o755)
         save("packages.json", packages)
         if name in load("fail.json", {}).get("crash_on_install", []):
             packages[name] = "1.0"
@@ -104,8 +121,11 @@ def crash_session():
 
 
 def purge(names):
-    # DNF removals name packages as name.arch, as rpm -qa reports them.
-    names = [n[:-len(".x86_64")] if n.endswith(".x86_64") else n for n in names]
+    # DNF removals name packages as name.arch, as rpm -qa reports them,
+    # or one exact version as name-epoch:version-release.arch (4.36).
+    versioned = [re.match(r"^(.+)-\d+:(.+)\.x86_64$", n) for n in names]
+    names = [n[:-len(".x86_64")] if n.endswith(".x86_64") else n
+             for n, m in zip(names, versioned) if not m]
     if fail("purge"):
         print("E: mock failure removing packages", file=sys.stderr)
         return 100
@@ -114,6 +134,14 @@ def purge(names):
     # Simulate a package manager that also removes extra packages.
     for extra in load("fail.json", {}).get("purge_extra", []):
         packages.pop(extra, None)
+    side = load("side.json", {})
+    for match in filter(None, versioned):
+        name, version = match.groups()
+        if version in side.get(name, []):
+            side[name].remove(version)
+        elif packages.get(name) == version:
+            packages.pop(name)
+    save("side.json", side)
     for name in names:
         packages.pop(name, None)
         for unit in load("pkg_units.json", {}).get(name, []):
@@ -150,11 +178,27 @@ def apt_get(args):
     return 1
 
 
+def import_repo_keys():
+    """Like dnf with gpgcheck=1: import a configured repo's key once."""
+    repos = ROOT / "etc/yum.repos.d"
+    if not repos.is_dir():
+        return
+    names = any("gpgkey=file://" in f.read_text() for f in repos.glob("*.repo"))
+    if names:
+        fpr = (STATE / "fingerprint").read_text().strip().lower()
+        keys = load("rpm_keys.json", [])
+        key = f"gpg-pubkey-{fpr[-8:]}-5a1b2c3d"
+        if key not in keys:
+            keys.append(key)
+            save("rpm_keys.json", keys)
+
+
 def dnf(args):
     action = positional(args)[0]
     if action == "makecache":
         return 1 if fail("update") else 0
     if action == "install":
+        import_repo_keys()
         return install(positional(args)[1:])
     if action == "remove":
         return purge(positional(args)[1:])
@@ -176,9 +220,26 @@ def dpkg_query(args):
 
 def rpm(args):
     packages = load("packages.json", {})
+    if "-e" in args:
+        keys = load("rpm_keys.json", [])
+        names = positional(args)
+        if fail("rpm_e") or any(n not in keys for n in names):
+            print("error: package not installed", file=sys.stderr)
+            return 1
+        save("rpm_keys.json", [k for k in keys if k not in names])
+        return 0
+    if positional(args)[:1] == ["gpg-pubkey"]:
+        keys = load("rpm_keys.json", [])
+        if not keys:
+            print("package gpg-pubkey is not installed")
+            return 1
+        print("\n".join(keys))
+        return 0
     if "-qa" in args:
+        side = load("side.json", {})
         for name, version in sorted(packages.items()):
-            print(f"{name}.x86_64\t0:{version}")
+            for v in sorted(set([version] + side.get(name, []))):
+                print(f"{name}.x86_64\t0:{v}")
         return 0
     names = positional(args)
     return 0 if names and names[0] in packages else 1
@@ -221,6 +282,10 @@ def systemctl(args):
         return 1
     if action == "start":
         units[unit]["active"] = "active"
+        for name in load("start_files.json", {}).get(unit, []):
+            path = ROOT / name.lstrip("/")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"written by {unit}\n")
     elif action == "stop":
         units[unit]["active"] = "inactive"
     elif action == "enable":
@@ -255,9 +320,21 @@ def dpkg(args):
     return 1
 
 
+
+def firewall_cmd(args):
+    if args == ["--reload"]:
+        if fail("firewalld_reload"):
+            print("mock failure: firewall-cmd --reload", file=sys.stderr)
+            return 1
+        print("success")
+        return 0
+    return 2
+
+
 TOOLS = {
     "apt-get": apt_get, "dnf": dnf, "dpkg-query": dpkg_query, "rpm": rpm,
     "systemctl": systemctl, "curl": curl, "gpg": gpg, "dpkg": dpkg,
+    "firewall-cmd": firewall_cmd,
 }
 
 if __name__ == "__main__":

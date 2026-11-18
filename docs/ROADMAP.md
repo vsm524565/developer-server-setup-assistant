@@ -1225,3 +1225,32 @@ Design: `docs/design/hardening.md`.
       run on the target as 4; the terminal is reset after an abnormal ssh
       exit; resume results show `Status: resumed`. Regression 680/680,
       1 skipped.
+
+### Milestone 4.36 — Docker Everywhere + Compose — 2026-11-17
+
+Design: `docs/design/docker-everywhere.md`.
+
+- [x] Docker variants, one per OS release with literal repository values:
+      Ubuntu 22.04 (`jammy`), 24.04 (`noble`, supported since 4.34), 26.04
+      (`resolute`), Debian 13 (`trixie`), Alma/Rocky 10 (Docker's
+      `linux/centos/10` repository). New variants are `draft` until their
+      lab run.
+- [x] New allowlisted step `dnf_vendor_repository`: a fingerprint-checked
+      key and DSSA's own one-stanza `.repo` file. Rollback removes or
+      restores both and removes rpm signing keys imported during the run.
+- [x] `docker_compose` component: requires Docker, installs
+      `docker-compose-plugin`, verified by the read-only hook
+      `verify_docker_compose`.
+- [x] OS versions without a dot match their point releases (`10` → `10.2`).
+- [x] 16 new tests (per-platform decisions, EL conflicts, Compose, dnf
+      vendor executor and rollback); regression 696/696, 1 skipped.
+- [x] Found in the lab run and fixed (design §11): INSTALL already present
+      at re-check is verified, not drift; stale verification-only plans
+      show the real reason; EL running-kernel hold
+      (`requirements.running_kernel_packages`); dnf rollback removes
+      versions added side by side, never the running kernel; new step
+      `firewalld_reload` and rollback of Docker's firewalld zone/policy.
+      Regression 717/717, 1 skipped.
+- [x] Manual verification on all six VMs, 2026-11-18
+      (`docs/testing/manual-4.36-docker-everywhere.md`), then the passing
+      variants marked `supported`.

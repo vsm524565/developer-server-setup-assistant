@@ -84,7 +84,7 @@ def show_outcome(outcome, kind="apply"):
         print(f"Status: {status}")
         for result in summary.get("results", []):
             line = f"  {result.get('component', '?'):<12} {result.get('outcome', '?')}"
-            detail = result.get("failure") or result.get("reason")
+            detail = result.get("failure") or result.get("reason") or result.get("note")
             if detail:
                 line += f"  - {detail}"
             print(line)
@@ -170,6 +170,13 @@ def step_apply(plan_id, inventory):
 
     if check["passed"] and check["verification_only"]:
         print("Verification-only plan: no approval needed.")
+    elif not check["requires_approval"]:
+        # Nothing to install, so no approval could exist: show the real
+        # reason (e.g. a stale plan) instead of "No approval exists".
+        print("Apply refused: the plan failed its checks.")
+        for issue in check["issues"]:
+            print(f"  - {issue}")
+        return 2
     else:
         try:
             consume_approval(plan_id, keys, definitions_dir=DEFINITIONS_DIR)

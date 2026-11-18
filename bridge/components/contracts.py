@@ -35,6 +35,10 @@ TOKEN_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$")
 URL_RE = re.compile(r"^https://[A-Za-z0-9.-]+(/[A-Za-z0-9._~/-]*)?$")
 FINGERPRINT_RE = re.compile(r"^[0-9A-F]{40}$")
+# dnf vendor repositories (4.36): DSSA writes the repo file itself, so
+# both files live only in their fixed system folders.
+RPM_KEY_PATH_RE = re.compile(r"^/etc/pki/rpm-gpg/[A-Za-z0-9._-]{1,128}$")
+YUM_REPO_PATH_RE = re.compile(r"^/etc/yum\.repos\.d/[A-Za-z0-9._-]{1,128}\.repo$")
 HOOK_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 TEMPLATE_RE = re.compile(r"^[a-z0-9_-]+(/[a-z0-9_.-]+)*$")
 MODE_RE = re.compile(r"^0[0-7]{3}$")
@@ -170,6 +174,8 @@ class Variant:
     verification: Tuple[Action, ...]
     created_paths: Tuple[str, ...]
     hooks: Dict[str, str] = field(default_factory=dict)
+    # 4.36: packages that must exist for the running kernel (dnf only).
+    running_kernel_packages: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -221,12 +227,17 @@ STEP_TYPES = {
     "dnf_vendor_repository": (
         {
             "repository_id": lambda v, w: _text(v, w, ID_RE),
-            "repo_url": lambda v, w: _text(v, w, URL_RE),
+            "baseurl": lambda v, w: _text(v, w, URL_RE),
             "key_url": lambda v, w: _text(v, w, URL_RE),
             "key_fingerprint": lambda v, w: _text(v, w, FINGERPRINT_RE),
-            "repo_path": _path,
+            "key_path": lambda v, w: _path(_text(v, w, RPM_KEY_PATH_RE), w),
+            "repo_path": lambda v, w: _path(_text(v, w, YUM_REPO_PATH_RE), w),
         },
         {},
+    ),
+    # Reload firewalld when the run installed one of these packages (4.36).
+    "firewalld_reload": (
+        {"when_packages_added": _texts(PACKAGE_RE, allow_empty=False)}, {},
     ),
     "service_enable": ({"unit": lambda v, w: _text(v, w, UNIT_RE)}, {}),
     "service_start": ({"unit": lambda v, w: _text(v, w, UNIT_RE)}, {}),
@@ -367,10 +378,22 @@ def _variant(value, where):
             "variant_id", "support", "platform", "detection",
             "conflicts", "steps", "verification", "rollback",
         ),
-        optional=("hooks",),
+        optional=("hooks", "requirements"),
     )
 
     platform = _platform(value["platform"], f"{where}.platform")
+
+    running_kernel_packages = ()
+    if "requirements" in value:
+        requirements = _object(
+            value["requirements"], f"{where}.requirements",
+            optional=("running_kernel_packages",),
+        )
+        running_kernel_packages = _texts(PACKAGE_RE)(
+            requirements.get("running_kernel_packages", []),
+            f"{where}.requirements.running_kernel_packages")
+        if platform.package_manager != "dnf":
+            _fail(f"{where}.requirements", "requirements need package manager dnf")
 
     detection = _object(
         value["detection"], f"{where}.detection",
@@ -435,6 +458,7 @@ def _variant(value, where):
         created_paths=_paths(
             rollback["created_paths"], f"{where}.rollback.created_paths"),
         hooks=hooks,
+        running_kernel_packages=running_kernel_packages,
     )
 
 

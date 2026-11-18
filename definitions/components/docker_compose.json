@@ -1,0 +1,100 @@
+{
+  "schema_version": "1.0",
+  "id": "docker_compose",
+  "display_name": "Docker Compose",
+  "category": "container",
+  "depends_on": [
+    {
+      "id": "docker",
+      "required": true
+    }
+  ],
+  "variants": [
+    {
+      "variant_id": "apt-docker-plugin",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "docker-compose-plugin"
+        ]
+      },
+      "conflicts": {},
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "docker-compose-plugin"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "docker-compose-plugin"
+          ]
+        },
+        {
+          "type": "hook",
+          "name": "verify_docker_compose"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      },
+      "hooks": {
+        "verify": "verify_docker_compose"
+      }
+    },
+    {
+      "variant_id": "dnf-docker-plugin",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "docker-compose-plugin"
+        ]
+      },
+      "conflicts": {},
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "docker-compose-plugin"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "docker-compose-plugin"
+          ]
+        },
+        {
+          "type": "hook",
+          "name": "verify_docker_compose"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      },
+      "hooks": {
+        "verify": "verify_docker_compose"
+      }
+    }
+  ]
+}

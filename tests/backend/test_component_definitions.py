@@ -60,7 +60,7 @@ class RepositoryDefinitionTests(unittest.TestCase):
 
     def test_expected_components_are_defined(self):
         self.assertEqual(
-            sorted(self.definitions), ["docker", "git", "nginx"],
+            sorted(self.definitions), ["docker", "docker_compose", "git", "nginx"],
         )
 
     def test_git_and_docker_are_supported_nginx_is_draft(self):
@@ -70,7 +70,12 @@ class RepositoryDefinitionTests(unittest.TestCase):
             for definition in self.definitions.values()
         }
         self.assertEqual(support["git"], {"supported"})
-        self.assertEqual(support["docker"], {"supported"})
+        # Docker: ubuntu24 supported since 4.34; the 4.36 variants stay
+        # draft until each passes its lab run.
+        docker = {v.variant_id: v.support for v in self.definitions["docker"].variants}
+        self.assertEqual(docker.pop("ubuntu24-amd64-vendor"), "supported")
+        self.assertEqual(set(docker.values()), {"draft"})
+        self.assertEqual(support["docker_compose"], {"draft"})
         self.assertEqual(support["nginx"], {"draft"})
 
     def test_git_and_nginx_match_on_package_manager_only(self):
@@ -80,11 +85,51 @@ class RepositoryDefinitionTests(unittest.TestCase):
                 self.assertEqual(variant.platform.architectures, ())
 
     def test_docker_declares_its_os_requirement(self):
-        platform = self.definitions["docker"].variants[0].platform
-        self.assertEqual(platform.package_manager, "apt")
-        self.assertEqual(platform.os[0].os_id, "ubuntu")
-        self.assertEqual(platform.os[0].versions, ("24.04",))
-        self.assertEqual(platform.architectures, ("x86_64",))
+        # One variant per OS release, each with literal repository values (4.36 A).
+        expected = {
+            "ubuntu22-amd64-vendor": ("apt", [("ubuntu", ("22.04",))]),
+            "ubuntu24-amd64-vendor": ("apt", [("ubuntu", ("24.04",))]),
+            "ubuntu26-amd64-vendor": ("apt", [("ubuntu", ("26.04",))]),
+            "debian13-amd64-vendor": ("apt", [("debian", ("13",))]),
+            "el10-x86_64-vendor": ("dnf", [("almalinux", ("10",)), ("rocky", ("10",))]),
+        }
+        variants = {v.variant_id: v for v in self.definitions["docker"].variants}
+        self.assertEqual(set(variants), set(expected))
+        for variant_id, (manager, os_list) in expected.items():
+            platform = variants[variant_id].platform
+            self.assertEqual(platform.package_manager, manager, variant_id)
+            self.assertEqual([(o.os_id, o.versions) for o in platform.os], os_list, variant_id)
+            self.assertEqual(platform.architectures, ("x86_64",), variant_id)
+
+    def test_docker_el_requires_modules_for_the_running_kernel(self):
+        variants = {v.variant_id: v for v in self.definitions["docker"].variants}
+        self.assertEqual(variants["el10-x86_64-vendor"].running_kernel_packages,
+                         ("kernel-modules-extra",))
+        for variant_id, variant in variants.items():
+            if variant_id != "el10-x86_64-vendor":
+                self.assertEqual(variant.running_kernel_packages, (), variant_id)
+
+    def test_docker_reloads_firewalld_before_starting_on_el(self):
+        # firewalld must see iptables-nft before dockerd asks it for rules,
+        # and Docker's saved firewalld zone is removed on rollback (4.36).
+        for variant in self.definitions["docker"].variants:
+            types = [s.action_type for s in variant.steps]
+            self.assertIn("/etc/firewalld/zones/docker.xml", variant.created_paths, variant.variant_id)
+            self.assertIn("/etc/firewalld/policies/docker-forwarding.xml", variant.created_paths,
+                          variant.variant_id)
+            if variant.variant_id == "el10-x86_64-vendor":
+                reload = types.index("firewalld_reload")
+                self.assertEqual(variant.steps[reload].params,
+                                 {"when_packages_added": ("iptables-nft",)})
+                self.assertLess(types.index("packages_install"), reload)
+                self.assertLess(reload, types.index("service_enable"))
+            else:
+                self.assertNotIn("firewalld_reload", types, variant.variant_id)
+
+    def test_compose_requires_docker(self):
+        compose = self.definitions["docker_compose"]
+        self.assertEqual([(d.component_id, d.required) for d in compose.depends_on],
+                         [("docker", True)])
 
     def test_definitions_never_authorize_execution(self):
         for definition in self.definitions.values():
@@ -175,6 +220,23 @@ class RejectionTests(unittest.TestCase):
                 lambda d: d["variants"].append(copy.deepcopy(docker_variant(d))),
             "empty steps":
                 lambda d: docker_variant(d).update(steps=[]),
+            "kernel requirement on an apt variant":
+                lambda d: docker_variant(d).update(
+                    requirements={"running_kernel_packages": ["kernel-modules-extra"]}),
+            "unknown requirement":
+                lambda d: d["variants"][-1].update(requirements={"reboot": True}),
+            "firewalld reload without packages":
+                lambda d: d["variants"][-1]["steps"].insert(5, {"type": "firewalld_reload"}),
+            "firewalld reload with an unsafe package":
+                lambda d: d["variants"][-1]["steps"].insert(
+                    5, {"type": "firewalld_reload", "when_packages_added": ["x;reboot"]}),
+            "firewalld reload with an extra parameter":
+                lambda d: d["variants"][-1]["steps"].insert(
+                    5, {"type": "firewalld_reload", "when_packages_added": ["iptables-nft"],
+                        "zone": "docker"}),
+            "unsafe kernel package name":
+                lambda d: d["variants"][-1].update(
+                    requirements={"running_kernel_packages": ["kernel;reboot"]}),
         }
 
         for name, change in cases.items():

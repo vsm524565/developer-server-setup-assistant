@@ -11,6 +11,8 @@
 #   - Before each component its decision is re-checked on the live
 #     server. A component whose decision changed since approval (drift)
 #     does not run, nor do its required dependents; the rest continue.
+#     Exception: a planned INSTALL that is now SKIP (same variant) is
+#     verified only, since it does less than was approved (4.36).
 #   - A failed component is rolled back (4.33); its required dependents
 #     are not attempted; independent components continue.
 #   - rollback_incomplete or an engine error stops the whole run.
@@ -27,7 +29,7 @@ apply_plan() {
     local plan="$1" bundle="$2"
     local plan_id manager allow_draft definitions='{}' id content expected
     local paths results='[]' failed='[]' stop_reason="" step component action
-    local variant_id definition result rc entry panels ports now_key planned_key
+    local variant_id definition result rc entry panels ports now_key planned_key already_present
     local blockers count index
 
     _tx_require_privilege || return 2
@@ -114,7 +116,18 @@ apply_plan() {
         fi
         planned_key="$(jq -c '{variant_id, decision, action}' <<< "$step")"
         now_key="$(jq -c '{variant_id, decision, action}' <<< "${entry:-null}" 2>/dev/null)" || now_key=null
-        if [[ -z "$entry" || "$planned_key" != "$now_key" ]]; then
+        # An INSTALL that is now SKIP (same variant) is already in place,
+        # e.g. pulled in by an earlier component's install: verify it only.
+        # That does less than was approved, so it is not drift (4.36).
+        already_present=false
+        if [[ -n "$entry" ]] && jq -e --argjson p "$planned_key" --argjson n "$now_key" -n \
+                '$p.action == "INSTALL" and $p.decision == "INSTALL"
+                 and $n.action == "SKIP" and $n.decision == "SKIP"
+                 and $p.variant_id == $n.variant_id' >/dev/null; then
+            already_present=true
+            action=SKIP
+            printf 'Component %s: already installed at re-check; verifying only\n' "$component" >&2
+        elif [[ -z "$entry" || "$planned_key" != "$now_key" ]]; then
             result="$(jq -cn --arg c "$component" --argjson planned "$planned_key" \
                 --argjson now "${entry:-null}" \
                 '{component: $c, outcome: "drift_skipped",
@@ -131,6 +144,9 @@ apply_plan() {
         if [[ "$action" == SKIP ]]; then
             result="$(verify_component "$manager" "$definition" "$variant_id")"
             rc=$?
+            if [[ "$already_present" == true ]] && jq -e 'type == "object"' <<< "${result:-null}" >/dev/null 2>&1; then
+                result="$(jq -c '. + {note: "Planned as INSTALL, already installed at re-check; verified only."}' <<< "$result")"
+            fi
         else
             result="$(apply_component "$plan_id" "$manager" "$definition" "$variant_id" "$allow_draft")"
             rc=$?

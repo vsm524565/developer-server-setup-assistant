@@ -74,6 +74,7 @@ class Scenario:
         self, component, manager="apt", os_id="ubuntu", version="24.04",
         installed=(), executables=(), units=(), paths=(), repo_text="",
         panels=NO_PANELS, ports=NO_PORTS, arch="x86_64", dpkg_arch="amd64",
+        kernel=None,
     ):
         self.component = component
         self.manager = manager
@@ -88,6 +89,10 @@ class Scenario:
         self.ports = ports
         self.arch = arch
         self.dpkg_arch = dpkg_arch
+        # 4.36: running-kernel package state; default: present for the
+        # running kernel, so no host rpm/dnf is ever asked.
+        self.kernel = kernel or {"release": "6.12.0-211.el10.x86_64", "installed": True,
+                                 "latest": None, "checked": True}
 
 
 def _run(script):
@@ -115,9 +120,12 @@ def run_new(scenario):
             target = root_path / path.lstrip("/")
             target.mkdir(parents=True, exist_ok=True)
         if scenario.repo_text:
-            sources = root_path / "etc/apt/sources.list.d"
+            if scenario.manager == "dnf":
+                sources, name = root_path / "etc/yum.repos.d", "other.repo"
+            else:
+                sources, name = root_path / "etc/apt/sources.list.d", "other.list"
             sources.mkdir(parents=True, exist_ok=True)
-            (sources / "other.list").write_text(scenario.repo_text)
+            (sources / name).write_text(scenario.repo_text)
 
         definition = (DEFINITIONS / f"{scenario.component}.json").read_text()
 
@@ -128,6 +136,7 @@ source {shlex.quote(str(ENGINE))}
 {_mocks(scenario.installed, scenario.executables, scenario.units,
         scenario.arch, scenario.dpkg_arch)}
 dssa_executable_present() {{ _dssa_mock_executable "$1"; }}
+dssa_running_kernel_package_state() {{ echo {shlex.quote(json.dumps(scenario.kernel))}; }}
 plan_component_from_definition {shlex.quote(definition)} \\
     {shlex.quote(scenario.manager)} \\
     {shlex.quote(scenario.panels)} {shlex.quote(scenario.ports)}
@@ -181,9 +190,11 @@ class DecisionTests(unittest.TestCase):
     # Docker: supported (4.34), Ubuntu 24.04 x86_64 vendor repository only.
 
     def test_docker_unsupported_platforms_are_blocked(self):
+        # 4.36 added Debian 13, Ubuntu 22.04/26.04 and EL10; these still
+        # have no variant.
         for manager, os_id, version in (
-            ("apt", "debian", "13"), ("apt", "ubuntu", "22.04"),
-            ("apt", "ubuntu", "26.04"), ("dnf", "almalinux", "10"),
+            ("apt", "debian", "12"), ("apt", "ubuntu", "20.04"),
+            ("dnf", "almalinux", "9.4"), ("dnf", "fedora", "41"),
         ):
             with self.subTest(os=os_id, version=version):
                 new = self.assert_parity(
@@ -295,6 +306,113 @@ class DefinitionOnlyTests(unittest.TestCase):
         self.assertEqual(new["support"], "supported")
         self.assertEqual(new["variant_id"], "ubuntu24-amd64-vendor")
         self.assertNotIn("draft", " ".join(new["reasons"]))
+
+    def test_docker_new_platforms_select_their_own_variant(self):
+        # 4.36: one variant per OS release; each is a draft until its lab run.
+        for manager, os_id, version, variant_id in (
+            ("apt", "ubuntu", "22.04", "ubuntu22-amd64-vendor"),
+            ("apt", "ubuntu", "26.04", "ubuntu26-amd64-vendor"),
+            ("apt", "debian", "13", "debian13-amd64-vendor"),
+            ("dnf", "almalinux", "10.2", "el10-x86_64-vendor"),
+            ("dnf", "rocky", "10.2", "el10-x86_64-vendor"),
+            ("dnf", "rocky", "10", "el10-x86_64-vendor"),
+        ):
+            with self.subTest(os=os_id, version=version):
+                new = run_new(Scenario("docker", manager=manager, os_id=os_id, version=version))
+                self.assertEqual(new["variant_id"], variant_id)
+                self.assertEqual((new["decision"], new["action"]), ("INSTALL", "REVIEW"))
+                self.assertIn("draft", new["reasons"][-1])
+
+    def test_docker_ubuntu24_stays_supported(self):
+        new = run_new(Scenario("docker"))
+        self.assertEqual((new["variant_id"], new["support"], new["action"]),
+                         ("ubuntu24-amd64-vendor", "supported", "INSTALL"))
+
+    def test_docker_el10_podman_requires_review(self):
+        new = run_new(Scenario("docker", manager="dnf", os_id="rocky", version="10.2",
+                               installed=("podman",)))
+        self.assertEqual(new["decision"], "REVIEW")
+        self.assertIn("podman", " ".join(new["reasons"]))
+
+    def test_docker_el10_existing_repository_requires_review(self):
+        new = run_new(Scenario("docker", manager="dnf", os_id="almalinux", version="10.2",
+                               repo_text="baseurl=https://download.docker.com/linux/centos/10/x86_64/stable\n"))
+        self.assertEqual(new["decision"], "REVIEW")
+        self.assertIn("download.docker.com", " ".join(new["reasons"]))
+
+    def test_docker_el_major_version_does_not_match_other_majors(self):
+        new = run_new(Scenario("docker", manager="dnf", os_id="rocky", version="100.1"))
+        self.assertEqual(new["decision"], "BLOCKED")
+
+    # --- 4.36: modules for the running kernel (EL) -----------------------
+
+    def el_docker(self, kernel, installed=()):
+        return run_new(Scenario("docker", manager="dnf", os_id="almalinux", version="10.2",
+                                installed=installed, kernel=kernel))
+
+    def test_docker_el_blocked_when_kernel_is_behind_the_repository(self):
+        new = self.el_docker({"release": "6.12.0-211.el10.x86_64", "installed": False,
+                              "latest": "6.12.0-264.el10.x86_64", "checked": True})
+        self.assertEqual((new["decision"], new["action"]), ("BLOCKED", "BLOCKED"))
+        reason = " ".join(new["reasons"])
+        self.assertIn("6.12.0-211.el10.x86_64", reason)
+        self.assertIn("6.12.0-264.el10.x86_64", reason)
+        self.assertIn("reboot", reason)
+
+    def test_docker_el_installs_when_repository_matches_running_kernel(self):
+        new = self.el_docker({"release": "6.12.0-264.el10.x86_64", "installed": False,
+                              "latest": "6.12.0-264.el10.x86_64", "checked": True})
+        self.assertEqual(new["decision"], "INSTALL")
+
+    def test_docker_el_blocked_when_kernel_check_fails_or_package_missing(self):
+        for kernel, text in (
+            ({"release": "6.12.0-211.el10.x86_64", "installed": False,
+              "latest": None, "checked": False}, "Could not check"),
+            ({"release": "6.12.0-211.el10.x86_64", "installed": False,
+              "latest": None, "checked": True}, "not available"),
+        ):
+            with self.subTest(text=text):
+                new = self.el_docker(kernel)
+                self.assertEqual(new["decision"], "BLOCKED")
+                self.assertIn(text, " ".join(new["reasons"]))
+
+    def test_docker_el_installed_is_verified_whatever_the_kernel(self):
+        new = self.el_docker({"release": "x", "installed": False, "latest": "y",
+                              "checked": True}, installed=DOCKER_PACKAGES)
+        self.assertEqual(new["decision"], "SKIP")
+
+    def test_running_kernel_probe(self):
+        # The real probe, with rpm/dnf/uname replaced by shell functions.
+        def probe(rpm_out, dnf_out, dnf_rc=0):
+            script = f"""
+source {shlex.quote(str(ENGINE))}
+uname() {{ [[ "$1" == "-r" ]] && echo 6.12.0-211.el10.x86_64 || echo x86_64; }}
+rpm() {{ printf '%s' {shlex.quote(rpm_out)}; }}
+dnf() {{ printf '%s' {shlex.quote(dnf_out)}; return {dnf_rc}; }}
+timeout() {{ shift; "$@"; }}
+dssa_running_kernel_package_state kernel-modules-extra
+"""
+            return _run(script)
+        self.assertEqual(probe("6.12.0-264.el10.x86_64\n6.12.0-211.el10.x86_64\n", ""),
+                         {"release": "6.12.0-211.el10.x86_64", "installed": True,
+                          "latest": None, "checked": True})
+        self.assertEqual(probe("", "6.12.0-264.el10.x86_64\n"),
+                         {"release": "6.12.0-211.el10.x86_64", "installed": False,
+                          "latest": "6.12.0-264.el10.x86_64", "checked": True})
+        self.assertEqual(probe("", "", dnf_rc=1)["checked"], False)
+
+    def test_compose_plans_on_both_package_managers(self):
+        for manager in ("apt", "dnf"):
+            with self.subTest(manager=manager):
+                new = run_new(Scenario("docker_compose", manager=manager,
+                                       os_id="rocky" if manager == "dnf" else "ubuntu",
+                                       version="10.2" if manager == "dnf" else "24.04"))
+                self.assertEqual(new["variant_id"], f"{manager}-docker-plugin")
+                self.assertEqual((new["decision"], new["action"]), ("INSTALL", "REVIEW"))
+
+    def test_compose_already_installed_is_skipped(self):
+        new = run_new(Scenario("docker_compose", installed=("docker-compose-plugin",)))
+        self.assertEqual(new["decision"], "SKIP")
 
     def test_nginx_paths_panels_and_ports_report_every_reason(self):
         new = run_new(Scenario(
