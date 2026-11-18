@@ -308,7 +308,8 @@ class DefinitionOnlyTests(unittest.TestCase):
         self.assertNotIn("draft", " ".join(new["reasons"]))
 
     def test_docker_new_platforms_select_their_own_variant(self):
-        # 4.36: one variant per OS release; each is a draft until its lab run.
+        # 4.36: one variant per OS release; all supported after the owner's
+        # lab run on 2026-11-18.
         for manager, os_id, version, variant_id in (
             ("apt", "ubuntu", "22.04", "ubuntu22-amd64-vendor"),
             ("apt", "ubuntu", "26.04", "ubuntu26-amd64-vendor"),
@@ -320,8 +321,9 @@ class DefinitionOnlyTests(unittest.TestCase):
             with self.subTest(os=os_id, version=version):
                 new = run_new(Scenario("docker", manager=manager, os_id=os_id, version=version))
                 self.assertEqual(new["variant_id"], variant_id)
-                self.assertEqual((new["decision"], new["action"]), ("INSTALL", "REVIEW"))
-                self.assertIn("draft", new["reasons"][-1])
+                self.assertEqual((new["decision"], new["action"]), ("INSTALL", "INSTALL"))
+                self.assertEqual(new["support"], "supported")
+                self.assertNotIn("draft", " ".join(new["reasons"]))
 
     def test_docker_ubuntu24_stays_supported(self):
         new = run_new(Scenario("docker"))
@@ -408,7 +410,9 @@ dssa_running_kernel_package_state kernel-modules-extra
                                        os_id="rocky" if manager == "dnf" else "ubuntu",
                                        version="10.2" if manager == "dnf" else "24.04"))
                 self.assertEqual(new["variant_id"], f"{manager}-docker-plugin")
-                self.assertEqual((new["decision"], new["action"]), ("INSTALL", "REVIEW"))
+                # Supported after the owner's lab run (2026-11-18).
+                self.assertEqual((new["decision"], new["action"], new["support"]),
+                                 ("INSTALL", "INSTALL", "supported"))
 
     def test_compose_already_installed_is_skipped(self):
         new = run_new(Scenario("docker_compose", installed=("docker-compose-plugin",)))

@@ -70,12 +70,10 @@ class RepositoryDefinitionTests(unittest.TestCase):
             for definition in self.definitions.values()
         }
         self.assertEqual(support["git"], {"supported"})
-        # Docker: ubuntu24 supported since 4.34; the 4.36 variants stay
-        # draft until each passes its lab run.
-        docker = {v.variant_id: v.support for v in self.definitions["docker"].variants}
-        self.assertEqual(docker.pop("ubuntu24-amd64-vendor"), "supported")
-        self.assertEqual(set(docker.values()), {"draft"})
-        self.assertEqual(support["docker_compose"], {"draft"})
+        # Docker: ubuntu24 since 4.34; the 4.36 variants and Compose after
+        # the owner's lab run on all six VMs (2026-11-18).
+        self.assertEqual(support["docker"], {"supported"})
+        self.assertEqual(support["docker_compose"], {"supported"})
         self.assertEqual(support["nginx"], {"draft"})
 
     def test_git_and_nginx_match_on_package_manager_only(self):

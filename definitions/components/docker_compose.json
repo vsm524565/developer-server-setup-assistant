@@ -12,7 +12,7 @@
   "variants": [
     {
       "variant_id": "apt-docker-plugin",
-      "support": "draft",
+      "support": "supported",
       "platform": {
         "package_manager": "apt"
       },
@@ -55,7 +55,7 @@
     },
     {
       "variant_id": "dnf-docker-plugin",
-      "support": "draft",
+      "support": "supported",
       "platform": {
         "package_manager": "dnf"
       },

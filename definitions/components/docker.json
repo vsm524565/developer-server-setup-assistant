@@ -7,7 +7,7 @@
   "variants": [
     {
       "variant_id": "ubuntu22-amd64-vendor",
-      "support": "draft",
+      "support": "supported",
       "platform": {
         "package_manager": "apt",
         "os": [
@@ -309,7 +309,7 @@
     },
     {
       "variant_id": "ubuntu26-amd64-vendor",
-      "support": "draft",
+      "support": "supported",
       "platform": {
         "package_manager": "apt",
         "os": [
@@ -462,7 +462,7 @@
     },
     {
       "variant_id": "debian13-amd64-vendor",
-      "support": "draft",
+      "support": "supported",
       "platform": {
         "package_manager": "apt",
         "os": [
@@ -615,7 +615,7 @@
     },
     {
       "variant_id": "el10-x86_64-vendor",
-      "support": "draft",
+      "support": "supported",
       "platform": {
         "package_manager": "dnf",
         "os": [
