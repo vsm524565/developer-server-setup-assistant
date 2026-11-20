@@ -1320,3 +1320,15 @@ Items 6–9 from the review of InfraGuard and the PHP Patch Updater.
       INSTALL adds a vendor repository. Report and resume check theirs.
 - [x] 23 new tests; regression 761/761, 1 skipped.
 - [x] Manual verification on ubuntu24 and alma10, 2026-11-20 (`docs/testing/manual-4.39-preflight.md`).
+
+### Milestone 4.39.1 — Clear Text After a Refused Run — 2026-11-20
+
+Found in the 4.39 lab run.
+
+- [x] When the server refuses apply before any change (exit 2, no result
+      file: a missing command or an unsafe state folder), `main.py` says so
+      and no longer says the run "may still be going". An approved plan
+      says the approval is used up; a verification-only plan says to plan
+      again. Exit 5 uses the same wording rule.
+- [x] 2 new tests; regression 763/763, 1 skipped.
+- [x] Manual check on ubuntu24, 2026-11-20 (`docs/testing/manual-4.39-preflight.md`, 4.39.1 section).

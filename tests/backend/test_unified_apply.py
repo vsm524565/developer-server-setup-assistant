@@ -717,6 +717,35 @@ class LoginCheckTests(Lab):
         audit = (self.base / "audit/security.jsonl").read_text().splitlines()
         self.assertEqual(json.loads(audit[-1])["status"], "not_run")
 
+    def test_refusal_on_the_server_says_nothing_ran(self):
+        # 4.39.1: exit 2 without a result is a refusal, not a dropped run.
+        plan_bytes, plan, _ = self.plan("testtool")
+        self.approve(plan_bytes)
+        os.environ["MOCK_REMOTE_HIDE"] = "jq"
+        real_apply = run.apply_plan
+        with mock.patch.object(self.main, "target_host", return_value={"host": HOST}), \
+             mock.patch.object(run, "apply_plan", lambda *a, **k: real_apply(*a, **k, out=io.BytesIO())), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            code = self.main.step_apply(plan["plan_id"], None)
+        self.assertEqual(code, 2)
+        text = stdout.getvalue()
+        self.assertIn("The server refused the run before any change; the reason is shown above.", text)
+        self.assertIn("Nothing was run there. Fix the cause. The approval is used up: plan and approve again.", text)
+        self.assertNotIn("may still be going", text)
+        self.assertIn("Exit code : 2 (refused before any change)", text)
+
+    def test_verification_only_wording_has_no_approval(self):
+        from types import SimpleNamespace
+        for code, first in ((2, "The server refused the run"), (5, "Nothing was run on the server.")):
+            outcome = SimpleNamespace(summary=None, exit_code=code, rc=code, status=None, directory=None)
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                self.main.show_outcome(outcome)
+            text = stdout.getvalue()
+            self.assertIn(first, text)
+            self.assertIn("Plan again, then apply.", text)
+            self.assertNotIn("approval", text)
+            self.assertNotIn("may still be going", text)
+
 
 class ClockCheckTests(Lab):
     """plan compares the target's clock with the laptop's (4.39)."""

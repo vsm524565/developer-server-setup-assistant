@@ -64,3 +64,20 @@ Run by the project owner on 2026-11-20: **all steps passed**.
 Found during the run: when apply is refused on the server (exit 2, no
 result file), `main.py` still prints "If the connection dropped, the run
 may still be going on the server", which is misleading for a refusal.
+
+## 4.39.1 — Clear text after a refused run
+
+One check on ubuntu24, reusing step 11:
+
+| # | Command | Expected |
+|---|---|---|
+| 1 | `H statemode ubuntu24 775`, `M plan ubuntu24 git`, `M apply ID`, then `H statemode ubuntu24 700` | after `Unsafe state folder …`: `The server refused the run before any change; the reason is shown above.` and `Nothing was run there. Fix the cause. Plan again, then apply.`; no `may still be going`; exit 2; then `uid 0 mode 700` |
+
+### Result
+
+Run by the project owner on 2026-11-20: **passed**. Plan da1b3998
+(verification-only): `Unsafe state folder: /var/lib/dssa is not root-only
+(uid mode: 0 775); nothing was run.`, then `The server refused the run
+before any change; the reason is shown above.` and `Nothing was run there.
+Fix the cause. Plan again, then apply.`; no "may still be going"; exit 2;
+mode 700 restored. Full suite 763/763, 1 skipped.

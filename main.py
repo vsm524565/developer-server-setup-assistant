@@ -69,14 +69,21 @@ def show_plan(plan, plan_bytes):
         print(f"Held      : {', '.join(h['component'] for h in plan['held'])}")
 
 
-def show_outcome(outcome, kind="apply"):
+def show_outcome(outcome, kind="apply", approved=False):
     print("\n=== RESULT ===")
     summary = outcome.summary
     code = outcome.exit_code if outcome.exit_code is not None else outcome.rc
+    again = ("The approval is used up: plan and approve again." if approved
+             else "Plan again, then apply.")
     if summary is None:
         print("No result came back from the server.")
         if code == 5:
-            print("Nothing was run on the server. The approval is used up: plan and approve again.")
+            print(f"Nothing was run on the server. {again}")
+        elif code == 2:
+            # Refused on the server before any change (4.39.1), for
+            # example a missing command or an unsafe state folder.
+            print("The server refused the run before any change; the reason is shown above.")
+            print(f"Nothing was run there. Fix the cause. {again}")
         elif outcome.status == "interrupted":
             print("The run stopped before finishing. Next: python main.py report PLAN_ID,")
             print("then python main.py resume-rollback PLAN_ID to undo it.")
@@ -200,7 +207,7 @@ def step_apply(plan_id, inventory):
 
     digest = "sha256:" + hashlib.sha256(plan_bytes).hexdigest()
     outcome = run.apply_plan(target, plan_path, digest, plan_id, inventory)
-    show_outcome(outcome)
+    show_outcome(outcome, approved=not check["verification_only"])
     return outcome.exit_code if outcome.exit_code is not None else outcome.rc
 
 
