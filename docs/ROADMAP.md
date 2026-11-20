@@ -1254,3 +1254,28 @@ Design: `docs/design/docker-everywhere.md`.
 - [x] Manual verification on all six VMs, 2026-11-18
       (`docs/testing/manual-4.36-docker-everywhere.md`), then the passing
       variants marked `supported`.
+
+### Milestone 4.37 — Engine Hardening — 2026-11-19
+
+Items 1–5 of the review of InfraGuard, the PHP Patch Updater and the
+`dssa-complete` reference build (2026-11-19). Items 1–3 are defects the
+reference build found in this code.
+
+- [x] Every `apt-get` the engine runs gets `-o DPkg::Lock::Timeout=60`
+      (`DSSA_APT_LOCK_TIMEOUT` on the target overrides it): a held dpkg
+      lock fails the step and rolls back, instead of waiting forever.
+- [x] `apt-get update` runs with `--error-on=any`, so an unverifiable
+      repository signature fails the refresh instead of leaving apt on the
+      old lists. The rollback list refresh uses the same flags.
+- [x] The audit, retention and rotation scripts honour `XDG_STATE_HOME`,
+      like the approvals.
+- [x] README: `chmod 600` for an inventory in a fresh clone.
+- [x] `service_start` watches the unit for 15 s (from InfraGuard's
+      installer): active/running, same main PID, same `NRestarts`; a
+      oneshot unit only has to stay active. On failure the step fails
+      with the reason in the journal, the unit's last 20 journal lines go
+      to the run log, and the run rolls back. Catches crash loops that
+      `Restart=` hides from a single `is-active` check.
+- [x] 12 new tests; regression 729/729, 1 skipped.
+- [x] Manual verification on ubuntu24 plus the apt flags on all four apt VMs,
+      2026-11-19/20 (`docs/testing/manual-4.37-engine-hardening.md`).

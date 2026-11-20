@@ -3,7 +3,7 @@
 set -euo pipefail
 umask 077
 
-LOG_DIR="${DSSA_LOG_DIR:-${HOME}/.local/state/developer-server-setup-assistant/audit}"
+LOG_DIR="${DSSA_LOG_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/developer-server-setup-assistant/audit}"
 RETENTION_DAYS="${DSSA_AUDIT_RETENTION_DAYS:-90}"
 
 if [[ ! "$RETENTION_DAYS" =~ ^[0-9]+$ ]] ||

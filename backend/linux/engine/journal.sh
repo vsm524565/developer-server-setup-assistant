@@ -299,11 +299,23 @@ _tx_step_entry() {
          + (if $detail == null then {} else {detail: $detail} end)'
 }
 
+# Every apt-get the engine runs (4.37). apt waits for a held dpkg lock
+# (unattended-upgrades, another admin) forever by default; DSSA waits at
+# most DSSA_APT_LOCK_TIMEOUT seconds, then the step fails and rolls back.
+# "update" also gets --error-on=any from its callers: without it apt-get
+# exits 0 when a repository's signature cannot be verified and the old
+# lists are used.
+_tx_apt() {
+    local wait="${DSSA_APT_LOCK_TIMEOUT:-60}"
+    [[ "$wait" =~ ^[0-9]{1,4}$ ]] || wait=60
+    apt-get -o "DPkg::Lock::Timeout=$wait" "$@"
+}
+
 _tx_exec_metadata_refresh() {
     local plan_id="$1" component="$2" index="$3" manager="$4"
     tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" package_metadata_refresh intent)" || return 1
     case "$manager" in
-        apt) apt-get update >&2 ;;
+        apt) _tx_apt update --error-on=any >&2 ;;
         dnf) dnf makecache -y >&2 ;;
     esac || { tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" package_metadata_refresh failed)"; return 1; }
     tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" package_metadata_refresh done)"
@@ -344,7 +356,7 @@ _tx_exec_packages_install() {
 
     if (( ${#missing[@]} > 0 )); then
         case "$manager" in
-            apt) DEBIAN_FRONTEND=noninteractive apt-get install -y -- "${missing[@]}" >&2 ;;
+            apt) DEBIAN_FRONTEND=noninteractive _tx_apt install -y -- "${missing[@]}" >&2 ;;
             dnf) dnf install -y -- "${missing[@]}" >&2 ;;
         esac || status=$?
     fi
@@ -577,7 +589,71 @@ _tx_exec_service() {
         systemctl start -- "$unit" >&2
     fi || { tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" "$kind" failed)"; return 1; }
 
-    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" "$kind" done)"
+    local detail="null"
+    if [[ "$kind" == service_start ]]; then
+        detail="$(_tx_service_settle "$unit")" || {
+            tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" "$kind" failed null "${detail:-null}")"
+            return 1
+        }
+    fi
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" "$kind" done null "$detail")"
+}
+
+# A started service must stay up (4.37). "systemctl start" returns once
+# the unit is up, and a single is-active check right after it passes a
+# crash loop: units with Restart= (docker.service has Restart=always)
+# come back each time. For DSSA_SERVICE_SETTLE_SECONDS (default 15) the
+# unit must stay active/running with the same main process and the same
+# NRestarts count. A oneshot unit has no main process; it only has to
+# stay active. Prints the result as JSON; on failure the unit's last
+# journal lines go to stderr, which the run log keeps for RCA.
+_tx_service_settle() {
+    local unit="$1" settle="${DSSA_SERVICE_SETTLE_SECONDS:-15}"
+    local type pid restarts state now_pid now_restarts elapsed=0 reason=""
+    [[ "$settle" =~ ^[0-9]{1,3}$ ]] || settle=15
+
+    _prop() { systemctl show --property="$1" --value -- "$unit" 2>/dev/null; }
+    type="$(_prop Type)"
+    pid="$(_prop MainPID)"
+    restarts="$(_prop NRestarts)"
+    [[ "$restarts" =~ ^[0-9]+$ ]] || restarts=0
+
+    if [[ "$type" != oneshot && ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
+        reason="no main process after start"
+    fi
+    while [[ -z "$reason" ]]; do
+        state="$(_prop ActiveState)/$(_prop SubState)"
+        now_pid="$(_prop MainPID)"
+        now_restarts="$(_prop NRestarts)"
+        [[ "$now_restarts" =~ ^[0-9]+$ ]] || now_restarts=0
+        if [[ "$type" == oneshot ]]; then
+            [[ "$state" == active/* ]] || reason="state $state"
+        elif [[ "$state" != active/running ]]; then
+            reason="state $state"
+        elif [[ "$now_pid" != "$pid" ]]; then
+            reason="main process changed $pid -> $now_pid"
+        fi
+        if [[ -z "$reason" && "$now_restarts" != "$restarts" ]]; then
+            reason="restarted $restarts -> $now_restarts"
+        fi
+        (( elapsed >= settle )) && break
+        [[ -n "$reason" ]] && break
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    unset -f _prop
+
+    if [[ -n "$reason" ]]; then
+        printf 'Service %s is not stable after %ss: %s\n' "$unit" "$elapsed" "$reason" >&2
+        printf 'Recent journal for %s:\n' "$unit" >&2
+        journalctl --unit="$unit" --lines=20 --no-pager >&2 2>/dev/null ||
+            echo "(journal could not be read)" >&2
+        jq -cn --arg u "$unit" --argjson s "$elapsed" --arg r "$reason" \
+            '{stable: false, unit: $u, seconds: $s, reason: $r}'
+        return 1
+    fi
+    jq -cn --arg u "$unit" --argjson s "$settle" --arg p "$pid" --argjson n "$restarts" \
+        '{stable: true, unit: $u, seconds: $s, main_pid: $p, restarts: $n}'
 }
 
 # --- verification -------------------------------------------------------------
@@ -870,7 +946,7 @@ rollback_component() {
         if (( ${#remove[@]} > 0 || ${#remove_versions[@]} > 0 )); then
             local removed=true
             case "$manager" in
-                apt) DEBIAN_FRONTEND=noninteractive apt-get purge -y -- "${remove[@]}" >&2 || removed=false ;;
+                apt) DEBIAN_FRONTEND=noninteractive _tx_apt purge -y -- "${remove[@]}" >&2 || removed=false ;;
                 # Never let dnf remove "unneeded" dependencies: they may
                 # have been installed before the run.
                 dnf) dnf remove -y --setopt=clean_requirements_on_remove=False -- \
@@ -964,7 +1040,7 @@ rollback_component() {
     # update (4.35 D). They are a cache, not installed state: a failed
     # refresh is reported but does not make the rollback incomplete.
     if [[ "$repo_changed" == true && "$manager" == apt ]]; then
-        if apt-get update >&2; then
+        if _tx_apt update --error-on=any >&2; then
             _record refresh_lists apt ok
         else
             _record refresh_lists apt "not refreshed"

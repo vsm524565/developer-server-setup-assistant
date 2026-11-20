@@ -8,6 +8,7 @@ state is compared with the pre-run snapshot.
 
 import copy
 import json
+import re
 import os
 import shlex
 import subprocess
@@ -24,7 +25,7 @@ SOURCES = [
     ROOT / "backend/linux/engine/definitions.sh",
     ROOT / "backend/linux/engine/journal.sh",
 ]
-TOOLS = ("apt-get", "dnf", "dpkg-query", "dpkg", "rpm", "systemctl", "curl", "gpg", "firewall-cmd")
+TOOLS = ("apt-get", "dnf", "dpkg-query", "dpkg", "rpm", "systemctl", "journalctl", "curl", "gpg", "firewall-cmd")
 FPR = "0123456789ABCDEF0123456789ABCDEF01234567"
 PLAN_A = "11111111-1111-4111-8111-111111111111"
 PLAN_B = "22222222-2222-4222-8222-222222222222"
@@ -129,6 +130,9 @@ class FakeServer(unittest.TestCase):
             "PATH": f"{self.state / 'bin'}:{self.tools}:/usr/bin:/bin",
             "MOCK_STATE": str(self.state),
             "HOME": self.tmp.name,
+            # The stability watch (4.37) is tested on its own; elsewhere
+            # one check right after start keeps the suite fast.
+            "DSSA_SERVICE_SETTLE_SECONDS": "0",
         }
         if with_root:
             env["DSSA_ROOT"] = str(self.root)
@@ -231,8 +235,9 @@ class AlreadyInstalledTests(FakeServer):
         return definition
 
     def install_calls(self, tool="apt-get"):
+        # apt-get's "-o Name=value" options (4.37) come before the action.
         return [line.split() for line in (self.state / "calls.log").read_text().splitlines()
-                if line.startswith(f"{tool} install")]
+                if re.match(rf"{tool}( -o \S+)* install ", line)]
 
     def intent(self):
         return next(e for e in self.journal()
@@ -564,7 +569,7 @@ class ListRefreshTests(FakeServer):
 
     def updates(self):
         return [l for l in (self.state / "calls.log").read_text().splitlines()
-                if l.startswith("apt-get update")]
+                if re.match(r"apt-get( -o \S+)* update", l)]
 
     def test_repository_undo_refreshes_lists(self):
         self.write("fail.json", {"start": ["vendorapp.service"]})
@@ -838,7 +843,7 @@ class StdinSafetyTests(FakeServer):
         env = {
             "PATH": f"{self.state / 'bin'}:{self.tools}:/usr/bin:/bin",
             "MOCK_STATE": str(self.state), "HOME": self.tmp.name,
-            "DSSA_ROOT": str(self.root),
+            "DSSA_ROOT": str(self.root), "DSSA_SERVICE_SETTLE_SECONDS": "0",
         }
         sources = "\n".join(f"source {shlex.quote(str(s))}" for s in SOURCES)
         script = f"set -uo pipefail\n{sources}\n{body}\nIFS= read -r rest || rest=''\necho \"REST=$rest\"\n"
@@ -902,6 +907,137 @@ class VerifyOnlyTests(FakeServer):
         self.assertEqual(bad.returncode, 5)
         self.assertEqual(json.loads(bad.stdout)["outcome"], "verification_failed")
         self.assertIn("testtool", self.read("packages.json"))
+
+
+class AptSafetyTests(FakeServer):
+    """apt never waits forever on a lock, and a bad refresh fails (4.37)."""
+
+    def apt_calls(self):
+        return [l for l in (self.state / "calls.log").read_text().splitlines()
+                if l.startswith("apt-get")]
+
+    def test_every_apt_call_has_a_lock_timeout_and_update_fails_on_warnings(self):
+        rc, _, _ = self.apply(simple_definition(), "apt-test")
+        self.assertEqual(rc, 0)
+        calls = self.apt_calls()
+        self.assertIn("apt-get -o DPkg::Lock::Timeout=60 update --error-on=any", calls)
+        self.assertIn("apt-get -o DPkg::Lock::Timeout=60 install -y -- testtool", calls)
+        self.assertTrue(all(c.startswith("apt-get -o DPkg::Lock::Timeout=60 ") for c in calls), calls)
+
+    def test_rollback_purge_and_list_refresh_have_the_timeout(self):
+        self.write("fail.json", {"start": ["vendorapp.service"]})
+        rc, _, _ = self.apply(vendor_definition(), "apt-vendor")
+        self.assertEqual(rc, 3)
+        calls = self.apt_calls()
+        self.assertTrue(any(" purge -y -- " in c for c in calls), calls)
+        self.assertTrue(all(c.startswith("apt-get -o DPkg::Lock::Timeout=60 ") for c in calls), calls)
+        self.assertEqual(calls[-1], "apt-get -o DPkg::Lock::Timeout=60 update --error-on=any")
+
+    def test_invalid_timeout_falls_back_to_sixty(self):
+        rc, _, _ = self.apply(simple_definition(), "apt-test", prelude="DSSA_APT_LOCK_TIMEOUT='5; reboot'")
+        self.assertEqual(rc, 0)
+        self.assertTrue(all("DPkg::Lock::Timeout=60 " in c for c in self.apt_calls()))
+
+    def test_custom_timeout_is_used(self):
+        rc, _, _ = self.apply(simple_definition(), "apt-test", prelude="DSSA_APT_LOCK_TIMEOUT=5")
+        self.assertEqual(rc, 0)
+        self.assertTrue(all("DPkg::Lock::Timeout=5 " in c for c in self.apt_calls()))
+
+    def test_lock_timeout_fails_the_refresh_and_rolls_back(self):
+        self.write("fail.json", {"apt_lock": True})
+        rc, result, run = self.apply(simple_definition(), "apt-test")
+        self.assertEqual(rc, 3, run.stderr)
+        self.assertEqual(result["outcome"], "failed_rolled_back")
+        self.assertIn("Could not get lock", run.stderr)
+        self.assertNotIn("testtool", self.read("packages.json"))
+        self.assert_back_to_snapshot()
+
+
+class ServiceStabilityTests(FakeServer):
+    """A started service must stay up for the settle time (4.37)."""
+
+    UNIT = "vendorapp.service"
+
+    def run_it(self, settle=2):
+        return self.apply(vendor_definition(), "apt-vendor",
+                          prelude=f"DSSA_SERVICE_SETTLE_SECONDS={settle}")
+
+    def start_entries(self, phase):
+        return [e for e in self.journal() if e.get("type") == "service_start" and e["phase"] == phase]
+
+    def test_stable_service_passes_and_records_the_watch(self):
+        rc, result, run = self.run_it()
+        self.assertEqual(rc, 0, run.stderr)
+        self.assertEqual(result["outcome"], "installed")
+        detail = self.start_entries("done")[0]["detail"]
+        self.assertEqual(detail, {"stable": True, "unit": self.UNIT, "seconds": 2,
+                                  "main_pid": "4242", "restarts": 0})
+
+    def test_crash_loop_fails_the_step_and_rolls_back(self):
+        # Restart= brings the unit back each time: active, but NRestarts grows.
+        self.write("fail.json", {"unstable": [self.UNIT]})
+        rc, result, run = self.run_it()
+        self.assertEqual(rc, 3, run.stderr)
+        self.assertEqual(result["outcome"], "failed_rolled_back")
+        failed = self.start_entries("failed")[0]["detail"]
+        self.assertFalse(failed["stable"])
+        self.assertIn("restarted", failed["reason"])
+        self.assertIn(f"Service {self.UNIT} is not stable", run.stderr)
+        self.assertIn(f"mock journal: --unit={self.UNIT} --lines=20 --no-pager", run.stderr)
+        self.assertEqual(self.start_entries("done"), [])
+        self.assert_back_to_snapshot()
+
+    def test_service_without_main_process_fails(self):
+        self.write("fail.json", {"no_pid": [self.UNIT]})
+        rc, _, run = self.run_it(settle=0)
+        self.assertEqual(rc, 3, run.stderr)
+        self.assertEqual(self.start_entries("failed")[0]["detail"]["reason"],
+                         "no main process after start")
+        self.assert_back_to_snapshot()
+
+    def test_service_that_exits_fails(self):
+        self.write("unit_props.json", {self.UNIT: {"sub": "exited"}})
+        rc, _, run = self.run_it(settle=0)
+        self.assertEqual(rc, 3, run.stderr)
+        self.assertEqual(self.start_entries("failed")[0]["detail"]["reason"], "state active/exited")
+
+    def test_oneshot_unit_only_has_to_stay_active(self):
+        self.write("unit_props.json", {self.UNIT: {"type": "oneshot", "sub": "exited"}})
+        self.write("fail.json", {"no_pid": [self.UNIT]})
+        rc, _, run = self.run_it(settle=1)
+        self.assertEqual(rc, 0, run.stderr)
+        self.assertTrue(self.start_entries("done")[0]["detail"]["stable"])
+
+    def test_service_enable_is_not_watched(self):
+        rc, _, _ = self.run_it(settle=0)
+        self.assertEqual(rc, 0)
+        enable = [e for e in self.journal() if e.get("type") == "service_enable" and e["phase"] == "done"]
+        self.assertNotIn("detail", enable[0])
+
+
+class AuditPathTests(unittest.TestCase):
+    """The audit scripts honour XDG_STATE_HOME like the approvals (4.37)."""
+
+    def test_logging_scripts_use_xdg_state_home(self):
+        logging = ROOT / "backend/linux/logging"
+        with tempfile.TemporaryDirectory() as tmp:
+            home, xdg = Path(tmp) / "home", Path(tmp) / "xdg"
+            home.mkdir()
+            env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "XDG_STATE_HOME": str(xdg)}
+            audit_dir = xdg / "developer-server-setup-assistant/audit"
+            subprocess.run(["bash", str(logging / "rotate.sh")], env=env, check=True,
+                           capture_output=True, text=True)
+            self.assertTrue(audit_dir.is_dir())
+            retention = subprocess.run(["bash", str(logging / "retention.sh")], env=env,
+                                       check=True, capture_output=True, text=True)
+            self.assertIn("Audit retention", retention.stdout)
+            subprocess.run(["bash", str(logging / "audit.sh")], env=env, input="{}",
+                           capture_output=True, text=True, check=False)
+            self.assertFalse((home / ".local").exists())
+            del env["XDG_STATE_HOME"]
+            subprocess.run(["bash", str(logging / "rotate.sh")], env=env, check=True,
+                           capture_output=True, text=True)
+            self.assertTrue((home / ".local/state/developer-server-setup-assistant/audit").is_dir())
 
 
 if __name__ == "__main__":

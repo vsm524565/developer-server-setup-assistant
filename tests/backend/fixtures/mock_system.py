@@ -2,7 +2,7 @@
 """Mock package manager and systemd for journal/rollback tests (4.33).
 
 One script, dispatched by the name it is invoked as (apt-get, dpkg-query,
-dpkg, rpm, dnf, systemctl, curl, gpg, firewall-cmd). State lives in JSON files under
+dpkg, rpm, dnf, systemctl, journalctl, curl, gpg, firewall-cmd). State lives in JSON files under
 $MOCK_STATE, and filesystem effects under $DSSA_ROOT:
 
   packages.json   {"name": "version"}         installed packages
@@ -15,13 +15,17 @@ $MOCK_STATE, and filesystem effects under $DSSA_ROOT:
                                               side (rpm -qa lists them; kernels)
   side_deps.json  {"pkg": {"name": "version"}} side versions added on install
   units.json      {"unit": {"file_state", "active"}}
+  unit_props.json {"unit": {"type", "sub"}}   what systemctl show reports
+  restarts.json   {"unit": n}                 NRestarts systemctl show reports
   start_files.json {"unit": ["/path", ...]}    files a unit writes when it starts
                                               (dockerd adds a firewalld zone)
   fail.json       {"install": [pkg], "purge": bool, "purge_extra": [pkg],
                    "start": [unit], "stop": [unit], "update": bool,
                    "update_from": n (fail the nth and later updates), "curl": bool,
                    "crash_on_install": [pkg] (kill the detached DSSA run's session),
-                   "firewalld_reload": bool}
+                   "firewalld_reload": bool, "apt_lock": bool (apt-get update
+                   times out on the lock), "unstable": [unit] (NRestarts grows
+                   on each read), "no_pid": [unit] (MainPID 0)}
   key.asc, fingerprint                        what curl downloads and gpg reports
   rpm_keys.json   ["gpg-pubkey-…", ...]        rpm's imported signing keys; dnf
                                               imports one at install when a
@@ -154,19 +158,32 @@ def purge(names):
 
 
 def positional(args):
-    return [a for a in args if not a.startswith("-") and a != "--"]
+    # "-o Name=value" (apt's option) takes the next word as its value.
+    words, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+        elif a == "-o":
+            skip = True
+        elif not a.startswith("-") and a != "--":
+            words.append(a)
+    return words
 
 
 def apt_get(args):
     action = positional(args)[0]
     if action == "update":
+        if fail("apt_lock"):
+            print("E: Could not get lock /var/lib/apt/lists/lock (timeout)", file=sys.stderr)
+            return 100
         if fail("update"):
             return 100
         # "update_from": N fails the Nth and later update calls.
         start = load("fail.json", {}).get("update_from")
         if start is not None:
             calls = (STATE / "calls.log").read_text().splitlines()
-            count = sum(1 for line in calls if line.startswith("apt-get update"))
+            count = sum(1 for line in calls
+                        if line.startswith("apt-get") and positional(line.split()[1:])[:1] == ["update"])
             if count >= start:
                 print("E: mock failure refreshing lists", file=sys.stderr)
                 return 100
@@ -245,6 +262,11 @@ def rpm(args):
     return 0 if names and names[0] in packages else 1
 
 
+def journalctl(args):
+    print("mock journal: " + " ".join(args))
+    return 0
+
+
 def systemctl(args):
     units = load("units.json", {})
     words = [a for a in args if a not in ("--no-legend", "--no-pager", "--plain", "--all", "--")]
@@ -269,6 +291,28 @@ def systemctl(args):
         if not quiet:
             print(units[unit]["file_state"])
         return 0 if units[unit]["file_state"] == "enabled" else 1
+    if action == "show":
+        # systemctl show --property=Name --value -- unit (one property).
+        prop = next(a.split("=", 1)[1] for a in words if a.startswith("--property="))
+        unit = [w for w in words[1:] if not w.startswith("-")][0]
+        state = units.get(unit, {})
+        active = state.get("active", "inactive")
+        rules = load("fail.json", {})
+        restarts = load("restarts.json", {})
+        if prop == "NRestarts" and unit in rules.get("unstable", []):
+            restarts[unit] = restarts.get(unit, 0) + 1
+            save("restarts.json", restarts)
+        state = {**state, **load("unit_props.json", {}).get(unit, {})}
+        values = {
+            "Type": state.get("type", "simple"),
+            "ActiveState": active,
+            "SubState": state.get("sub", "running" if active == "active" else "dead"),
+            "MainPID": 0 if active != "active" or unit in rules.get("no_pid", [])
+                       else state.get("main_pid", 4242),
+            "NRestarts": restarts.get(unit, 0),
+        }
+        print(values[prop])
+        return 0
     if action == "is-active":
         state = units.get(unit, {}).get("active", "inactive")
         if not quiet:
@@ -333,7 +377,7 @@ def firewall_cmd(args):
 
 TOOLS = {
     "apt-get": apt_get, "dnf": dnf, "dpkg-query": dpkg_query, "rpm": rpm,
-    "systemctl": systemctl, "curl": curl, "gpg": gpg, "dpkg": dpkg,
+    "systemctl": systemctl, "journalctl": journalctl, "curl": curl, "gpg": gpg, "dpkg": dpkg,
     "firewall-cmd": firewall_cmd,
 }
 

@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RUN_SCRIPT = ROOT / "backend/linux/bin/dssa-run.sh"
 MOCK_SYSTEM = ROOT / "tests/backend/fixtures/mock_system.py"
 MOCK_SSH = ROOT / "tests/backend/fixtures/mock_ssh.py"
-TOOLS = ("apt-get", "dnf", "dpkg-query", "dpkg", "rpm", "systemctl", "curl", "gpg")
+TOOLS = ("apt-get", "dnf", "dpkg-query", "dpkg", "rpm", "systemctl", "journalctl", "curl", "gpg")
 HOST = "192.0.2.10"
 
 from bridge.components import run  # noqa: E402
@@ -119,6 +119,7 @@ class Lab(unittest.TestCase):
             "MOCK_HOST_FP": self.keys["a"][1],
             "PATH": f"{self.state / 'bin'}:{self.tools}:/usr/bin:/bin",
             "HOME": str(self.laptop),
+            "DSSA_SERVICE_SETTLE_SECONDS": "0",
             "XDG_STATE_HOME": str(base / "xdg"),
             "DSSA_LOG_DIR": str(base / "audit"),
             "DSSA_INVENTORY_FILE": str(self.inventory),

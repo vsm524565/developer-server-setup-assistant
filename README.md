@@ -96,6 +96,10 @@ Use `--inventory FILE` for another inventory (for example
 `config/inventory/lab-six.json`). `--allow-draft` works only for targets
 marked `"lab": true` and asks you to type each draft component's name.
 
+DSSA refuses an inventory file that other users can write. In a fresh
+clone (umask 002 makes files group-writable) run
+`chmod 600 config/inventory/*.json` once.
+
 Python never opens SSH or sees a password: `backend/linux/bin/dssa-run.sh`
 owns every connection and trusts only the host key bound into the plan.
 The original paramiko `main.py` workflow and the legacy
