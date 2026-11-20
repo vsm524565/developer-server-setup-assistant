@@ -51,6 +51,40 @@ _tx_valid_plan_id() {
     [[ "$1" =~ $DSSA_PLAN_ID_PATTERN ]] || _tx_fail "Invalid plan ID."
 }
 
+# The state folder holds the snapshots that rollback relies on (4.39).
+# Refuse it, before anything is created in it, when:
+#   - any folder on its path is a symlink;
+#   - /var/lib/dssa or a folder in it exists but is not owned by root, or
+#     is writable by group or others;
+#   - /var or /var/lib is not owned by root or is writable by group or
+#     others (real system only).
+# It never repairs a folder. Under DSSA_ROOT (tests) only folders below
+# that root are checked, and the owner must be the current user.
+_tx_check_state_dir() {
+    local root="${DSSA_ROOT:-}" owner=0 rel dir meta uid mode
+    [[ -n "$root" ]] && owner="$EUID"
+    for rel in /var /var/lib /var/lib/dssa /var/lib/dssa/transactions /var/lib/dssa/runs /var/lib/dssa/stage; do
+        dir="$root$rel"
+        if [[ -L "$dir" ]]; then
+            _tx_fail "Unsafe state folder: $dir is a symlink. Nothing was changed."
+            return 1
+        fi
+        [[ -e "$dir" ]] || continue
+        [[ -d "$dir" ]] || { _tx_fail "Unsafe state folder: $dir is not a folder. Nothing was changed."; return 1; }
+        [[ -n "$root" && ( "$rel" == /var || "$rel" == /var/lib ) ]] && continue
+        meta="$(stat -c '%u %a' -- "$dir")" || { _tx_fail "Cannot read $dir."; return 1; }
+        uid="${meta% *}" mode="${meta#* }"
+        if [[ "$uid" != "$owner" ]]; then
+            _tx_fail "Unsafe state folder: $dir is owned by uid $uid, not $owner. Nothing was changed."
+            return 1
+        fi
+        if (( 8#$mode & 8#022 )); then
+            _tx_fail "Unsafe state folder: $dir is writable by group or others (mode $mode). Nothing was changed."
+            return 1
+        fi
+    done
+}
+
 # --- package and unit state ----------------------------------------------
 
 # Installed packages as {"name": "version"}.
@@ -223,6 +257,7 @@ begin_transaction() {
     jq -e 'type == "array" and all(.[]; type == "string" and startswith("/"))' \
         <<< "$paths_json" >/dev/null 2>&1 || { _tx_fail "Invalid snapshot path list."; return 1; }
 
+    _tx_check_state_dir || return 1
     state="$(_tx_state_dir)"
     mkdir -p -- "$state/transactions" || return 1
     chmod 700 -- "$state" "$state/transactions" || return 1
@@ -675,8 +710,18 @@ tx_run_check() {
             command -v -- "$name" >/dev/null 2>&1 || { echo "Executable not found: $name" >&2; return 1; }
             if jq -e '.version_args' <<< "$check" >/dev/null; then
                 local -a args=()
+                local output pattern first
                 mapfile -t args < <(jq -r '.version_args[]' <<< "$check")
-                timeout 15 "$name" "${args[@]}" >&2 || return 1
+                output="$(timeout 15 "$name" "${args[@]}" 2>&1)" || { printf '%s\n' "$output" >&2; return 1; }
+                printf '%s\n' "$output" >&2
+                # 4.39: exit 0 is not enough when the definition names the
+                # expected output (a binary may print its usage and exit 0).
+                pattern="$(jq -r '.version_pattern // empty' <<< "$check")"
+                first="${output%%$'\n'*}"
+                if [[ -n "$pattern" ]] && ! [[ "$first" =~ $pattern ]]; then
+                    echo "Version output of $name does not match \"$pattern\": $first" >&2
+                    return 1
+                fi
             fi
             ;;
         service_active)
@@ -1125,6 +1170,7 @@ resume_rollback() {
     local plan_id="$1" manager="$2" component results='[]' result
     _tx_require_privilege || return 1
     _tx_valid_plan_id "$plan_id" || return 1
+    _tx_check_state_dir || return 1
     [[ -f "$(_tx_dir "$plan_id")/journal.jsonl" ]] || { _tx_fail "No such transaction."; return 1; }
     [[ ! -f "$(_tx_dir "$plan_id")/result.json" ]] || { _tx_fail "Transaction already finished."; return 1; }
 

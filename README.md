@@ -107,6 +107,19 @@ approval, so a refused key or an unreachable server leaves the approval
 unused. Exit 5 means the plan never reached the server: nothing ran
 there, but the approval is used up.
 
+Preflight checks (4.39):
+- **Clock:** `plan` compares the server's clock with this computer's. Over
+  60 s apart, or not NTP-synchronized, it warns; over 300 s it refuses,
+  since apt and dnf reject repository data from a wrong clock.
+- **Commands:** `plan` and `apply` first check that the server has the
+  commands DSSA needs (`jq`, `flock`, `timeout`, `ss`, … and `curl`/`gpg`
+  for a vendor repository) and name any that are missing.
+- **State folder:** `apply` refuses `/var/lib/dssa` if any folder on its
+  path is a symlink, or if it is not owned by root or is writable by group
+  or others. DSSA never repairs it; fix it by hand.
+- **Version output:** an `executable` check may set `version_pattern`; the
+  first line of the version output must match it, not just exit 0.
+
 Python never opens SSH or sees a password: `backend/linux/bin/dssa-run.sh`
 owns every connection and trusts only the host key bound into the plan.
 The original paramiko `main.py` workflow and the legacy

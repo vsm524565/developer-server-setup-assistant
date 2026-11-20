@@ -5,6 +5,7 @@ and the package/systemd tools are mocked. The mock ssh runs the "remote"
 side locally and enforces host-key pinning like OpenSSH.
 """
 
+import importlib.util
 import io
 import json
 import os
@@ -715,6 +716,109 @@ class LoginCheckTests(Lab):
         self.assertEqual(self.read_mock("packages.json"), before)
         audit = (self.base / "audit/security.jsonl").read_text().splitlines()
         self.assertEqual(json.loads(audit[-1])["status"], "not_run")
+
+
+class ClockCheckTests(Lab):
+    """plan compares the target's clock with the laptop's (4.39)."""
+
+    def plan_with(self, skew, ntp="yes"):
+        os.environ["MOCK_CLOCK_SKEW"] = str(skew)
+        os.environ["MOCK_NTP"] = ntp
+        return self.dssa("plan", "lab1", "testtool")
+
+    def test_small_difference_is_shown_without_warning(self):
+        result = self.plan_with(-2)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stderr, r"Clock on lab1: [0-3] s behind this computer; NTP synchronized: yes")
+        self.assertNotIn("WARNING", result.stderr)
+
+    def test_difference_above_60_s_warns_but_plans(self):
+        result = self.plan_with(150)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stderr, r"WARNING: The clock on lab1 is 1[45][0-9] s ahead of this computer")
+        self.assertEqual(json.loads(result.stdout)["runnable"], ["testtool"])
+
+    def test_difference_above_300_s_refuses_the_plan(self):
+        result = self.plan_with(-400)
+        self.assertEqual(result.returncode, 3)
+        self.assertRegex(result.stderr, r"The clock on lab1 is (39[0-9]|40[0-9]) s behind this computer \(limit 300 s\)")
+        self.assertEqual(result.stdout, "")
+        self.assertFalse(any(c["command"] == "bash -s" for c in self.ssh_calls()), "no plan bundle was sent")
+
+    def test_unsynchronized_clock_warns(self):
+        result = self.plan_with(0, ntp="no")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("WARNING: lab1 reports that its clock is not NTP-synchronized.", result.stderr)
+
+    def test_unreadable_clock_is_skipped_with_a_warning(self):
+        os.environ["MOCK_CLOCK_RAW"] = "date: invalid option"
+        result = self.dssa("plan", "lab1", "testtool")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("WARNING: Could not read the clock on lab1; the clock check was skipped.", result.stderr)
+
+
+class RequiredCommandTests(Lab):
+    """Commands the engine needs are checked before it uses them (4.39)."""
+
+    def test_plan_names_the_missing_commands(self):
+        os.environ["MOCK_REMOTE_HIDE"] = "jq flock"
+        result = self.dssa("plan", "lab1", "testtool")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("ERROR: Missing on this server: jq. Install it, then try again. Nothing was changed.",
+                      result.stderr)
+        self.assertNotIn("jq: command not found", result.stderr)
+
+    def test_apply_refuses_before_any_change(self):
+        _, plan, path = self.plan("testtool")
+        before = self.read_mock("packages.json")
+        os.environ["MOCK_REMOTE_HIDE"] = "jq setsid"
+        result = self.dssa("apply", "lab1", str(path), plan_digest(Path(path).read_bytes()))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("Missing on this server: jq, setsid. Install them", result.stderr)
+        self.assertIn("DSSA_EXIT 2", result.stdout)
+        self.assertEqual(self.read_mock("packages.json"), before)
+        self.assertFalse((self.root / "var/lib/dssa/transactions" / plan["plan_id"]).exists())
+        self.assertFalse((self.root / "var/lib/dssa/runs" / plan["plan_id"]).exists())
+
+    def test_vendor_repository_needs_curl_and_gpg(self):
+        preflight = ROOT / "backend/linux/engine/preflight.sh"
+        vendor = definition("vendortool")
+        vendor["variants"][0]["steps"].insert(0, {"type": "apt_vendor_repository"})
+        steps = [{"component": "vendortool", "action": "INSTALL", "variant_id": "apt-vendortool"},
+                 {"component": "testtool", "action": "SKIP", "variant_id": "apt-testtool"}]
+        bundle = [{"id": "vendortool", "content": json.dumps(vendor)},
+                  {"id": "testtool", "content": json.dumps(definition("testtool"))}]
+        spec = importlib.util.spec_from_file_location("mock_ssh", MOCK_SSH)
+        mock_ssh = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mock_ssh)
+        hidden = mock_ssh.hide_commands(os.environ["PATH"], ["curl", "gpg"], str(self.remote))
+
+        def check(steps):
+            return subprocess.run(
+                ["bash", "-c", 'source "$1"; dssa_require_commands apply "$2" "$3"', "_",
+                 str(preflight), json.dumps({"steps": steps}), json.dumps(bundle)],
+                capture_output=True, text=True, env={**os.environ, "PATH": hidden}, check=False)
+
+        refused = check(steps)
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("Missing on this server: curl, gpg", refused.stderr)
+        # Not needed when no INSTALL adds a vendor repository.
+        self.assertEqual(check(steps[1:]).returncode, 0)
+
+
+class StagingFolderTests(Lab):
+    """Root refuses a symlinked state folder before it writes the bundle (4.39)."""
+
+    def test_symlinked_state_folder_is_refused_before_staging(self):
+        _, plan, path = self.plan("testtool")
+        elsewhere = self.base / "elsewhere"
+        elsewhere.mkdir()
+        (self.root / "var/lib").mkdir(parents=True)
+        (self.root / "var/lib/dssa").symlink_to(elsewhere)
+        result = self.dssa("apply", "lab1", str(path), plan_digest(Path(path).read_bytes()))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("var/lib/dssa is a symlink; nothing was run.", result.stderr)
+        self.assertEqual(list(elsewhere.iterdir()), [], "nothing was written through the link")
 
 
 if __name__ == "__main__":

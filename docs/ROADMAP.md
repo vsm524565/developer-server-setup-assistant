@@ -1295,3 +1295,28 @@ Two findings from the 4.37 lab run.
 - [x] A failed bundle upload exits 5 ("nothing was run there"; audit
       status `not_run`) instead of 255 ("completion unknown").
 - [x] Manual verification (`docs/testing/manual-4.38-ssh-and-approval.md`).
+
+### Milestone 4.39 — Engine Preflight Checks — 2026-11-20
+
+Items 6–9 from the review of InfraGuard and the PHP Patch Updater.
+
+- [x] State folder: before anything is created, the engine refuses
+      `/var/lib/dssa` (and `transactions`, `runs`, `stage`) when a folder on
+      the path is a symlink, or an existing one is not owned by root or is
+      writable by group/others; `/var` and `/var/lib` too on the real
+      system. It never repairs. The first root command (staging) refuses a
+      symlinked or non-root-only path before it copies the bundle there.
+- [x] Clock: `plan` reads the target's time and NTP status in the
+      host-key session and compares it with the laptop's. Over 60 s apart
+      or NTP not synchronized: warning. Over 300 s: refused (exit 3) before
+      the plan bundle is sent.
+- [x] Version output: optional `version_pattern` on `executable` checks
+      (POSIX ERE, ≤ 200 characters from a safe set, needs `version_args`),
+      validated in bash and Python. The first output line must match.
+      git and docker definitions now carry patterns.
+- [x] Required commands: `engine/preflight.sh` (plain bash) runs first in
+      the plan bundle (exit 3) and again in `runner_start` before the run
+      starts (exit 2, nothing changed); `curl` and `gpg` only when an
+      INSTALL adds a vendor repository. Report and resume check theirs.
+- [x] 23 new tests; regression 761/761, 1 skipped.
+- [x] Manual verification on ubuntu24 and alma10, 2026-11-20 (`docs/testing/manual-4.39-preflight.md`).

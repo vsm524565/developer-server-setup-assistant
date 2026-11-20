@@ -24,6 +24,10 @@
 #
 # Exit 5: the bundle could not be sent to the target, so nothing was run
 # there (unlike 255, where a run may have started).
+#
+# Preflight (4.39): plan compares the target's clock with this computer's
+# (warning above 60 s, refused above 300 s) and checks the commands the
+# engine needs; apply checks them again and refuses an unsafe state folder.
 
 set -euo pipefail
 
@@ -39,6 +43,12 @@ SSH_BIN="${DSSA_SSH_BIN:-ssh}"
 PLAN_ID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 HOST_KEY_RE='^SHA256:[A-Za-z0-9+/]{43}$'
 DIGEST_RE='^sha256:[0-9a-f]{64}$'
+# Clock check at plan time (4.39): seconds between the target and this
+# computer. Above the warning limit the plan still works; above the
+# refusal limit it is refused.
+CLOCK_WARN_SECONDS=60
+CLOCK_MAX_SECONDS=300
+CLOCK_CMD='date -u +%s; timedatectl show -p NTPSynchronized --value 2>/dev/null || true'
 
 # shellcheck source=/dev/null
 source "$LINUX/engine/definitions.sh"
@@ -51,7 +61,7 @@ trap 'rm -rf -- "$WORK"' EXIT
 die() { printf 'ERROR: %s\n' "$2" >&2; exit "$1"; }
 
 usage() {
-    sed -n '2,28p' "${BASH_SOURCE[0]}" >&2
+    sed -n '2,30p' "${BASH_SOURCE[0]}" >&2
     exit 2
 }
 
@@ -125,18 +135,52 @@ ssh_base() {
         -o ControlMaster=no -o ControlPath=none -p "$port" -l "$user"
 }
 
-# The key the server presents in a real session (DEBUG1 shows it).
+# The key the server presents in a real session (DEBUG1 shows it). The
+# same session reads the server's clock for check_clock.
 presented_host_key() {
     local -a opts
     local log
     mapfile -t opts < <(ssh_base)
     log="$WORK/hostkey.log"
     "$SSH_BIN" "${opts[@]}" -o UserKnownHostsFile="$KNOWN_HOSTS" -o LogLevel=DEBUG1 \
-        -- "$host" true < /dev/null > /dev/null 2> "$log" || {
+        -- "$host" "$CLOCK_CMD" < /dev/null > "$WORK/clock.out" 2> "$log" || {
         ssh_failure "$log" "Could not log in to $host to read its host key."
         exit 3
     }
+    date -u +%s > "$WORK/clock.local"
     sed -n 's/^debug1: Server host key: [^ ]* \(SHA256:[A-Za-z0-9+/]*\)\r*$/\1/p' "$log" | head -1
+}
+
+# Compare the target's clock (read by presented_host_key) with this
+# computer's. A wrong clock makes apt and dnf reject repository metadata
+# with confusing errors, so a large difference refuses the plan.
+check_clock() {
+    local remote ntp now offset abs where
+    remote="$(sed -n 1p "$WORK/clock.out" 2>/dev/null | tr -d '\r')"
+    ntp="$(sed -n 2p "$WORK/clock.out" 2>/dev/null | tr -d '\r')"
+    now="$(cat "$WORK/clock.local" 2>/dev/null)"
+    if ! [[ "$remote" =~ ^[0-9]{1,12}$ && "$now" =~ ^[0-9]{1,12}$ ]]; then
+        printf 'WARNING: Could not read the clock on %s; the clock check was skipped.\n' "$target" >&2
+        return 0
+    fi
+    [[ "$ntp" == yes || "$ntp" == no ]] || ntp=unknown
+    offset=$(( remote - now ))
+    abs=${offset#-}
+    if (( offset < 0 )); then where="$abs s behind this computer"
+    elif (( offset > 0 )); then where="$abs s ahead of this computer"
+    else where="same time as this computer"; fi
+
+    if (( abs > CLOCK_MAX_SECONDS )); then
+        die 3 "The clock on $target is $where (limit $CLOCK_MAX_SECONDS s). Fix the time on the server (or on this computer), then plan again."
+    fi
+    printf 'Clock on %s: %s; NTP synchronized: %s\n' "$target" "$where" "$ntp" >&2
+    if (( abs > CLOCK_WARN_SECONDS )); then
+        printf 'WARNING: The clock on %s is %s (warning above %s s). Repository checks may fail.\n' \
+            "$target" "$where" "$CLOCK_WARN_SECONDS" >&2
+    fi
+    if [[ "$ntp" == no ]]; then
+        printf 'WARNING: %s reports that its clock is not NTP-synchronized.\n' "$target" >&2
+    fi
 }
 
 # Write a known_hosts file holding only the lines for this exact key, and
@@ -178,8 +222,9 @@ emit_sources() {
 
 engine_bundle() {
     printf '%s\n' '#!/usr/bin/env bash' 'set -uo pipefail'
-    emit_sources modules/software/package_manager.sh discovery/panel.sh discovery/ports.sh \
-        engine/definitions.sh engine/plan.sh engine/journal.sh engine/apply.sh engine/runner.sh
+    emit_sources engine/preflight.sh modules/software/package_manager.sh discovery/panel.sh \
+        discovery/ports.sh engine/definitions.sh engine/plan.sh engine/journal.sh engine/apply.sh \
+        engine/runner.sh
     local hook
     for hook in "$LINUX"/engine/hooks/*.sh; do
         cat -- "$hook"
@@ -205,7 +250,10 @@ run_as_root() {
     # One line on purpose: printf %q then quotes it with backslashes only,
     # which any POSIX login shell on the target understands ($'...' needs bash).
     # shellcheck disable=SC2016
-    root_cmd='s="${DSSA_ROOT:-}/var/lib/dssa"; mkdir -p -m 700 "$s/stage" && chmod 700 "$s" "$s/stage" || exit 2; dst="$(mktemp "$s/stage/bundle.XXXXXX")" || exit 2; cat -- "$1" > "$dst"; rm -f -- "$1"; [ "sha256:$(sha256sum -- "$dst" | cut -d" " -f1)" = "$2" ] || { echo "ERROR: Bundle digest mismatch; nothing was run." >&2; rm -f -- "$dst"; exit 2; }; exec bash "$dst" "$3"'
+    # 4.39: before root creates or writes anything, refuse a symlinked
+    # state path, and (real system) one not owned by root or writable by
+    # group/others. The engine checks the whole folder again.
+    root_cmd='r="${DSSA_ROOT:-}"; s="$r/var/lib/dssa"; for d in "$r/var" "$r/var/lib" "$s" "$s/stage"; do if [ -L "$d" ]; then echo "ERROR: Unsafe state folder: $d is a symlink; nothing was run." >&2; exit 2; fi; if [ -z "$r" ] && [ -e "$d" ]; then m="$(stat -c "%u %a" -- "$d")" || exit 2; if [ "${m% *}" != 0 ] || (( 8#${m#* } & 8#022 )); then echo "ERROR: Unsafe state folder: $d is not root-only (uid mode: $m); nothing was run." >&2; exit 2; fi; fi; done; mkdir -p -m 700 "$s/stage" && chmod 700 "$s" "$s/stage" || exit 2; dst="$(mktemp "$s/stage/bundle.XXXXXX")" || exit 2; cat -- "$1" > "$dst"; rm -f -- "$1"; [ "sha256:$(sha256sum -- "$dst" | cut -d" " -f1)" = "$2" ] || { echo "ERROR: Bundle digest mismatch; nothing was run." >&2; rm -f -- "$dst"; exit 2; }; exec bash "$dst" "$3"'
     remote="sudo -- bash -c $(printf %q "$root_cmd") _ $(printf %q "$stage") $(printf %q "$digest") $(printf %q "$kind")"
 
     set +e
@@ -246,6 +294,7 @@ cmd_plan() {
     [[ "$key" =~ $HOST_KEY_RE ]] || die 3 "Could not read the host key presented by $host."
     pin_host_key "$key"
     printf 'Host key presented by %s: %s\n' "$host" "$key" >&2
+    check_clock
 
     request="$(build_plan_request "${allow[@]}" "$target" "$key" "$DEFINITIONS_DIR" "$@")" || exit 2
 
@@ -253,6 +302,8 @@ cmd_plan() {
     mapfile -t opts < <(pinned_opts)
     {
         printf '%s\n' 'set -uo pipefail'
+        emit_sources engine/preflight.sh
+        printf '%s\n' 'dssa_require_commands plan || exit 3'
         emit_sources modules/software/package_manager.sh discovery/panel.sh discovery/ports.sh \
             engine/definitions.sh engine/plan.sh
         printf 'req=%q\n' "$request"
@@ -321,7 +372,7 @@ cmd_apply() {
         printf 'DSSA_PLAN=%q\n' "$plan"
         printf 'DSSA_DEFINITIONS=%q\n' "$definitions"
         printf '%s\n' 'case "${1:-}" in' \
-            '    start) runner_start "$DSSA_PLAN_ID" "$0" ;;' \
+            '    start) runner_start "$DSSA_PLAN_ID" "$0" "$DSSA_PLAN" "$DSSA_DEFINITIONS" ;;' \
             '    run) runner_run "$DSSA_PLAN" "$DSSA_DEFINITIONS" ;;' \
             '    *) echo "ERROR: Unknown bundle mode." >&2; exit 2 ;;' \
             'esac'

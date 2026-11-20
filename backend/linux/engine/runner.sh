@@ -17,7 +17,7 @@
 #   DSSA_STATUS <word>          finished | running | interrupted | none
 #   DSSA_EXIT <code>
 #
-# Requires journal.sh (and, for runner_start, the full engine). The
+# Requires preflight.sh and journal.sh (and, for runner_start, the full engine). The
 # process umask is never changed (package scripts depend on it); DSSA's
 # own files are created private one by one.
 
@@ -54,14 +54,20 @@ _runner_retention() {
     done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -mtime +"$DSSA_TX_RETENTION_DAYS" 2>/dev/null)
 }
 
-# Usage: runner_start PLAN_ID BUNDLE_PATH
+# Usage: runner_start PLAN_ID BUNDLE_PATH [PLAN_JSON DEFINITIONS_JSON]
 # BUNDLE_PATH is this bundle's root-owned copy; it is moved into the run
-# folder and run again there with the "run" argument.
+# folder and run again there with the "run" argument. The plan and
+# definitions decide which commands the run needs (4.39).
 runner_start() {
-    local plan_id="$1" bundle="$2" state run pid rc
+    local plan_id="$1" bundle="$2" plan="${3:-}" definitions="${4:-}" state run pid rc
 
     _tx_require_privilege || return 2
     _tx_valid_plan_id "$plan_id" || return 2
+    if ! dssa_require_commands apply "$plan" "$definitions" || ! _tx_check_state_dir; then
+        rm -f -- "$bundle"
+        printf 'DSSA_EXIT 2\n'
+        return 2
+    fi
     state="$(_tx_state_dir)"
     mkdir -p -- "$state/runs" && chmod 700 -- "$state" "$state/runs" || return 2
     _runner_retention
@@ -122,6 +128,7 @@ runner_report() {
     local plan_id="$1" run tx status
     _tx_require_privilege || return 2
     _tx_valid_plan_id "$plan_id" || return 2
+    dssa_require_commands report && _tx_check_state_dir || { printf 'DSSA_EXIT 2\n'; return 2; }
     run="$(_runner_dir "$plan_id")"
     tx="$(_tx_dir "$plan_id")"
 
@@ -151,6 +158,7 @@ runner_resume() {
     local plan_id="$1" manager="$2" run result rc
     _tx_require_privilege || return 2
     _tx_valid_plan_id "$plan_id" || return 2
+    dssa_require_commands apply && _tx_check_state_dir || { printf 'DSSA_EXIT 2\n'; return 2; }
     result="$(resume_rollback "$plan_id" "$manager")"
     rc=$?
     run="$(_runner_dir "$plan_id")"

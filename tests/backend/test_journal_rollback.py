@@ -11,6 +11,7 @@ import json
 import re
 import os
 import shlex
+import stat
 import subprocess
 import tempfile
 import time
@@ -821,6 +822,9 @@ apply_component {PLAN_A} apt {shlex.quote(json.dumps(simple_definition(support="
     def test_old_finished_transactions_are_removed(self):
         old = self.root / "var/lib/dssa/transactions" / PLAN_B
         old.mkdir(parents=True)
+        # As an earlier run leaves them: private (4.39 refuses anything else).
+        for folder in (old.parent.parent, old.parent):
+            folder.chmod(0o700)
         (old / "journal.jsonl").write_text("")
         (old / "result.json").write_text("{}")
         past = time.time() - 31 * 86400
@@ -1013,6 +1017,122 @@ class ServiceStabilityTests(FakeServer):
         self.assertEqual(rc, 0)
         enable = [e for e in self.journal() if e.get("type") == "service_enable" and e["phase"] == "done"]
         self.assertNotIn("detail", enable[0])
+
+
+class StateFolderTests(FakeServer):
+    """The state folder is refused, never repaired, when unsafe (4.39)."""
+
+    def state_dir(self):
+        return self.root / "var/lib/dssa"
+
+    def assert_refused(self, result, text):
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(text, result.stderr)
+        self.assertIn("Nothing was changed", result.stderr)
+        self.assertEqual(self.read("packages.json"), INITIAL_PACKAGES)
+
+    def test_symlinked_state_folder_is_refused(self):
+        elsewhere = Path(self.tmp.name) / "elsewhere"
+        elsewhere.mkdir(mode=0o700)
+        (self.root / "var/lib").mkdir(parents=True)
+        self.state_dir().symlink_to(elsewhere)
+        result = self.bash(f"begin_transaction {PLAN_A} apt '[]'")
+        self.assert_refused(result, "var/lib/dssa is a symlink")
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_symlinked_parent_or_subfolder_is_refused(self):
+        elsewhere = Path(self.tmp.name) / "elsewhere"
+        (elsewhere / "lib").mkdir(parents=True)
+        (self.root / "var").symlink_to(elsewhere)
+        self.assert_refused(self.bash(f"begin_transaction {PLAN_A} apt '[]'"), "/var is a symlink")
+        (self.root / "var").unlink()
+
+        self.state_dir().mkdir(parents=True, mode=0o700)
+        self.state_dir().chmod(0o700)
+        (self.state_dir() / "transactions").symlink_to(elsewhere)
+        self.assert_refused(self.bash(f"begin_transaction {PLAN_A} apt '[]'"), "transactions is a symlink")
+        self.assertFalse((elsewhere / PLAN_A).exists())
+
+    def test_group_writable_state_folder_is_refused_not_repaired(self):
+        self.state_dir().mkdir(parents=True)
+        self.state_dir().chmod(0o770)
+        result = self.bash(f"begin_transaction {PLAN_A} apt '[]'")
+        self.assert_refused(result, "writable by group or others (mode 770)")
+        self.assertEqual(stat.S_IMODE(self.state_dir().stat().st_mode), 0o770)
+        self.assertFalse((self.state_dir() / "transactions").exists())
+
+    def test_folder_owned_by_someone_else_is_refused(self):
+        self.state_dir().mkdir(parents=True)
+        self.state_dir().chmod(0o700)
+        # A non-root test cannot chown; a stat that reports another owner
+        # for the state folder stands in for it.
+        fake = self.state / "bin/stat"
+        fake.write_text('#!/bin/sh\ncase "$*" in *var/lib/dssa*"%u %a"*|*"%u %a"*var/lib/dssa*) '
+                        'echo "4321 700"; exit 0 ;; esac\nexec /usr/bin/stat "$@"\n')
+        fake.chmod(0o755)
+        result = self.bash(f"begin_transaction {PLAN_A} apt '[]'")
+        self.assert_refused(result, "is owned by uid 4321")
+
+    def test_resume_rollback_checks_the_folder_too(self):
+        self.apply(simple_definition(), "apt-test")
+        self.state_dir().chmod(0o757)
+        result = self.bash(f"resume_rollback {PLAN_A} apt")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("writable by group or others", result.stderr)
+
+    def test_private_folder_from_an_earlier_run_is_accepted(self):
+        self.apply(simple_definition(), "apt-test")
+        code, result, _ = self.apply(simple_definition(), "apt-test", plan_id=PLAN_B)
+        self.assertEqual(code, 0)
+        self.assertEqual(stat.S_IMODE(self.state_dir().stat().st_mode), 0o700)
+
+
+class VersionPatternTests(FakeServer):
+    """An executable check can require its version output to match (4.39)."""
+
+    def definition(self, pattern):
+        definition = simple_definition()
+        check = definition["variants"][0]["verification"][1]
+        check["version_pattern"] = pattern
+        return definition
+
+    def verify(self, output, pattern=r"^testtool [0-9]+\."):
+        self.write("packages.json", {**INITIAL_PACKAGES, "testtool": "1.0"})
+        binary = self.state / "bin/testtool"
+        binary.write_text(f"#!/bin/sh\nprintf '%s\\n' {shlex.quote(output)}\nexit 0\n")
+        binary.chmod(0o755)
+        return self.bash(f"verify_component apt {shlex.quote(json.dumps(self.definition(pattern)))} apt-test")
+
+    def test_matching_output_passes(self):
+        result = self.verify("testtool 2.4.1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["outcome"], "verified")
+
+    def test_usage_text_with_exit_0_fails(self):
+        result = self.verify("usage: testtool [options] <file>")
+        self.assertEqual(result.returncode, 5)
+        self.assertEqual(json.loads(result.stdout)["outcome"], "verification_failed")
+        self.assertIn('Version output of testtool does not match "^testtool [0-9]+\\.": usage: testtool',
+                      result.stderr)
+
+    def test_only_the_first_line_counts(self):
+        result = self.verify("Warning: old config\ntesttool 2.4.1")
+        self.assertEqual(result.returncode, 5)
+
+    def test_failed_match_after_install_rolls_back(self):
+        self.write("pkg_bins.json", {})
+        prelude = ("printf '#!/bin/sh\\necho usage: testtool\\n' > \"$MOCK_STATE/bin/testtool\"; "
+                   "chmod 755 \"$MOCK_STATE/bin/testtool\"")
+        code, result, _ = self.apply(self.definition(r"^testtool [0-9]+"), "apt-test", prelude=prelude)
+        self.assertEqual(code, 3)
+        self.assertEqual(result["outcome"], "failed_rolled_back")
+        self.assertNotIn("testtool", self.read("packages.json"))
+
+    def test_invalid_pattern_fails_validation(self):
+        for pattern in ("(", "a;b", "x`y", ""):
+            with self.subTest(pattern=pattern):
+                result = self.bash(f"validate_component_definition {shlex.quote(json.dumps(self.definition(pattern)))}")
+                self.assertNotEqual(result.returncode, 0)
 
 
 class AuditPathTests(unittest.TestCase):

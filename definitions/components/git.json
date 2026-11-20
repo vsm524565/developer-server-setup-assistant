@@ -45,7 +45,8 @@
           "name": "git",
           "version_args": [
             "--version"
-          ]
+          ],
+          "version_pattern": "^git version [0-9]+\\."
         }
       ],
       "rollback": {
@@ -92,7 +93,8 @@
           "name": "git",
           "version_args": [
             "--version"
-          ]
+          ],
+          "version_pattern": "^git version [0-9]+\\."
         }
       ],
       "rollback": {

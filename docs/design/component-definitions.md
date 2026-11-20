@@ -202,7 +202,7 @@ component.
 | `type` | Parameters |
 |---|---|
 | `packages_installed` | `packages` |
-| `executable` | `name`, optional `version_args` (output to stderr) |
+| `executable` | `name`, optional `version_args` (output to stderr), optional `version_pattern` (4.39: a POSIX extended regex, at most 200 characters, that the first output line must match; needs `version_args`) |
 | `service_active` | `unit` |
 | `service_enabled` | `unit` |
 | `tcp_listening` | `port` |

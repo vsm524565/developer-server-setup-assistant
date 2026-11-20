@@ -14,14 +14,37 @@ before running anything.
   MOCK_SSH_KILL_TTY  if set, a terminal (-t) session's client is killed
   MOCK_SSH_KEY       if set, the only -i key the "server" accepts (4.38)
   MOCK_SSH_FAIL_STAGE  if set, the bundle upload (cat > .cache/dssa/...) fails
+  MOCK_CLOCK_SKEW    seconds added to the "server" clock in the plan's
+                     clock read (4.39); MOCK_NTP is its NTPSynchronized
+                     answer (default "yes"); MOCK_CLOCK_RAW replaces the
+                     whole answer
+  MOCK_REMOTE_HIDE   space-separated commands missing on the "server":
+                     the remote side gets a PATH without them (4.39)
 """
 
 import json
 import os
 import subprocess
 import sys
+import time
 
 VALUE_FLAGS = {"-F", "-i", "-o", "-p", "-l"}
+
+
+def hide_commands(path, hidden, home):
+    """A PATH of one folder linking every command on PATH except HIDDEN."""
+    folder = os.path.join(os.path.dirname(home), "hidden-path-" + "-".join(sorted(hidden)))
+    if not os.path.isdir(folder):
+        os.makedirs(folder)
+        for directory in path.split(":"):
+            if not os.path.isdir(directory):
+                continue
+            for name in os.listdir(directory):
+                link = os.path.join(folder, name)
+                if name in hidden or os.path.lexists(link):
+                    continue
+                os.symlink(os.path.join(directory, name), link)
+    return folder
 
 
 def main(argv):
@@ -89,8 +112,20 @@ def main(argv):
         # The laptop's ssh client is killed mid-session (a dropped link).
         os.kill(os.getpid(), 9)
 
+    if command.startswith("date -u +%s;") and "MOCK_CLOCK_RAW" in os.environ:
+        print(os.environ["MOCK_CLOCK_RAW"])
+        return 0
+    if command.startswith("date -u +%s;") and (
+            "MOCK_CLOCK_SKEW" in os.environ or "MOCK_NTP" in os.environ):
+        print(int(time.time()) + int(os.environ.get("MOCK_CLOCK_SKEW", "0")))
+        print(os.environ.get("MOCK_NTP", "yes"))
+        return 0
+
     home = os.environ["MOCK_REMOTE_HOME"]
     env = dict(os.environ, HOME=home)
+    hidden = os.environ.get("MOCK_REMOTE_HIDE", "").split()
+    if hidden:
+        env["PATH"] = hide_commands(env["PATH"], hidden, home)
     return subprocess.run(["bash", "-c", command], cwd=home, env=env, check=False).returncode
 
 

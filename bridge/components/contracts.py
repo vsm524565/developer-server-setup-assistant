@@ -44,6 +44,9 @@ TEMPLATE_RE = re.compile(r"^[a-z0-9_-]+(/[a-z0-9_.-]+)*$")
 MODE_RE = re.compile(r"^0[0-7]{3}$")
 OWNER_RE = re.compile(r"^[a-z_][a-z0-9_-]*(:[a-z_][a-z0-9_-]*)?$")
 STATUS_RE = re.compile(r"^[1-5](xx|[0-9]{2})$")
+# 4.39: a POSIX extended regex from characters that mean the same in
+# bash and Python; the first line of version output must match it.
+VERSION_PATTERN_RE = re.compile(r"^[A-Za-z0-9 ^$.*+?()\[\]{}|\\:_,/-]{1,200}$")
 
 
 class DefinitionError(ValueError):
@@ -107,6 +110,15 @@ def _texts(pattern, allow_empty=True):
             allow_empty=allow_empty,
         )
     return parse
+
+
+def _version_pattern(value, where):
+    _text(value, where, VERSION_PATTERN_RE)
+    try:
+        re.compile(value)
+    except re.error:
+        _fail(where, "not a valid regular expression")
+    return value
 
 
 def _port(value, where):
@@ -259,7 +271,8 @@ CHECK_TYPES = {
     ),
     "executable": (
         {"name": lambda v, w: _text(v, w, EXECUTABLE_RE)},
-        {"version_args": _texts(re.compile(r"^-{1,2}[a-z][a-z-]*$"))},
+        {"version_args": _texts(re.compile(r"^-{1,2}[a-z][a-z-]*$")),
+         "version_pattern": _version_pattern},
     ),
     "service_active": ({"unit": lambda v, w: _text(v, w, UNIT_RE)}, {}),
     "service_enabled": ({"unit": lambda v, w: _text(v, w, UNIT_RE)}, {}),
@@ -294,6 +307,9 @@ def _action(value, where, catalog):
     for key, raw in params.items():
         parser = required.get(key) or optional[key]
         parsed[key] = parser(raw, f"{where}.{key}")
+
+    if "version_pattern" in parsed and not parsed.get("version_args"):
+        _fail(f"{where}.version_pattern", "needs version_args")
 
     return Action(action_type=action_type, params=parsed)
 

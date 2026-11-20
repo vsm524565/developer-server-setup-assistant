@@ -320,5 +320,53 @@ class LoaderTests(unittest.TestCase):
                 )
 
 
+class VersionPatternContractTests(unittest.TestCase):
+    """version_pattern on executable checks, in Python and bash (4.39)."""
+
+    def with_pattern(self, pattern, args=("--version",)):
+        definition = load_repo_definition("git")
+        for variant in definition["variants"]:
+            for check in variant["verification"]:
+                if check["type"] == "executable":
+                    check["version_pattern"] = pattern
+                    if args is None:
+                        check.pop("version_args", None)
+        return definition
+
+    def test_repository_patterns_match_real_output(self):
+        samples = {
+            "git": ["git version 2.43.0", "git version 2.53.0"],
+            "docker": ["Docker version 29.1.3, build 29.1.3-0ubuntu4.1",
+                       "Docker version 29.10.0, build 1234567"],
+        }
+        for component, lines in samples.items():
+            for variant in load_repo_definition(component)["variants"]:
+                check = next(c for c in variant["verification"] if c["type"] == "executable")
+                for line in lines:
+                    self.assertRegex(line, check["version_pattern"])
+                self.assertNotRegex("usage: %s [options]" % component, check["version_pattern"])
+
+    def test_valid_pattern_is_accepted_by_both_validators(self):
+        definition = self.with_pattern(r"^git version [0-9]+\.")
+        parse_component_definition(definition)
+        self.assertTrue(jq_accepts(definition))
+
+    def test_invalid_patterns_are_refused_by_both_validators(self):
+        cases = {
+            "unbalanced": ("(", ("--version",)),
+            "unsafe characters": ("a;b", ("--version",)),
+            "backtick": ("x`y", ("--version",)),
+            "empty": ("", ("--version",)),
+            "too long": ("a" * 201, ("--version",)),
+            "without version_args": ("^git", None),
+        }
+        for name, (pattern, args) in cases.items():
+            with self.subTest(name):
+                definition = self.with_pattern(pattern, args)
+                with self.assertRaises(DefinitionError):
+                    parse_component_definition(definition)
+                self.assertFalse(jq_accepts(definition))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,9 @@ def has_all($required): . as $o | all($required[]; . as $k | $o | has($k));
 
 def pkg_re: "^[a-z0-9][a-z0-9+._-]{0,127}$";
 def exe_re: "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$";
+# A version_pattern is a POSIX extended regex, at most 200 characters,
+# from a small set that means the same in bash and Python.
+def version_pattern_re: "^[A-Za-z0-9 ^$.*+?()\\[\\]{}|\\\\:_,/-]{1,200}$";
 def path_re: "^(/[A-Za-z0-9._@+-]+)+$";
 def unit_re: "^[A-Za-z0-9][A-Za-z0-9@._-]{0,127}\\.(service|socket|timer|target|mount)$";
 def id_re: "^[a-z][a-z0-9_-]{0,63}$";
@@ -85,8 +88,12 @@ def valid_check:
   if .type == "packages_installed" then
     only(["type","packages"]) and (.packages | nonempty_strs(pkg_re))
   elif .type == "executable" then
-    only(["type","name","version_args"]) and (.name | str(exe_re))
+    only(["type","name","version_args","version_pattern"]) and (.name | str(exe_re))
     and ((.version_args // []) | strs("^-{1,2}[a-z][a-z-]*$"))
+    # 4.39: the first output line must match; only with version_args.
+    and ((has("version_pattern") | not)
+         or ((.version_args // []) | length > 0)
+            and (.version_pattern | str(version_pattern_re)))
   elif .type == "service_active" or .type == "service_enabled" then
     only(["type","unit"]) and (.unit | str(unit_re))
   elif .type == "tcp_listening" then only(["type","port"]) and (.port | port)
@@ -288,6 +295,18 @@ validate_component_definition() {
         echo "ERROR: Component definition failed validation." >&2
         return 1
     fi
+
+    # Each version_pattern must compile as a bash regex (=~ returns 2 if not).
+    local pattern rc
+    while IFS= read -r pattern; do
+        rc=0
+        [[ "" =~ $pattern ]] || rc=$?
+        if (( rc == 2 )); then
+            echo "ERROR: Component definition failed validation: invalid version_pattern." >&2
+            return 1
+        fi
+    done < <(jq -r '.variants[].verification[] | select(.type == "executable") | .version_pattern // empty' \
+                 <<< "$definition")
 }
 
 # Read one field from os-release without sourcing it as shell code.
