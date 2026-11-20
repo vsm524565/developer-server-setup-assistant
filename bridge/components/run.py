@@ -217,6 +217,17 @@ def make_plan(target, components, allow_draft=False, inventory=None):
     return plan_bytes, validate_plan_document(json.loads(plan_bytes))
 
 
+def check_login(target, host_key, inventory=None):
+    """Log in once with the pinned host key (no sudo). Returns the exit code;
+    the backend's explanation goes to the terminal."""
+
+    result = subprocess.run(
+        ["bash", str(RUN_SCRIPT), "check", target, host_key],
+        timeout=60, check=False, env=_env(inventory), stdin=subprocess.DEVNULL,
+    )
+    return result.returncode
+
+
 def _stream(argv, inventory=None, out=None):
     """Run a terminal-using backend command; return (rc, MarkerFilter)."""
 

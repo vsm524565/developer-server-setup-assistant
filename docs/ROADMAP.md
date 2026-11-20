@@ -1279,3 +1279,19 @@ reference build found in this code.
 - [x] 12 new tests; regression 729/729, 1 skipped.
 - [x] Manual verification on ubuntu24 plus the apt flags on all four apt VMs,
       2026-11-19/20 (`docs/testing/manual-4.37-engine-hardening.md`).
+
+### Milestone 4.38 — SSH Key and Approval Fixes — 2026-11-20
+
+Two findings from the 4.37 lab run.
+
+- [x] SSH key per target: `"ssh_key"` in the inventory (absolute or `~/…`,
+      validated); `DSSA_SSH_KEY` still overrides it; default
+      `~/.ssh/id_ed25519`. A refused key is named, with its source, the
+      target and the login, instead of a bare `Permission denied`.
+- [x] `dssa-run.sh check TARGET HOST_KEY`: one login with the pinned host
+      key, no sudo. `main.py apply` runs it before it consumes the
+      approval: a refused key or unreachable server leaves the approval
+      unused.
+- [x] A failed bundle upload exits 5 ("nothing was run there"; audit
+      status `not_run`) instead of 255 ("completion unknown").
+- [x] Manual verification (`docs/testing/manual-4.38-ssh-and-approval.md`).

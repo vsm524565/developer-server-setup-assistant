@@ -100,6 +100,13 @@ DSSA refuses an inventory file that other users can write. In a fresh
 clone (umask 002 makes files group-writable) run
 `chmod 600 config/inventory/*.json` once.
 
+SSH key: `DSSA_SSH_KEY` if set, else the target's `"ssh_key"` in the
+inventory (an absolute path or `~/…`), else `~/.ssh/id_ed25519`. A refused
+key is named in the error. `apply` logs in once before it uses the
+approval, so a refused key or an unreachable server leaves the approval
+unused. Exit 5 means the plan never reached the server: nothing ran
+there, but the approval is used up.
+
 Python never opens SSH or sees a password: `backend/linux/bin/dssa-run.sh`
 owns every connection and trusts only the host key bound into the plan.
 The original paramiko `main.py` workflow and the legacy

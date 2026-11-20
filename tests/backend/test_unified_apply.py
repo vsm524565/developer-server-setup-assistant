@@ -276,7 +276,9 @@ class ApplyTests(Lab):
         before = self.read_mock("packages.json")
         self.present("b")  # also in known_hosts, but not the planned key
         result = self.dssa("apply", "lab1", str(path), plan_digest(plan_bytes))
-        self.assertEqual(result.returncode, 255)
+        # 4.38: refused at the upload, so nothing ran: 5, not 255.
+        self.assertEqual(result.returncode, 5)
+        self.assertIn("nothing was run there", result.stderr)
         self.assertEqual(self.read_mock("packages.json"), before)
         self.assertFalse((self.root / "var/lib/dssa").exists())
 
@@ -584,6 +586,135 @@ class MainTests(Lab):
             code = self.main.main([])
         self.assertEqual(code, 0, stdout.getvalue())
         self.assertIn("othertool    installed", stdout.getvalue())
+
+
+class SshKeyTests(Lab):
+    """Which key DSSA logs in with, and a clear error when it is refused (4.38)."""
+
+    def set_key(self, value):
+        data = json.loads(self.inventory.read_text())
+        data["servers"][0]["ssh_key"] = value
+        self.inventory.write_text(json.dumps(data))
+        self.inventory.chmod(0o600)
+
+    def keys_used(self):
+        return {c["options"].get("-i") for c in self.ssh_calls()}
+
+    def test_default_key_when_nothing_is_set(self):
+        self.plan("testtool")
+        self.assertEqual(self.keys_used(), {str(self.laptop / ".ssh/id_ed25519")})
+
+    def test_refused_key_is_named_in_the_error(self):
+        os.environ["MOCK_SSH_KEY"] = str(self.laptop / ".ssh/lab_key")
+        result = self.dssa("plan", "lab1", "testtool")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn(f"SSH key {self.laptop}/.ssh/id_ed25519 (default) was refused by lab1 "
+                      f"(tester@{HOST})", result.stderr)
+        self.assertIn('Set "ssh_key" for this target in the inventory, or DSSA_SSH_KEY.', result.stderr)
+
+    def test_inventory_key_is_used_and_tilde_expanded(self):
+        key = self.laptop / ".ssh/lab_key"
+        key.write_text("dummy\n")
+        os.environ["MOCK_SSH_KEY"] = str(key)
+        self.set_key("~/.ssh/lab_key")
+        _, plan, path = self.plan("testtool")
+        self.approve(path.read_bytes())
+        outcome, terminal = self.apply(plan, path.read_bytes())
+        self.assertEqual(outcome.exit_code, 0, terminal)
+        self.assertEqual(self.keys_used(), {str(key)})
+
+    def test_environment_overrides_the_inventory(self):
+        env_key = self.base / "env_key"
+        env_key.write_text("dummy\n")
+        self.set_key("~/.ssh/id_ed25519")
+        os.environ["DSSA_SSH_KEY"] = str(env_key)
+        os.environ["MOCK_SSH_KEY"] = str(self.laptop / ".ssh/id_ed25519")
+        result = self.dssa("plan", "lab1", "testtool")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn(f"SSH key {env_key} (from DSSA_SSH_KEY) was refused", result.stderr)
+
+    def test_unsafe_inventory_key_paths_are_refused(self):
+        for value in ("relative/key", "~/../etc/key", "/tmp/a key", "~/.ssh/k;rm"):
+            self.set_key(value)
+            result = self.dssa("plan", "lab1", "testtool")
+            self.assertEqual(result.returncode, 3, value)
+            self.assertIn('Invalid ssh_key for "lab1"', result.stderr, value)
+        self.assertEqual(self.ssh_calls(), [])
+
+    def test_missing_key_file_is_named(self):
+        self.set_key("~/.ssh/nope")
+        result = self.dssa("plan", "lab1", "testtool")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn(f"SSH key {self.laptop}/.ssh/nope (from the inventory) is missing", result.stderr)
+
+
+class LoginCheckTests(Lab):
+    """apply logs in before it uses the approval; a failed upload is exit 5 (4.38)."""
+
+    def setUp(self):
+        super().setUp()
+        import main
+        self.main = main
+        main.DEFINITIONS_DIR = str(self.defs)
+        self.addCleanup(setattr, main, "DEFINITIONS_DIR", None)
+
+    def consumed(self, plan_id):
+        return (Path(os.environ["XDG_STATE_HOME"]) / "developer-server-setup-assistant/approvals"
+                / plan_id / "consumed").exists()
+
+    def test_check_command(self):
+        plan_bytes, plan, _ = self.plan("testtool")
+        ok = self.dssa("check", "lab1", plan["target"]["host_key_sha256"])
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertIn("Login to lab1 (tester@192.0.2.10) works with", ok.stderr)
+        self.assertFalse(any(c["tty"] for c in self.ssh_calls()), "no sudo, no terminal")
+        os.environ["MOCK_SSH_KEY"] = "/nowhere"
+        refused = self.dssa("check", "lab1", plan["target"]["host_key_sha256"])
+        self.assertEqual(refused.returncode, 3)
+        self.assertIn("was refused by lab1", refused.stderr)
+        bad = self.dssa("check", "lab1", "SHA256:short")
+        self.assertEqual(bad.returncode, 2)
+
+    def test_refused_login_keeps_the_approval(self):
+        plan_bytes, plan, _ = self.plan("testtool")
+        self.approve(plan_bytes)
+        os.environ["MOCK_SSH_KEY"] = "/nowhere"
+        with mock.patch.object(self.main, "target_host", return_value={"host": HOST}), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            code = self.main.step_apply(plan["plan_id"], None)
+        self.assertEqual(code, 2)
+        self.assertIn("cannot log in to the server. The approval was not used.", stdout.getvalue())
+        self.assertFalse(self.consumed(plan["plan_id"]))
+
+        # Once the key works, the same approval applies.
+        del os.environ["MOCK_SSH_KEY"]
+        real_apply = run.apply_plan
+        with mock.patch.object(self.main, "target_host", return_value={"host": HOST}), \
+             mock.patch.object(run, "apply_plan", lambda *a, **k: real_apply(*a, **k, out=io.BytesIO())), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            code = self.main.step_apply(plan["plan_id"], None)
+        self.assertEqual(code, 0, stdout.getvalue())
+        self.assertTrue(self.consumed(plan["plan_id"]))
+
+    def test_failed_upload_is_exit_5_and_says_nothing_ran(self):
+        plan_bytes, plan, _ = self.plan("testtool")
+        before = self.read_mock("packages.json")
+        self.approve(plan_bytes)
+        os.environ["MOCK_SSH_FAIL_STAGE"] = "1"
+        real_apply = run.apply_plan
+        with mock.patch.object(self.main, "target_host", return_value={"host": HOST}), \
+             mock.patch.object(run, "apply_plan", lambda *a, **k: real_apply(*a, **k, out=io.BytesIO())), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            code = self.main.step_apply(plan["plan_id"], None)
+        self.assertEqual(code, 5)
+        text = stdout.getvalue()
+        self.assertIn("Nothing was run on the server. The approval is used up", text)
+        self.assertIn("Exit code : 5 (the plan could not be sent to the server; nothing was run there)", text)
+        self.assertNotIn("may still be going", text)
+        self.assertFalse(any(c["tty"] for c in self.ssh_calls()), "sudo was never reached")
+        self.assertEqual(self.read_mock("packages.json"), before)
+        audit = (self.base / "audit/security.jsonl").read_text().splitlines()
+        self.assertEqual(json.loads(audit[-1])["status"], "not_run")
 
 
 if __name__ == "__main__":

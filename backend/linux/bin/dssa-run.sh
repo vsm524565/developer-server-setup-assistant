@@ -7,6 +7,7 @@
 #
 #   targets                                   JSON list of inventory targets
 #   plan [--allow-draft] TARGET COMPONENT...  read-only plan, no sudo; prints the plan JSON
+#   check TARGET HOST_KEY                     log in once with the pinned key; no sudo
 #   apply TARGET PLAN_FILE PLAN_SHA256        run an approved plan (sudo on the target)
 #   report TARGET PLAN_ID HOST_KEY            fetch the result of an earlier run (sudo)
 #   resume-rollback TARGET PLAN_ID HOST_KEY   roll back an interrupted run (sudo)
@@ -17,6 +18,12 @@
 #
 # apply/report/resume stream the remote terminal to stdout. Result files
 # come back as DSSA_FILE / DSSA_STATUS / DSSA_EXIT marker lines.
+#
+# SSH key (4.38): DSSA_SSH_KEY, else the target's "ssh_key" in the
+# inventory, else ~/.ssh/id_ed25519. A refused key is named in the error.
+#
+# Exit 5: the bundle could not be sent to the target, so nothing was run
+# there (unlike 255, where a run may have started).
 
 set -euo pipefail
 
@@ -25,7 +32,8 @@ LINUX="$BASE_DIR/backend/linux"
 INVENTORY="$LINUX/connection/inventory.sh"
 AUDIT_SCRIPT="$LINUX/logging/audit.sh"
 DEFINITIONS_DIR="${DSSA_DEFINITIONS_DIR:-$BASE_DIR/definitions/components}"
-SSH_KEY="${DSSA_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+SSH_KEY=""
+KEY_SOURCE=""
 KNOWN_HOSTS="${DSSA_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
 SSH_BIN="${DSSA_SSH_BIN:-ssh}"
 PLAN_ID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -43,7 +51,7 @@ trap 'rm -rf -- "$WORK"' EXIT
 die() { printf 'ERROR: %s\n' "$2" >&2; exit "$1"; }
 
 usage() {
-    sed -n '2,20p' "${BASH_SOURCE[0]}" >&2
+    sed -n '2,28p' "${BASH_SOURCE[0]}" >&2
     exit 2
 }
 
@@ -58,11 +66,43 @@ resolve_target() {
     port="$(jq -er .ssh_port <<< "$target_json")"
     user="$(jq -er .ssh_user <<< "$target_json")"
     lab="$(jq -r '.lab == true' <<< "$target_json")"
+    resolve_ssh_key "$(jq -r '.ssh_key // empty' <<< "$target_json")"
     [[ "$host" =~ ^[a-zA-Z0-9.-]+$ && "$user" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ &&
        "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) ||
         die 3 "Invalid inventory fields."
-    [[ -f "$SSH_KEY" && -f "$KNOWN_HOSTS" ]] || die 3 "SSH identity or known_hosts missing."
+    [[ -f "$SSH_KEY" && ! -L "$SSH_KEY" ]] ||
+        die 3 "SSH key $SSH_KEY ($KEY_SOURCE) is missing or a symlink."
+    [[ -f "$KNOWN_HOSTS" ]] || die 3 "known_hosts missing: $KNOWN_HOSTS"
     if [[ "$port" == 22 ]]; then host_spec="$host"; else host_spec="[$host]:$port"; fi
+}
+
+# Pick the private key: the environment overrides the inventory, which
+# overrides the default. An inventory path is absolute or starts with ~/.
+resolve_ssh_key() {
+    local field="$1"
+    if [[ -n "${DSSA_SSH_KEY:-}" ]]; then
+        SSH_KEY="$DSSA_SSH_KEY"; KEY_SOURCE="from DSSA_SSH_KEY"
+    elif [[ -n "$field" ]]; then
+        [[ "$field" =~ ^(~/|/)[A-Za-z0-9._/-]+$ && "$field" != *..* ]] ||
+            die 3 "Invalid ssh_key for \"$target\" in the inventory."
+        [[ "$field" == "~/"* ]] && field="$HOME/${field#\~/}"
+        SSH_KEY="$field"; KEY_SOURCE="from the inventory"
+    else
+        SSH_KEY="$HOME/.ssh/id_ed25519"; KEY_SOURCE="default"
+    fi
+}
+
+# Explain a failed login from ssh's stderr (file $1).
+ssh_failure() {
+    local log="$1" what="$2"
+    if grep -q 'Permission denied' "$log" 2>/dev/null; then
+        printf 'ERROR: SSH key %s (%s) was refused by %s (%s@%s).\n' \
+            "$SSH_KEY" "$KEY_SOURCE" "$target" "$user" "$host" >&2
+        printf '       Set "ssh_key" for this target in the inventory, or DSSA_SSH_KEY.\n' >&2
+    elif [[ -s "$log" ]]; then
+        grep -v '^debug' "$log" | tail -3 >&2
+    fi
+    printf 'ERROR: %s\n' "$what" >&2
 }
 
 audit() {
@@ -92,8 +132,10 @@ presented_host_key() {
     mapfile -t opts < <(ssh_base)
     log="$WORK/hostkey.log"
     "$SSH_BIN" "${opts[@]}" -o UserKnownHostsFile="$KNOWN_HOSTS" -o LogLevel=DEBUG1 \
-        -- "$host" true < /dev/null > /dev/null 2> "$log" ||
-        die 3 "Could not connect to $host to read its host key (is it in known_hosts?)."
+        -- "$host" true < /dev/null > /dev/null 2> "$log" || {
+        ssh_failure "$log" "Could not log in to $host to read its host key."
+        exit 3
+    }
     sed -n 's/^debug1: Server host key: [^ ]* \(SHA256:[A-Za-z0-9+/]*\)\r*$/\1/p' "$log" | head -1
 }
 
@@ -155,8 +197,10 @@ run_as_root() {
     stage=".cache/dssa/$plan_id-$kind.sh"
 
     "$SSH_BIN" "${opts[@]}" -- "$host" \
-        "umask 077 && mkdir -p .cache/dssa && cat > $stage" < "$bundle_file" ||
-        die 255 "Could not stage the bundle on $host."
+        "umask 077 && mkdir -p .cache/dssa && cat > $stage" < "$bundle_file" 2> "$WORK/stage.log" || {
+        ssh_failure "$WORK/stage.log" "Could not send the bundle to $host; nothing was run there."
+        return 5
+    }
 
     # One line on purpose: printf %q then quotes it with backslashes only,
     # which any POSIX login shell on the target understands ($'...' needs bash).
@@ -224,6 +268,23 @@ cmd_plan() {
     printf '%s\n' "$plan_json"
 }
 
+# Log in once with the plan's pinned host key and run `true` (no sudo).
+# main.py calls this before it uses up the approval (4.38).
+cmd_check() {
+    [[ $# -eq 2 ]] || usage
+    local key="$2"
+    resolve_target "$1"
+    [[ "$key" =~ $HOST_KEY_RE ]] || die 2 "Invalid host key."
+    pin_host_key "$key"
+    local -a opts
+    mapfile -t opts < <(pinned_opts)
+    "$SSH_BIN" "${opts[@]}" -- "$host" true < /dev/null > /dev/null 2> "$WORK/check.log" || {
+        ssh_failure "$WORK/check.log" "Could not log in to $host."
+        exit 3
+    }
+    printf 'Login to %s (%s@%s) works with %s (%s).\n' "$target" "$user" "$host" "$SSH_KEY" "$KEY_SOURCE" >&2
+}
+
 cmd_apply() {
     [[ $# -eq 3 ]] || usage
     local plan_file="$2" expected="$3" plan plan_id key actual definitions='[]' id content rc
@@ -274,7 +335,7 @@ cmd_apply() {
 
     rc=0
     run_as_root "$WORK/apply-bundle.sh" start "$plan_id" || rc=$?
-    audit run.completed "$( ((rc == 0)) && echo success || { ((rc == 255)) && echo unknown || echo failed; })" \
+    audit run.completed "$( ((rc == 0)) && echo success || { ((rc == 255)) && echo unknown || { ((rc == 5)) && echo not_run || echo failed; }; })" \
         "$rc" "$(jq -cn --arg p "$plan_id" '{plan_id: $p}')" ||
         echo "ERROR: Outcome audit recording failed; inspect the server before retrying." >&2
     exit "$rc"
@@ -311,6 +372,7 @@ shift || true
 case "$command" in
     targets) cmd_targets ;;
     plan) cmd_plan "$@" ;;
+    check) cmd_check "$@" ;;
     apply) cmd_apply "$@" ;;
     report) cmd_remote_simple report "$@" ;;
     resume-rollback) cmd_remote_simple resume "$@" ;;

@@ -12,6 +12,8 @@ before running anything.
   MOCK_REMOTE_HOME directory used as the remote $HOME and cwd
   MOCK_SSH_LOG     one JSON line per call: options and command
   MOCK_SSH_KILL_TTY  if set, a terminal (-t) session's client is killed
+  MOCK_SSH_KEY       if set, the only -i key the "server" accepts (4.38)
+  MOCK_SSH_FAIL_STAGE  if set, the bundle upload (cat > .cache/dssa/...) fails
 """
 
 import json
@@ -72,6 +74,16 @@ def main(argv):
     if options.get("LogLevel") == "DEBUG1":
         print(f"debug1: Server host key: {presented[0]} {os.environ['MOCK_HOST_FP']}",
               file=sys.stderr)
+
+    allowed = os.environ.get("MOCK_SSH_KEY")
+    if allowed and options.get("-i") != allowed:
+        print(f"{options.get('-l', 'user')}@{host}: Permission denied (publickey,password).",
+              file=sys.stderr)
+        return 255
+
+    if os.environ.get("MOCK_SSH_FAIL_STAGE") and "cat > .cache/dssa/" in command:
+        print("client_loop: send disconnect: Connection reset by peer", file=sys.stderr)
+        return 255
 
     if tty and os.environ.get("MOCK_SSH_KILL_TTY"):
         # The laptop's ssh client is killed mid-session (a dropped link).

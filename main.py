@@ -42,6 +42,7 @@ EXIT_MEANING = {
     2: "refused before any change",
     3: "some components failed and were rolled back, or were skipped",
     4: "rollback incomplete or engine error: the server needs review",
+    5: "the plan could not be sent to the server; nothing was run there",
     255: "the connection failed; remote completion is not confirmed (use report)",
 }
 
@@ -71,9 +72,12 @@ def show_plan(plan, plan_bytes):
 def show_outcome(outcome, kind="apply"):
     print("\n=== RESULT ===")
     summary = outcome.summary
+    code = outcome.exit_code if outcome.exit_code is not None else outcome.rc
     if summary is None:
         print("No result came back from the server.")
-        if outcome.status == "interrupted":
+        if code == 5:
+            print("Nothing was run on the server. The approval is used up: plan and approve again.")
+        elif outcome.status == "interrupted":
             print("The run stopped before finishing. Next: python main.py report PLAN_ID,")
             print("then python main.py resume-rollback PLAN_ID to undo it.")
         elif outcome.status != "running":
@@ -98,7 +102,6 @@ def show_outcome(outcome, kind="apply"):
         print(f"Run state : {outcome.status}")
     if outcome.directory:
         print(f"Saved copy: {outcome.directory}")
-    code = outcome.exit_code if outcome.exit_code is not None else outcome.rc
     if kind == "report":
         meaning = "result fetched" if code == 0 else "could not fetch the result"
     elif kind == "resume" and code == 0:
@@ -178,6 +181,12 @@ def step_apply(plan_id, inventory):
             print(f"  - {issue}")
         return 2
     else:
+        # Log in first (4.38): a refused key or an unreachable server must
+        # not use up the single-use approval.
+        login = run.check_login(target, plan["target"]["host_key_sha256"], inventory)
+        if login != 0:
+            print("Apply refused: cannot log in to the server. The approval was not used.")
+            return 2
         try:
             consume_approval(plan_id, keys, definitions_dir=DEFINITIONS_DIR)
         except ApprovalError as error:
