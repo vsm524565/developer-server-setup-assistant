@@ -1,0 +1,120 @@
+{
+  "schema_version": "1.0",
+  "id": "varnish",
+  "display_name": "Varnish Cache",
+  "category": "proxy_ssl",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "varnish"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          6081
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "varnish"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "varnish.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "varnish.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "varnish"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "varnish.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 6081
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    },
+    {
+      "variant_id": "dnf-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "varnish"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          6081
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "varnish"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "varnish.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "varnish.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "varnish"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "varnish.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 6081
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    }
+  ]
+}

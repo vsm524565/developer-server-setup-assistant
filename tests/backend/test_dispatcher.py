@@ -18,6 +18,11 @@ class DispatcherTests(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
 
         self.env = os.environ.copy()
+
+        # Legacy dispatcher tests use the repository's fixture inventory.
+        # Do not inherit the operator's six-VM development inventory.
+        self.env.pop("DSSA_INVENTORY_FILE", None)
+
         self.env["DSSA_LOG_DIR"] = self.tempdir.name
 
         self.request = json.loads(EXAMPLE.read_text())
@@ -120,7 +125,10 @@ class DispatcherTests(unittest.TestCase):
             env=env,
             timeout=10,
         )
-
+    @unittest.skipUnless(
+        os.environ.get("DSSA_LIVE_DISPATCHER_TESTS") == "1",
+        "Requires a configured legacy integration-test VM.",
+    )
     def test_web_server_discovery_request(self):
         """Web-server discovery must pass through the dispatcher."""
         self.request["operation"] = "discovery.web_servers"
@@ -183,7 +191,10 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(
             self.audit_events()[0]["event"], "request.rejected"
         )
-
+    @unittest.skipUnless(
+        os.environ.get("DSSA_LIVE_DISPATCHER_TESTS") == "1",
+        "Requires a configured legacy integration-test VM.",
+    )
     def test_valid_discovery_request(self):
         result = self.run_dispatcher(self.request)
 
@@ -275,6 +286,10 @@ class DispatcherTests(unittest.TestCase):
             response["errors"][0]["code"],
             "AUDIT_FAILURE",
         )
+    @unittest.skipUnless(
+        os.environ.get("DSSA_LIVE_DISPATCHER_TESTS") == "1",
+        "Requires a configured legacy integration-test VM.",
+    )
     def test_package_manager_discovery_request(self):
         self.request["operation"] = "discovery.package_manager"
         self.request["request_id"] = "req-package-test-001"
@@ -309,7 +324,6 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(events[1]["status"], "success")
         self.assertEqual(events[1]["exit_code"], 0)
 
-
     def test_package_manager_rejects_unexpected_parameters(self):
         self.request["operation"] = "discovery.package_manager"
         self.request["parameters"] = {
@@ -328,7 +342,10 @@ class DispatcherTests(unittest.TestCase):
 
         events = self.audit_events()
         self.assertEqual(events[0]["event"], "request.rejected")
-
+    @unittest.skipUnless(
+        os.environ.get("DSSA_LIVE_DISPATCHER_TESTS") == "1",
+        "Requires a configured legacy integration-test VM.",
+    )
     def test_runtime_discovery_request(self):
         self.request["operation"] = "discovery.runtimes"
         self.request["request_id"] = "req-runtimes-test-001"
@@ -392,6 +409,10 @@ class DispatcherTests(unittest.TestCase):
 
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["event"], "request.rejected")
+    @unittest.skipUnless(
+        os.environ.get("DSSA_LIVE_DISPATCHER_TESTS") == "1",
+        "Requires a configured legacy integration-test VM.",
+    )
     def test_swap_filesystem_discovery_request(self):
         request = self.swap_filesystem_request()
 

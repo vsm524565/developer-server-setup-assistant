@@ -1,0 +1,94 @@
+{
+  "schema_version": "1.0",
+  "id": "java",
+  "display_name": "Java (OpenJDK 21, headless)",
+  "category": "runtime",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "openjdk-21-jdk-headless"
+        ]
+      },
+      "conflicts": {},
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "openjdk-21-jdk-headless"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "openjdk-21-jdk-headless"
+          ]
+        },
+        {
+          "type": "executable",
+          "name": "java",
+          "version_args": [
+            "-version"
+          ],
+          "version_pattern": "^openjdk version"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    },
+    {
+      "variant_id": "dnf-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "java-21-openjdk-headless"
+        ]
+      },
+      "conflicts": {},
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "java-21-openjdk-headless"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "java-21-openjdk-headless"
+          ]
+        },
+        {
+          "type": "executable",
+          "name": "java",
+          "version_args": [
+            "-version"
+          ],
+          "version_pattern": "^openjdk version"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    }
+  ]
+}

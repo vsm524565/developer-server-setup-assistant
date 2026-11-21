@@ -1,0 +1,178 @@
+{
+  "schema_version": "1.0",
+  "id": "opensearch",
+  "display_name": "OpenSearch 3",
+  "category": "database",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "opensearch"
+        ]
+      },
+      "conflicts": {
+        "packages": [
+          "elasticsearch"
+        ],
+        "tcp_ports": [
+          9200
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "opensearch-3x",
+          "key_url": "https://artifacts.opensearch.org/publickeys/opensearch-release.pgp",
+          "key_fingerprint": "A8B2D9E04CD51FEF6AA2DB53BA81D99981191457",
+          "key_path": "/etc/apt/keyrings/opensearch-3x.asc",
+          "source_path": "/etc/apt/sources.list.d/opensearch-3x.sources",
+          "uris": "https://artifacts.opensearch.org/releases/bundle/opensearch/3.x/apt",
+          "suites": [
+            "stable"
+          ],
+          "components": [
+            "main"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "hook",
+          "name": "opensearch_admin_password"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "opensearch"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "opensearch.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "opensearch.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "opensearch"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "opensearch.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 9200
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/opensearch",
+          "/var/lib/opensearch",
+          "/var/log/opensearch",
+          "/root/.dssa"
+        ]
+      },
+      "hooks": {
+        "setup": "opensearch_admin_password"
+      }
+    },
+    {
+      "variant_id": "dnf-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "opensearch"
+        ]
+      },
+      "conflicts": {
+        "packages": [
+          "elasticsearch"
+        ],
+        "tcp_ports": [
+          9200
+        ]
+      },
+      "steps": [
+        {
+          "type": "dnf_vendor_repository",
+          "repository_id": "opensearch-3x",
+          "baseurl": "https://artifacts.opensearch.org/releases/bundle/opensearch/3.x/yum",
+          "key_url": "https://artifacts.opensearch.org/publickeys/opensearch-release.pgp",
+          "key_fingerprint": "A8B2D9E04CD51FEF6AA2DB53BA81D99981191457",
+          "key_path": "/etc/pki/rpm-gpg/opensearch-3x.asc",
+          "repo_path": "/etc/yum.repos.d/opensearch-3x.repo"
+        },
+        {
+          "type": "hook",
+          "name": "opensearch_admin_password"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "opensearch"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "opensearch.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "opensearch.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "opensearch"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "opensearch.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 9200
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/opensearch",
+          "/var/lib/opensearch",
+          "/var/log/opensearch",
+          "/root/.dssa"
+        ]
+      },
+      "hooks": {
+        "setup": "opensearch_admin_password"
+      }
+    }
+  ]
+}

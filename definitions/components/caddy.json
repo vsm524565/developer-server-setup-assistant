@@ -1,0 +1,465 @@
+{
+  "schema_version": "1.0",
+  "id": "caddy",
+  "display_name": "Caddy",
+  "category": "proxy_ssl",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "ubuntu22-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "ubuntu",
+            "versions": [
+              "22.04"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "caddy"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          80,
+          443
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "caddy",
+          "key_url": "https://dl.cloudsmith.io/public/caddy/stable/gpg.key",
+          "key_fingerprint": "65760C51EDEA2017CEA2CA15155B6D79CA56EA34",
+          "key_path": "/etc/apt/keyrings/caddy.asc",
+          "source_path": "/etc/apt/sources.list.d/caddy.sources",
+          "uris": "https://dl.cloudsmith.io/public/caddy/stable/deb/debian",
+          "suites": [
+            "any-version"
+          ],
+          "components": [
+            "main"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "caddy"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "caddy.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "caddy.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "caddy"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "caddy.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 80
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/caddy",
+          "/var/lib/caddy"
+        ]
+      }
+    },
+    {
+      "variant_id": "ubuntu24-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "ubuntu",
+            "versions": [
+              "24.04"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "caddy"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          80,
+          443
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "caddy",
+          "key_url": "https://dl.cloudsmith.io/public/caddy/stable/gpg.key",
+          "key_fingerprint": "65760C51EDEA2017CEA2CA15155B6D79CA56EA34",
+          "key_path": "/etc/apt/keyrings/caddy.asc",
+          "source_path": "/etc/apt/sources.list.d/caddy.sources",
+          "uris": "https://dl.cloudsmith.io/public/caddy/stable/deb/debian",
+          "suites": [
+            "any-version"
+          ],
+          "components": [
+            "main"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "caddy"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "caddy.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "caddy.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "caddy"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "caddy.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 80
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/caddy",
+          "/var/lib/caddy"
+        ]
+      }
+    },
+    {
+      "variant_id": "ubuntu26-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "ubuntu",
+            "versions": [
+              "26.04"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "caddy"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          80,
+          443
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "caddy",
+          "key_url": "https://dl.cloudsmith.io/public/caddy/stable/gpg.key",
+          "key_fingerprint": "65760C51EDEA2017CEA2CA15155B6D79CA56EA34",
+          "key_path": "/etc/apt/keyrings/caddy.asc",
+          "source_path": "/etc/apt/sources.list.d/caddy.sources",
+          "uris": "https://dl.cloudsmith.io/public/caddy/stable/deb/debian",
+          "suites": [
+            "any-version"
+          ],
+          "components": [
+            "main"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "caddy"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "caddy.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "caddy.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "caddy"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "caddy.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 80
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/caddy",
+          "/var/lib/caddy"
+        ]
+      }
+    },
+    {
+      "variant_id": "debian13-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "debian",
+            "versions": [
+              "13"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "caddy"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          80,
+          443
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "caddy",
+          "key_url": "https://dl.cloudsmith.io/public/caddy/stable/gpg.key",
+          "key_fingerprint": "65760C51EDEA2017CEA2CA15155B6D79CA56EA34",
+          "key_path": "/etc/apt/keyrings/caddy.asc",
+          "source_path": "/etc/apt/sources.list.d/caddy.sources",
+          "uris": "https://dl.cloudsmith.io/public/caddy/stable/deb/debian",
+          "suites": [
+            "any-version"
+          ],
+          "components": [
+            "main"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "caddy"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "caddy.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "caddy.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "caddy"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "caddy.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 80
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/caddy",
+          "/var/lib/caddy"
+        ]
+      }
+    },
+    {
+      "variant_id": "el10-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf",
+        "os": [
+          {
+            "id": "almalinux",
+            "versions": [
+              "10"
+            ]
+          },
+          {
+            "id": "rocky",
+            "versions": [
+              "10"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "caddy"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          80,
+          443
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "dnf_vendor_repository",
+          "repository_id": "caddy",
+          "baseurl": "https://dl.cloudsmith.io/public/caddy/stable/rpm/el/10/x86_64",
+          "key_url": "https://dl.cloudsmith.io/public/caddy/stable/gpg.key",
+          "key_fingerprint": "65760C51EDEA2017CEA2CA15155B6D79CA56EA34",
+          "key_path": "/etc/pki/rpm-gpg/caddy.asc",
+          "repo_path": "/etc/yum.repos.d/caddy.repo"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "caddy"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "caddy.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "caddy.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "caddy"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "caddy.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 80
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/caddy",
+          "/var/lib/caddy"
+        ]
+      }
+    }
+  ]
+}

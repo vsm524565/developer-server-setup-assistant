@@ -59,13 +59,42 @@ class RepositoryDefinitionTests(unittest.TestCase):
         cls.definitions = load_component_definitions(catalog=cls.catalog)
 
     def test_expected_components_are_defined(self):
-        # Components phase: 13 new definitions, all draft until lab-verified.
-        self.assertEqual(
-            sorted(self.definitions),
-            ["apache", "certbot", "chrony", "docker", "docker_compose", "fail2ban", "firewall",
-             "git", "mariadb", "mysql", "nginx", "nodejs", "php", "postgresql", "python",
-             "redis", "swap"],
-        )
+        expected = [
+            "apache",
+            "caddy",
+            "certbot",
+            "chrony",
+            "clamav",
+            "composer",
+            "docker",
+            "docker_compose",
+            "elasticsearch",
+            "fail2ban",
+            "firewall",
+            "git",
+            "haproxy",
+            "java",
+            "mariadb",
+            "memcached",
+            "mongodb",
+            "mysql",
+            "nginx",
+            "nodejs",
+            "openlitespeed",
+            "opensearch",
+            "php",
+            "php82",
+            "php83",
+            "php84",
+            "postfix",
+            "postgresql",
+            "python",
+            "redis",
+            "swap",
+            "varnish",
+        ]
+
+        self.assertEqual(sorted(self.definitions), expected)
 
     def test_git_and_docker_are_supported_nginx_is_draft(self):
         # Docker became supported after the owner's lab run (4.34).

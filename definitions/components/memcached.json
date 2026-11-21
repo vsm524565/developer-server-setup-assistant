@@ -1,0 +1,134 @@
+{
+  "schema_version": "1.0",
+  "id": "memcached",
+  "display_name": "Memcached",
+  "category": "cache",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "memcached"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          11211
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "memcached"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "memcached.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "memcached.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "memcached"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "memcached.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 11211
+        },
+        {
+          "type": "executable",
+          "name": "memcached",
+          "version_args": [
+            "-h"
+          ],
+          "version_pattern": "^memcached [0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    },
+    {
+      "variant_id": "dnf-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "memcached"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          11211
+        ]
+      },
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "memcached"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "memcached.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "memcached.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "memcached"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "memcached.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 11211
+        },
+        {
+          "type": "executable",
+          "name": "memcached",
+          "version_args": [
+            "-h"
+          ],
+          "version_pattern": "^memcached [0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    }
+  ]
+}

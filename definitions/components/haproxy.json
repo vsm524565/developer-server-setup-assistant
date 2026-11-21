@@ -1,0 +1,122 @@
+{
+  "schema_version": "1.0",
+  "id": "haproxy",
+  "display_name": "HAProxy",
+  "category": "proxy_ssl",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "haproxy"
+        ]
+      },
+      "conflicts": {
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "haproxy"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "haproxy.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "haproxy.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "haproxy"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "haproxy.service"
+        },
+        {
+          "type": "executable",
+          "name": "haproxy",
+          "version_args": [
+            "-v"
+          ],
+          "version_pattern": "^HAProxy version [0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    },
+    {
+      "variant_id": "dnf-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "haproxy"
+        ]
+      },
+      "conflicts": {
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "haproxy"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "haproxy.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "haproxy.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "haproxy"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "haproxy.service"
+        },
+        {
+          "type": "executable",
+          "name": "haproxy",
+          "version_args": [
+            "-v"
+          ],
+          "version_pattern": "^HAProxy version [0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    }
+  ]
+}

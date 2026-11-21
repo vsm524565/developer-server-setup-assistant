@@ -33,8 +33,13 @@ def path_re: "^(/[A-Za-z0-9._@+-]+)+$";
 def unit_re: "^[A-Za-z0-9][A-Za-z0-9@._-]{0,127}\\.(service|socket|timer|target|mount)$";
 def id_re: "^[a-z][a-z0-9_-]{0,63}$";
 def token_re: "^[a-z0-9][a-z0-9._-]{0,63}$";
+# An apt suite may have path parts, e.g. noble/mongodb-org/8.0 for MongoDB (4.47).
+def suite_re: "^[a-z0-9][a-z0-9._-]{0,63}(/[a-z0-9][a-z0-9._-]{0,63}){0,3}$";
 def host_re: "^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$";
 def url_re: "^https://[A-Za-z0-9.-]+(/[A-Za-z0-9._~/-]*)?$";
+# A signing key URL may carry a simple query (keyserver lookups); the key
+# is checked against its fingerprint after download anyway (4.47).
+def key_url_re: "^https://[A-Za-z0-9.-]+(/[A-Za-z0-9._~/-]*)?([?][A-Za-z0-9=&_.-]{1,200})?$";
 def fpr_re: "^[0-9A-F]{40}$";
 def hook_re: "^[a-z][a-z0-9_]{0,63}$";
 
@@ -53,11 +58,11 @@ def valid_step:
           "source_path","uris","suites","components","architectures"])
     and has_all(["repository_id","key_url","key_fingerprint","key_path",
                  "source_path","uris","suites","components","architectures"])
-    and (.repository_id | str(id_re)) and (.key_url | str(url_re))
+    and (.repository_id | str(id_re)) and (.key_url | str(key_url_re))
     and (.key_fingerprint | str(fpr_re))
     and (.key_path | safe_path) and (.source_path | safe_path)
     and (.uris | str(url_re))
-    and (.suites | nonempty_strs(token_re))
+    and (.suites | nonempty_strs(suite_re))
     and (.components | nonempty_strs(token_re))
     and (.architectures | nonempty_strs(token_re))
   elif .type == "dnf_vendor_repository" then
@@ -66,7 +71,7 @@ def valid_step:
     only(["type","repository_id","baseurl","key_url","key_fingerprint","key_path","repo_path"])
     and has_all(["repository_id","baseurl","key_url","key_fingerprint","key_path","repo_path"])
     and (.repository_id | str(id_re)) and (.baseurl | str(url_re))
-    and (.key_url | str(url_re)) and (.key_fingerprint | str(fpr_re))
+    and (.key_url | str(key_url_re)) and (.key_fingerprint | str(fpr_re))
     and (.key_path | safe_path and str("^/etc/pki/rpm-gpg/[A-Za-z0-9._-]{1,128}$"))
     and (.repo_path | safe_path and str("^/etc/yum\\.repos\\.d/[A-Za-z0-9._-]{1,128}\\.repo$"))
   elif .type == "service_enable" or .type == "service_start" then

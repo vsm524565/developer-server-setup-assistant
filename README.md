@@ -107,9 +107,12 @@ approval, so a refused key or an unreachable server leaves the approval
 unused. Exit 5 means the plan never reached the server: nothing ran
 there, but the approval is used up.
 
-Components (4.47): Nginx, Apache, Certbot, MariaDB (default), MySQL,
-PostgreSQL, Redis/Valkey, PHP-FPM, Node.js, Python 3, firewall (ufw /
-firewalld), Fail2ban, swap file and Chrony, besides git and Docker. The new
+Components (4.47): web (Nginx, Apache, Caddy, OpenLiteSpeed, Certbot,
+Varnish, HAProxy), data (MariaDB (default), MySQL, PostgreSQL, Redis/Valkey,
+Memcached, MongoDB, Elasticsearch, OpenSearch), runtimes (PHP-FPM, PHP 8.2,
+8.3 and 8.4 side by side, Node.js, Python 3, Java, Composer) and system
+(firewall (ufw / firewalld), Fail2ban, swap file, Chrony, Postfix, ClamAV),
+besides git and Docker. The new
 ones are drafts until their lab run (`--allow-draft` on lab targets). See
 `docs/design/components.md`.
 

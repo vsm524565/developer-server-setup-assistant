@@ -35,8 +35,13 @@ UNIT_RE = re.compile(
     r"\.(service|socket|timer|target|mount)$"
 )
 TOKEN_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+# An apt suite may have path parts, e.g. MongoDB's noble/mongodb-org/8.0 (4.47).
+SUITE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}(/[a-z0-9][a-z0-9._-]{0,63}){0,3}$")
 HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$")
 URL_RE = re.compile(r"^https://[A-Za-z0-9.-]+(/[A-Za-z0-9._~/-]*)?$")
+# A signing key URL may carry a simple query (keyserver lookups); the key
+# is checked against its fingerprint after download anyway (4.47).
+KEY_URL_RE = re.compile(r"^https://[A-Za-z0-9.-]+(/[A-Za-z0-9._~/-]*)?([?][A-Za-z0-9=&_.-]{1,200})?$")
 FINGERPRINT_RE = re.compile(r"^[0-9A-F]{40}$")
 # dnf vendor repositories (4.36): DSSA writes the repo file itself, so
 # both files live only in their fixed system folders.
@@ -244,12 +249,12 @@ STEP_TYPES = {
     "apt_vendor_repository": (
         {
             "repository_id": lambda v, w: _text(v, w, ID_RE),
-            "key_url": lambda v, w: _text(v, w, URL_RE),
+            "key_url": lambda v, w: _text(v, w, KEY_URL_RE),
             "key_fingerprint": lambda v, w: _text(v, w, FINGERPRINT_RE),
             "key_path": _path,
             "source_path": _path,
             "uris": lambda v, w: _text(v, w, URL_RE),
-            "suites": _tokens,
+            "suites": lambda v, w: _texts(SUITE_RE, allow_empty=False)(v, w),
             "components": _tokens,
             "architectures": _tokens,
         },
@@ -259,7 +264,7 @@ STEP_TYPES = {
         {
             "repository_id": lambda v, w: _text(v, w, ID_RE),
             "baseurl": lambda v, w: _text(v, w, URL_RE),
-            "key_url": lambda v, w: _text(v, w, URL_RE),
+            "key_url": lambda v, w: _text(v, w, KEY_URL_RE),
             "key_fingerprint": lambda v, w: _text(v, w, FINGERPRINT_RE),
             "key_path": lambda v, w: _path(_text(v, w, RPM_KEY_PATH_RE), w),
             "repo_path": lambda v, w: _path(_text(v, w, YUM_REPO_PATH_RE), w),

@@ -26,7 +26,12 @@ where it repeats:
 | 13 | chrony on alma10 (SKIP expected); on ubuntu24 REVIEW (systemd-timesyncd) | as stated |
 | 14 | mysql on ubuntu24 (after removing mariadb) | installed; on debian13 BLOCKED |
 | 15 | apache on ubuntu24 (Nginx removed first) | port 80 served by apache2 |
-| 16 | remove everything installed above with `plan --remove` | lab back to its start |
+| 16 | memcached, java, varnish, haproxy, postfix, clamav, composer on ubuntu24 and alma10 | each installed and verified; postfix on 127.0.0.1:25 only |
+| 17 | caddy, mongodb on ubuntu24 and alma10 (Nginx/Apache removed first for Caddy) | vendor repository added, key fingerprint accepted, verified |
+| 18 | php84 on ubuntu24 (Ondřej's PPA) and alma10 (Remi) | `php8.4-fpm` / `php84-php-fpm` active beside the OS PHP |
+| 19 | opensearch on ubuntu24 (needs ≥ 4 GB RAM), then elasticsearch after removing it | OpenSearch: password file root-only, never in the run log; Elasticsearch: reset its password afterwards |
+| 20 | openlitespeed on alma10 | `lshttpd` active, port 8088; 7080 closed from outside if the firewall is on |
+| 21 | remove everything installed above with `plan --remove` | lab back to its start |
 
 ## Result
 

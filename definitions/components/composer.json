@@ -1,0 +1,114 @@
+{
+  "schema_version": "1.0",
+  "id": "composer",
+  "display_name": "Composer (PHP)",
+  "category": "tool",
+  "depends_on": [
+    {
+      "id": "php",
+      "required": true
+    }
+  ],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "composer"
+        ]
+      },
+      "conflicts": {
+        "unmanaged_executables": [
+          "composer"
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "composer"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "composer"
+          ]
+        },
+        {
+          "type": "executable",
+          "name": "composer",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^Composer version [0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    },
+    {
+      "variant_id": "dnf-epel",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "composer"
+        ]
+      },
+      "conflicts": {
+        "unmanaged_executables": [
+          "composer"
+        ]
+      },
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "prerequisite",
+          "packages": [
+            "epel-release"
+          ]
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "composer"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "composer"
+          ]
+        },
+        {
+          "type": "executable",
+          "name": "composer",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^Composer version [0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    }
+  ]
+}

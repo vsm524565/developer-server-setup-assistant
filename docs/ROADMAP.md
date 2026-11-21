@@ -1507,6 +1507,17 @@ per-component choices: `docs/design/components.md`.
 - [x] `tests/backend/test_components.py`: every new component plans,
       installs and verifies on apt and dnf (mocked), plus conflicts, state
       detection, and firewall/swap failure and undo.
+- [x] Second batch, OS repositories: memcached, java, varnish, haproxy,
+      postfix (setup hook answers "Local only"), clamav, composer (needs php).
+      maldet dropped in favour of ClamAV (owner's choice).
+- [x] Third batch, vendor repositories, keys verified against the
+      repositories' signatures: caddy, openlitespeed, mongodb,
+      elasticsearch, opensearch (setup hook stores a random admin password
+      root-only), php82/php83/php84 side by side (Ondřej's PPA, sury, Remi).
+      Engine: binary keys armoured for rpm; suites with path parts; key URLs
+      with a query.
+- [x] Catalog: 36 applications; 32 component definitions; 35 component and
+      catalog tests.
 - [ ] Lab run, once the VMs are free (`docs/testing/manual-4.47-components.md`);
       then each verified component becomes supported, and 4.45's managed
       files are covered by Nginx, MariaDB and Fail2ban.

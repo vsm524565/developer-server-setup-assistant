@@ -652,6 +652,13 @@ def mkswap(args):
     return 1 if fail("mkswap") else 0
 
 
+def debconf_set_selections(args):
+    """Postfix's installer answers (components phase): kept for the test."""
+    with open(STATE / "debconf.txt", "a") as handle:
+        handle.write(sys.stdin.read())
+    return 0
+
+
 def postgresql_setup(args):
     data = ROOT / "var/lib/pgsql/data"
     data.mkdir(parents=True, exist_ok=True)
@@ -681,6 +688,7 @@ TOOLS = {
     "firewall-cmd": firewall_cmd, "apt-cache": apt_cache,
     "ss": ss, "ufw": ufw, "firewall-offline-cmd": firewall_offline_cmd,
     "fallocate": fallocate, "mkswap": mkswap, "postgresql-setup": postgresql_setup,
+    "debconf-set-selections": debconf_set_selections,
 }
 
 if __name__ == "__main__":

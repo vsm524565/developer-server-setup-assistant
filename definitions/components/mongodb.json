@@ -1,0 +1,510 @@
+{
+  "schema_version": "1.0",
+  "id": "mongodb",
+  "display_name": "MongoDB 8.0",
+  "category": "database",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "ubuntu22-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "ubuntu",
+            "versions": [
+              "22.04"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "mongodb-org"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          27017
+        ],
+        "paths": [
+          "/var/lib/mongodb"
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "mongodb-org-80",
+          "key_url": "https://pgp.mongodb.com/server-8.0.asc",
+          "key_fingerprint": "4B0752C1BCA238C0B4EE14DC41DE058A4E7DCA05",
+          "key_path": "/etc/apt/keyrings/mongodb-org-80.asc",
+          "source_path": "/etc/apt/sources.list.d/mongodb-org-80.sources",
+          "uris": "https://repo.mongodb.org/apt/ubuntu",
+          "suites": [
+            "jammy/mongodb-org/8.0"
+          ],
+          "components": [
+            "multiverse"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "mongodb-org"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "mongod.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "mongod.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "mongodb-org"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "mongod.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 27017
+        },
+        {
+          "type": "executable",
+          "name": "mongod",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^db version v[0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/var/lib/mongodb",
+          "/var/log/mongodb"
+        ]
+      }
+    },
+    {
+      "variant_id": "ubuntu24-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "ubuntu",
+            "versions": [
+              "24.04"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "mongodb-org"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          27017
+        ],
+        "paths": [
+          "/var/lib/mongodb"
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "mongodb-org-80",
+          "key_url": "https://pgp.mongodb.com/server-8.0.asc",
+          "key_fingerprint": "4B0752C1BCA238C0B4EE14DC41DE058A4E7DCA05",
+          "key_path": "/etc/apt/keyrings/mongodb-org-80.asc",
+          "source_path": "/etc/apt/sources.list.d/mongodb-org-80.sources",
+          "uris": "https://repo.mongodb.org/apt/ubuntu",
+          "suites": [
+            "noble/mongodb-org/8.0"
+          ],
+          "components": [
+            "multiverse"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "mongodb-org"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "mongod.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "mongod.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "mongodb-org"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "mongod.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 27017
+        },
+        {
+          "type": "executable",
+          "name": "mongod",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^db version v[0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/var/lib/mongodb",
+          "/var/log/mongodb"
+        ]
+      }
+    },
+    {
+      "variant_id": "ubuntu26-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "ubuntu",
+            "versions": [
+              "26.04"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "mongodb-org"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          27017
+        ],
+        "paths": [
+          "/var/lib/mongodb"
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "mongodb-org-80",
+          "key_url": "https://pgp.mongodb.com/server-8.0.asc",
+          "key_fingerprint": "4B0752C1BCA238C0B4EE14DC41DE058A4E7DCA05",
+          "key_path": "/etc/apt/keyrings/mongodb-org-80.asc",
+          "source_path": "/etc/apt/sources.list.d/mongodb-org-80.sources",
+          "uris": "https://repo.mongodb.org/apt/ubuntu",
+          "suites": [
+            "resolute/mongodb-org/8.0"
+          ],
+          "components": [
+            "multiverse"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "mongodb-org"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "mongod.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "mongod.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "mongodb-org"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "mongod.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 27017
+        },
+        {
+          "type": "executable",
+          "name": "mongod",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^db version v[0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/var/lib/mongodb",
+          "/var/log/mongodb"
+        ]
+      }
+    },
+    {
+      "variant_id": "debian13-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "debian",
+            "versions": [
+              "13"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "mongodb-org"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          27017
+        ],
+        "paths": [
+          "/var/lib/mongodb"
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "mongodb-org-80",
+          "key_url": "https://pgp.mongodb.com/server-8.0.asc",
+          "key_fingerprint": "4B0752C1BCA238C0B4EE14DC41DE058A4E7DCA05",
+          "key_path": "/etc/apt/keyrings/mongodb-org-80.asc",
+          "source_path": "/etc/apt/sources.list.d/mongodb-org-80.sources",
+          "uris": "https://repo.mongodb.org/apt/debian",
+          "suites": [
+            "trixie/mongodb-org/8.0"
+          ],
+          "components": [
+            "main"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "mongodb-org"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "mongod.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "mongod.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "mongodb-org"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "mongod.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 27017
+        },
+        {
+          "type": "executable",
+          "name": "mongod",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^db version v[0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/var/lib/mongodb",
+          "/var/log/mongodb"
+        ]
+      }
+    },
+    {
+      "variant_id": "el10-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf",
+        "os": [
+          {
+            "id": "almalinux",
+            "versions": [
+              "10"
+            ]
+          },
+          {
+            "id": "rocky",
+            "versions": [
+              "10"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "mongodb-org"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          27017
+        ],
+        "paths": [
+          "/var/lib/mongo"
+        ]
+      },
+      "steps": [
+        {
+          "type": "dnf_vendor_repository",
+          "repository_id": "mongodb-org-80",
+          "baseurl": "https://repo.mongodb.org/yum/redhat/10/mongodb-org/8.0/x86_64",
+          "key_url": "https://pgp.mongodb.com/server-8.0.asc",
+          "key_fingerprint": "4B0752C1BCA238C0B4EE14DC41DE058A4E7DCA05",
+          "key_path": "/etc/pki/rpm-gpg/mongodb-org-80.asc",
+          "repo_path": "/etc/yum.repos.d/mongodb-org-80.repo"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "mongodb-org"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "mongod.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "mongod.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "mongodb-org"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "mongod.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 27017
+        },
+        {
+          "type": "executable",
+          "name": "mongod",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^db version v[0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/var/lib/mongo",
+          "/var/log/mongodb"
+        ]
+      }
+    }
+  ]
+}

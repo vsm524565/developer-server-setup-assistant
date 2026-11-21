@@ -549,6 +549,22 @@ _tx_exec_dnf_vendor_repository() {
         awk -F: '$1 == "fpr" { print $10; exit }')"
     [[ "$actual" == "$fingerprint" ]] ||
         { _dnf_repo_failed "Signing key fingerprint mismatch."; return 1; }
+    # rpm imports ASCII-armoured keys; a binary key (first byte >= 0x80,
+    # e.g. LiteSpeed's) is re-exported armoured: only the verified key.
+    if (( $(od -An -tu1 -N1 -- "$tmp" | tr -d ' ') >= 128 )); then
+        local gpg_home
+        gpg_home="$(mktemp -d)"
+        if gpg --batch --homedir "$gpg_home" --import -- "$tmp" >/dev/null 2>&1 &&
+           gpg --batch --homedir "$gpg_home" --armor --export -- "$fingerprint" > "$tmp.asc" 2>/dev/null &&
+           [[ -s "$tmp.asc" ]]; then
+            mv -f -- "$tmp.asc" "$tmp"
+        else
+            rm -rf -- "$gpg_home" "$tmp.asc"
+            _dnf_repo_failed "Cannot convert the signing key to ASCII armour."
+            return 1
+        fi
+        rm -rf -- "$gpg_home"
+    fi
 
     key_real="$(_tx_path "$key_path")"
     repo_real="$(_tx_path "$repo_path")"

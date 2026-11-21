@@ -1,0 +1,485 @@
+{
+  "schema_version": "1.0",
+  "id": "openlitespeed",
+  "display_name": "OpenLiteSpeed",
+  "category": "webserver",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "ubuntu22-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "ubuntu",
+            "versions": [
+              "22.04"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "openlitespeed"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          80,
+          443,
+          7080,
+          8088
+        ],
+        "panels": "any",
+        "paths": [
+          "/usr/local/lsws"
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "litespeed",
+          "key_url": "https://rpms.litespeedtech.com/debian/lst_repo.gpg",
+          "key_fingerprint": "3E892522DB44E1B063D366C5011AA62DEDA1F085",
+          "key_path": "/etc/apt/keyrings/litespeed.gpg",
+          "source_path": "/etc/apt/sources.list.d/litespeed.sources",
+          "uris": "https://rpms.litespeedtech.com/debian",
+          "suites": [
+            "jammy"
+          ],
+          "components": [
+            "main"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "openlitespeed"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "lshttpd.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "lshttpd.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "openlitespeed"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "lshttpd.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 8088
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/usr/local/lsws"
+        ]
+      }
+    },
+    {
+      "variant_id": "ubuntu24-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "ubuntu",
+            "versions": [
+              "24.04"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "openlitespeed"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          80,
+          443,
+          7080,
+          8088
+        ],
+        "panels": "any",
+        "paths": [
+          "/usr/local/lsws"
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "litespeed",
+          "key_url": "https://rpms.litespeedtech.com/debian/lst_repo.gpg",
+          "key_fingerprint": "3E892522DB44E1B063D366C5011AA62DEDA1F085",
+          "key_path": "/etc/apt/keyrings/litespeed.gpg",
+          "source_path": "/etc/apt/sources.list.d/litespeed.sources",
+          "uris": "https://rpms.litespeedtech.com/debian",
+          "suites": [
+            "noble"
+          ],
+          "components": [
+            "main"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "openlitespeed"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "lshttpd.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "lshttpd.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "openlitespeed"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "lshttpd.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 8088
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/usr/local/lsws"
+        ]
+      }
+    },
+    {
+      "variant_id": "ubuntu26-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "ubuntu",
+            "versions": [
+              "26.04"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "openlitespeed"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          80,
+          443,
+          7080,
+          8088
+        ],
+        "panels": "any",
+        "paths": [
+          "/usr/local/lsws"
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "litespeed",
+          "key_url": "https://rpms.litespeedtech.com/debian/lst_repo.gpg",
+          "key_fingerprint": "3E892522DB44E1B063D366C5011AA62DEDA1F085",
+          "key_path": "/etc/apt/keyrings/litespeed.gpg",
+          "source_path": "/etc/apt/sources.list.d/litespeed.sources",
+          "uris": "https://rpms.litespeedtech.com/debian",
+          "suites": [
+            "resolute"
+          ],
+          "components": [
+            "main"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "openlitespeed"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "lshttpd.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "lshttpd.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "openlitespeed"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "lshttpd.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 8088
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/usr/local/lsws"
+        ]
+      }
+    },
+    {
+      "variant_id": "debian13-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "debian",
+            "versions": [
+              "13"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "openlitespeed"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          80,
+          443,
+          7080,
+          8088
+        ],
+        "panels": "any",
+        "paths": [
+          "/usr/local/lsws"
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "litespeed",
+          "key_url": "https://rpms.litespeedtech.com/debian/lst_repo.gpg",
+          "key_fingerprint": "3E892522DB44E1B063D366C5011AA62DEDA1F085",
+          "key_path": "/etc/apt/keyrings/litespeed.gpg",
+          "source_path": "/etc/apt/sources.list.d/litespeed.sources",
+          "uris": "https://rpms.litespeedtech.com/debian",
+          "suites": [
+            "trixie"
+          ],
+          "components": [
+            "main"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "openlitespeed"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "lshttpd.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "lshttpd.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "openlitespeed"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "lshttpd.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 8088
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/usr/local/lsws"
+        ]
+      }
+    },
+    {
+      "variant_id": "el10-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf",
+        "os": [
+          {
+            "id": "almalinux",
+            "versions": [
+              "10"
+            ]
+          },
+          {
+            "id": "rocky",
+            "versions": [
+              "10"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "openlitespeed"
+        ]
+      },
+      "conflicts": {
+        "tcp_ports": [
+          80,
+          443,
+          7080,
+          8088
+        ],
+        "panels": "any",
+        "paths": [
+          "/usr/local/lsws"
+        ]
+      },
+      "steps": [
+        {
+          "type": "dnf_vendor_repository",
+          "repository_id": "litespeed",
+          "baseurl": "https://rpms.litespeedtech.com/centos/10/x86_64",
+          "key_url": "https://rpms.litespeedtech.com/debian/lst_repo.gpg",
+          "key_fingerprint": "3E892522DB44E1B063D366C5011AA62DEDA1F085",
+          "key_path": "/etc/pki/rpm-gpg/litespeed.asc",
+          "repo_path": "/etc/yum.repos.d/litespeed.repo"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "openlitespeed"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "lshttpd.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "lshttpd.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "openlitespeed"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "lshttpd.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 8088
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/usr/local/lsws"
+        ]
+      }
+    }
+  ]
+}

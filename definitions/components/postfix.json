@@ -1,0 +1,137 @@
+{
+  "schema_version": "1.0",
+  "id": "postfix",
+  "display_name": "Postfix (outgoing mail, local only)",
+  "category": "system",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "postfix"
+        ]
+      },
+      "conflicts": {
+        "packages": [
+          "exim4",
+          "exim4-daemon-light",
+          "sendmail"
+        ],
+        "tcp_ports": [
+          25
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "hook",
+          "name": "postfix_local_only"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "postfix"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "postfix.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "postfix.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "postfix"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "postfix.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 25
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/postfix"
+        ]
+      },
+      "hooks": {
+        "setup": "postfix_local_only"
+      }
+    },
+    {
+      "variant_id": "dnf-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "postfix"
+        ]
+      },
+      "conflicts": {
+        "packages": [
+          "sendmail"
+        ],
+        "tcp_ports": [
+          25
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "postfix"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "postfix.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "postfix.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "postfix"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "postfix.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 25
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    }
+  ]
+}

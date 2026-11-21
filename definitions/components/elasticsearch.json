@@ -1,0 +1,162 @@
+{
+  "schema_version": "1.0",
+  "id": "elasticsearch",
+  "display_name": "Elasticsearch 9",
+  "category": "database",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "elasticsearch"
+        ]
+      },
+      "conflicts": {
+        "packages": [
+          "opensearch"
+        ],
+        "tcp_ports": [
+          9200
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "elastic-9x",
+          "key_url": "https://artifacts.elastic.co/GPG-KEY-elasticsearch",
+          "key_fingerprint": "46095ACC8548582C1A2699A9D27D666CD88E42B4",
+          "key_path": "/etc/apt/keyrings/elastic-9x.asc",
+          "source_path": "/etc/apt/sources.list.d/elastic-9x.sources",
+          "uris": "https://artifacts.elastic.co/packages/9.x/apt",
+          "suites": [
+            "stable"
+          ],
+          "components": [
+            "main"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "elasticsearch"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "elasticsearch.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "elasticsearch.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "elasticsearch"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "elasticsearch.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 9200
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/elasticsearch",
+          "/var/lib/elasticsearch",
+          "/var/log/elasticsearch"
+        ]
+      }
+    },
+    {
+      "variant_id": "dnf-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "elasticsearch"
+        ]
+      },
+      "conflicts": {
+        "packages": [
+          "opensearch"
+        ],
+        "tcp_ports": [
+          9200
+        ]
+      },
+      "steps": [
+        {
+          "type": "dnf_vendor_repository",
+          "repository_id": "elastic-9x",
+          "baseurl": "https://artifacts.elastic.co/packages/9.x/yum",
+          "key_url": "https://artifacts.elastic.co/GPG-KEY-elasticsearch",
+          "key_fingerprint": "46095ACC8548582C1A2699A9D27D666CD88E42B4",
+          "key_path": "/etc/pki/rpm-gpg/elastic-9x.asc",
+          "repo_path": "/etc/yum.repos.d/elastic-9x.repo"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "elasticsearch"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "elasticsearch.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "elasticsearch.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "elasticsearch"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "elasticsearch.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 9200
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/elasticsearch",
+          "/var/lib/elasticsearch",
+          "/var/log/elasticsearch"
+        ]
+      }
+    }
+  ]
+}

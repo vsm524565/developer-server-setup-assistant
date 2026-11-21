@@ -9,8 +9,16 @@
 #   verify_swap_active      verify (read-only): swap is in use
 #   verify_php_fpm          verify (read-only): a php*-fpm unit is active
 #                           (Debian/Ubuntu name it by version, e.g. php8.3-fpm)
+#   opensearch_admin_password  setup (a step, before install): OpenSearch 3
+#                           needs an initial admin password to install. A
+#                           random one is stored root-only in
+#                           /root/.dssa/opensearch-initial-admin-password and
+#                           given to the install; never printed or logged.
+#   postfix_local_only      setup (a step, before install, apt only): answer
+#                           Postfix's installer question with "Local only",
+#                           so it listens on localhost (no config file edited)
 
-DSSA_HOOKS="${DSSA_HOOKS:- }postgresql_initdb verify_firewall_active verify_swap_active verify_php_fpm "
+DSSA_HOOKS="${DSSA_HOOKS:- }postgresql_initdb verify_firewall_active verify_swap_active verify_php_fpm postfix_local_only opensearch_admin_password "
 
 # EL's postgresql-server ships without a cluster; the service cannot start
 # until one exists. Debian/Ubuntu create theirs in the package.
@@ -50,4 +58,28 @@ verify_php_fpm() {
             awk '{print $1}' | head -1)"
     [[ -n "$unit" ]] || { echo "php-fpm: no active php*-fpm unit" >&2; return 1; }
     echo "php-fpm: $unit active" >&2
+}
+
+postfix_local_only() {
+    local name
+    name="$(hostname -f 2>/dev/null || hostname)"
+    [[ "$name" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "postfix: unusable host name" >&2; return 1; }
+    printf '%s\n' "postfix postfix/main_mailer_type select Local only" \
+                   "postfix postfix/mailname string $name" | debconf-set-selections
+}
+
+opensearch_admin_password() {
+    local dir file password
+    dir="${DSSA_ROOT:-}/root/.dssa"
+    file="$dir/opensearch-initial-admin-password"
+    (umask 077 && mkdir -p -- "$dir") || return 1
+    if [[ ! -s "$file" ]]; then
+        # Letters and digits, then one of each class OpenSearch requires.
+        password="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)Aa1-"
+        (( ${#password} == 28 )) || { echo "opensearch: could not generate a password" >&2; return 1; }
+        (umask 077 && printf '%s\n' "$password" > "$file") || return 1
+    fi
+    OPENSEARCH_INITIAL_ADMIN_PASSWORD="$(head -1 -- "$file")"
+    export OPENSEARCH_INITIAL_ADMIN_PASSWORD
+    echo "opensearch: initial admin password stored root-only in /root/.dssa/opensearch-initial-admin-password" >&2
 }

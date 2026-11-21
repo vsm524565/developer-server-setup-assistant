@@ -1,0 +1,135 @@
+{
+  "schema_version": "1.0",
+  "id": "clamav",
+  "display_name": "ClamAV (with signature updates)",
+  "category": "system",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "clamav",
+          "clamav-freshclam"
+        ]
+      },
+      "conflicts": {},
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "clamav",
+            "clamav-freshclam"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "clamav-freshclam.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "clamav-freshclam.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "clamav",
+            "clamav-freshclam"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "clamav-freshclam.service"
+        },
+        {
+          "type": "executable",
+          "name": "clamscan",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^ClamAV [0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/var/lib/clamav"
+        ]
+      }
+    },
+    {
+      "variant_id": "dnf-epel",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "clamav",
+          "clamav-freshclam"
+        ]
+      },
+      "conflicts": {},
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "prerequisite",
+          "packages": [
+            "epel-release"
+          ]
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "clamav",
+            "clamav-freshclam"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "clamav-freshclam.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "clamav-freshclam.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "clamav",
+            "clamav-freshclam"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "clamav-freshclam.service"
+        },
+        {
+          "type": "executable",
+          "name": "clamscan",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^ClamAV [0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/var/lib/clamav"
+        ]
+      }
+    }
+  ]
+}

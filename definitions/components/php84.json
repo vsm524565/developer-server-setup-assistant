@@ -1,0 +1,496 @@
+{
+  "schema_version": "1.0",
+  "id": "php84",
+  "display_name": "PHP 8.4 (side by side)",
+  "category": "runtime",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "ubuntu22-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "ubuntu",
+            "versions": [
+              "22.04"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "php8.4-fpm"
+        ]
+      },
+      "conflicts": {
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "ondrej-php",
+          "key_url": "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xB8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6",
+          "key_fingerprint": "B8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6",
+          "key_path": "/etc/apt/keyrings/ondrej-php.asc",
+          "source_path": "/etc/apt/sources.list.d/ondrej-php.sources",
+          "uris": "https://ppa.launchpadcontent.net/ondrej/php/ubuntu",
+          "suites": [
+            "jammy"
+          ],
+          "components": [
+            "main"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "php8.4-fpm",
+            "php8.4-cli",
+            "php8.4-mysql",
+            "php8.4-curl",
+            "php8.4-mbstring",
+            "php8.4-xml",
+            "php8.4-zip"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "php8.4-fpm.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "php8.4-fpm.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "php8.4-fpm"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "php8.4-fpm.service"
+        },
+        {
+          "type": "executable",
+          "name": "php8.4",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^PHP 8\\.4\\."
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/php/8.4"
+        ]
+      }
+    },
+    {
+      "variant_id": "ubuntu24-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "ubuntu",
+            "versions": [
+              "24.04"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "php8.4-fpm"
+        ]
+      },
+      "conflicts": {
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "ondrej-php",
+          "key_url": "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xB8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6",
+          "key_fingerprint": "B8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6",
+          "key_path": "/etc/apt/keyrings/ondrej-php.asc",
+          "source_path": "/etc/apt/sources.list.d/ondrej-php.sources",
+          "uris": "https://ppa.launchpadcontent.net/ondrej/php/ubuntu",
+          "suites": [
+            "noble"
+          ],
+          "components": [
+            "main"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "php8.4-fpm",
+            "php8.4-cli",
+            "php8.4-mysql",
+            "php8.4-curl",
+            "php8.4-mbstring",
+            "php8.4-xml",
+            "php8.4-zip"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "php8.4-fpm.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "php8.4-fpm.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "php8.4-fpm"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "php8.4-fpm.service"
+        },
+        {
+          "type": "executable",
+          "name": "php8.4",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^PHP 8\\.4\\."
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/php/8.4"
+        ]
+      }
+    },
+    {
+      "variant_id": "ubuntu26-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "ubuntu",
+            "versions": [
+              "26.04"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "php8.4-fpm"
+        ]
+      },
+      "conflicts": {
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "ondrej-php",
+          "key_url": "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xB8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6",
+          "key_fingerprint": "B8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6",
+          "key_path": "/etc/apt/keyrings/ondrej-php.asc",
+          "source_path": "/etc/apt/sources.list.d/ondrej-php.sources",
+          "uris": "https://ppa.launchpadcontent.net/ondrej/php/ubuntu",
+          "suites": [
+            "resolute"
+          ],
+          "components": [
+            "main"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "php8.4-fpm",
+            "php8.4-cli",
+            "php8.4-mysql",
+            "php8.4-curl",
+            "php8.4-mbstring",
+            "php8.4-xml",
+            "php8.4-zip"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "php8.4-fpm.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "php8.4-fpm.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "php8.4-fpm"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "php8.4-fpm.service"
+        },
+        {
+          "type": "executable",
+          "name": "php8.4",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^PHP 8\\.4\\."
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/php/8.4"
+        ]
+      }
+    },
+    {
+      "variant_id": "debian13-vendor",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "debian",
+            "versions": [
+              "13"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "php8.4-fpm"
+        ]
+      },
+      "conflicts": {
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "apt_vendor_repository",
+          "repository_id": "sury-php",
+          "key_url": "https://packages.sury.org/php/apt.gpg",
+          "key_fingerprint": "15058500A0235D97F5D10063B188E2B695BD4743",
+          "key_path": "/etc/apt/keyrings/sury-php.gpg",
+          "source_path": "/etc/apt/sources.list.d/sury-php.sources",
+          "uris": "https://packages.sury.org/php",
+          "suites": [
+            "trixie"
+          ],
+          "components": [
+            "main"
+          ],
+          "architectures": [
+            "amd64"
+          ]
+        },
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "php8.4-fpm",
+            "php8.4-cli",
+            "php8.4-mysql",
+            "php8.4-curl",
+            "php8.4-mbstring",
+            "php8.4-xml",
+            "php8.4-zip"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "php8.4-fpm.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "php8.4-fpm.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "php8.4-fpm"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "php8.4-fpm.service"
+        },
+        {
+          "type": "executable",
+          "name": "php8.4",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^PHP 8\\.4\\."
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/php/8.4"
+        ]
+      }
+    },
+    {
+      "variant_id": "el10-remi",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf",
+        "os": [
+          {
+            "id": "almalinux",
+            "versions": [
+              "10"
+            ]
+          },
+          {
+            "id": "rocky",
+            "versions": [
+              "10"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [
+          "php84-php-fpm"
+        ]
+      },
+      "conflicts": {
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "prerequisite",
+          "packages": [
+            "epel-release"
+          ]
+        },
+        {
+          "type": "dnf_vendor_repository",
+          "repository_id": "remi-safe",
+          "baseurl": "https://rpms.remirepo.net/enterprise/10/safe/x86_64",
+          "key_url": "https://rpms.remirepo.net/RPM-GPG-KEY-remi2024",
+          "key_fingerprint": "CF1DF0057CE85DFF5B2F2A37C2FD3B2C2A0948E4",
+          "key_path": "/etc/pki/rpm-gpg/remi-safe.asc",
+          "repo_path": "/etc/yum.repos.d/remi-safe.repo"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "php84-php-fpm",
+            "php84-php-cli",
+            "php84-php-mysqlnd",
+            "php84-php-mbstring",
+            "php84-php-xml"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "php84-php-fpm.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "php84-php-fpm.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "php84-php-fpm"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "php84-php-fpm.service"
+        },
+        {
+          "type": "executable",
+          "name": "php84",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^PHP 8\\.4\\."
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/opt/remi/php84",
+          "/var/opt/remi/php84"
+        ]
+      }
+    }
+  ]
+}
