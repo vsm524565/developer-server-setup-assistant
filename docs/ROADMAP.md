@@ -1366,7 +1366,7 @@ Order of work, step 2 (`docs/design/application-flow.md`, decision 2).
 - [x] `dssa-run.sh record TARGET` and `main.py installed TARGET` show the
       record without sudo (also with `--json`: `data.record`).
 - [x] 9 new tests.
-- [ ] Manual verification (combined: `docs/testing/manual-4.41-4.46-combined.md`).
+- [x] Manual verification, 2026-11-20/21 (combined, through the web UI: `docs/testing/manual-4.41-4.46-combined.md`).
 
 ### Milestone 4.42 — Uninstall and Adopt — 2026-11-20
 
@@ -1399,7 +1399,7 @@ Order of work, step 3a (`docs/design/application-flow.md`, decisions 2, 4, 5b).
       root-only kept folder made apt fall back to downloading as root,
       outside its `_apt` sandbox. Now it downloads into a private temporary
       folder owned by `_apt` and the file is moved into `kept/` (mode 0600).
-- [ ] Manual verification (combined: `docs/testing/manual-4.41-4.46-combined.md`).
+- [x] Manual verification, 2026-11-20/21 (combined, through the web UI: `docs/testing/manual-4.41-4.46-combined.md`).
 
 ### Milestone 4.43 — Updates — 2026-11-20
 
@@ -1421,7 +1421,7 @@ Order of work, step 3b (`docs/design/application-flow.md`, decisions 1, 4, 5b).
 - [x] Typed name only when the update restarts a running service or is
       not reversible (decision 4).
 - [x] 9 new tests.
-- [ ] Manual verification (combined: `docs/testing/manual-4.41-4.46-combined.md`).
+- [x] Manual verification, 2026-11-20/21 (combined, through the web UI: `docs/testing/manual-4.41-4.46-combined.md`).
 
 ### Milestone 4.44 — All or Nothing — 2026-11-20
 
@@ -1439,7 +1439,7 @@ Order of work, step 3c (`docs/design/application-flow.md`, decision 5a).
 - [x] Default stays per component: without the flag, the others keep their
       changes.
 - [x] 5 new tests.
-- [ ] Manual verification (combined: `docs/testing/manual-4.41-4.46-combined.md`).
+- [x] Manual verification, 2026-11-20/21 (combined, through the web UI: `docs/testing/manual-4.41-4.46-combined.md`).
 
 ### Milestone 4.45 — Managed Files — 2026-11-20
 
@@ -1482,7 +1482,10 @@ design: `docs/design/web-ui.md`).
 - [x] Batches (decision 7): one approval for several servers, applied
       server by server, stopping at the first failure.
 - [x] 18 new tests.
+- [x] Lab finding (combined test, step 12): the plan page still offered
+      Apply / Run verification after the plan had run; it now says "Already
+      run" with the result and offers only Report.
 - [x] Lab finding (combined test, step 4): the server page dropped the
       connection: its method was named `server`, which is the handler's
       HTTP server attribute. Renamed; any unexpected error now answers 500.
-- [ ] Manual verification (combined: `docs/testing/manual-4.41-4.46-combined.md`).
+- [x] Manual verification, 2026-11-20/21 (combined, through the web UI: `docs/testing/manual-4.41-4.46-combined.md`).

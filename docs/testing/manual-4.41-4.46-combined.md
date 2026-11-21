@@ -36,14 +36,25 @@ git stays recorded as adopted on ubuntu24 (record only; harmless).
 
 ## Result
 
-In progress (2026-11-20), steps 1–7 passed:
+Run by the project owner on 2026-11-20/21: **all 13 steps passed**.
 
 | # | Outcome |
 |---|---|
 | 1 | `Ran 15 tests … OK` |
 | 2 | definitions set up; master key `SHA256:FZDr9g…`; `Added tester.` (two short passwords refused first) |
 | 3 | `DSSA web UI on http://127.0.0.1:8443/`; login page |
-| 4 | ubuntu24 added with `SHA256:3Hu43I…`, `H keys ubuntu24`: `1`. **Finding:** the server page then dropped the connection (method name clash); fixed, UI restarted |
-| 5 | plan 39cb3008 installed `hello` through the UI, exit 0; logged in with the UI's own key (`from the inventory`) |
+| 4 | ubuntu24 added with `SHA256:3Hu43I…`; `H keys ubuntu24`: `1`. **Finding:** the server page then dropped the connection (method name clash with the HTTP handler); fixed, UI restarted |
+| 5 | plan 39cb3008 installed `hello` through the UI, exit 0, logging in with the UI's own key (`from the inventory`) |
 | 6 | CLI `installed ubuntu24`: `dssa-locktest … plan 39cb3008`, `hello 2.10-3build1` |
 | 7 | plan 59c15b47 removed `hello`, exit 0; `hello: not installed`. **Finding:** apt downloaded the kept file outside its `_apt` sandbox; fixed |
+| 8 | plan f60cdfdd adopted git, exit 0; record `git adopted … git 1:2.43.0-1ubuntu7.4` |
+| 9 | plan 1424e97e: `git SKIP`, "Up to date …" (no update on the lists; the UPDATE path is covered by automated tests only) |
+| 10 | plan 2491045a (ALL OR NOTHING): `dssa-crashtest failed_rolled_back`, `dssa-locktest undone_all_or_nothing`, exit 3; `hello: not installed`; record only `git adopted`; units removed afterwards |
+| 11 | ubuntu22 added (`SHA256:9PEUTZ…`); batch of plans 0dd1837b (ubuntu24) and 1e84e899 (ubuntu22): both exit 0 in turn, state `finished` |
+| 12 | 23 audit lines, user `tester`, fingerprints included, no password; audit, inventory and users files mode 600. **Finding:** the plan page still offered Run verification after the plan had run (a second run is refused by the server); fixed: "Already run" with Report only |
+| 13 | test key removed: `ubuntu24: 0`, `ubuntu22: 0`; `/var/lib/dssa` is `drwx--x--x root` |
+
+Not covered in the lab:
+- **sudo relay:** `dssa-test` runs sudo without a password on the lab VMs (`sudo -n true` succeeds), so no run page asked for one. Typing the sudo password into the page is covered by the automated job test only.
+- **4.43 apply:** no update was available, so only the plan side ran.
+- **4.45:** managed files are tested with the Nginx component.

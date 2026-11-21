@@ -1366,6 +1366,20 @@ class WebFlowTests(Lab):
         self.assertIn("testtool", self.read_mock("packages.json"))
         self.assertIn('"action": "apply"', (self.base / "webui/audit.jsonl").read_text())
 
+    def test_plan_page_after_the_run_offers_only_the_report(self):
+        from bridge.webui.app import Handler
+        (plan_id,) = self.app.make_plans("alice", ["lab1"], ["testtool"], "install", False)
+        self.app.approve("alice", plan_id, {"_confirm": "APPROVE"})
+        self.wait(self.app.start_apply("alice", plan_id))
+        sent = {}
+        handler = Handler.__new__(Handler)
+        handler.app = self.app
+        handler.send_html = lambda body, *a, **k: sent.setdefault("body", body)
+        handler.plan_page({"user": "alice", "csrf": "t"}, plan_id)
+        self.assertIn("Already run: status <b>completed</b> (testtool: installed)", sent["body"])
+        self.assertNotIn(f"/plans/{plan_id}/apply", sent["body"])
+        self.assertIn(f"/plans/{plan_id}/report", sent["body"])
+
     def test_risky_actions_need_the_typed_name(self):
         (plan_id,) = self.app.make_plans("alice", ["lab1"], ["testtool"], "install", False)
         self.app.approve("alice", plan_id, {"_confirm": "APPROVE"})

@@ -417,6 +417,21 @@ class Handler(BaseHTTPRequestHandler):
         approved = (approvals / "approval.json").exists()
         used = (approvals / "consumed").exists()
         body = plan_table(plan)
+        # A plan runs once; after that only its result (Report) makes sense
+        # (lab finding, combined test step 12).
+        saved = run.runs_dir() / plan_id / "summary.json"
+        if saved.is_file():
+            try:
+                summary = json.loads(saved.read_text())
+                outcomes = ", ".join(f'{r.get("component")}: {r.get("outcome")}' for r in summary.get("results", []))
+            except (OSError, ValueError):
+                summary, outcomes = {}, ""
+            body += (f'<p>Already run: status <b>{esc(summary.get("status", "?"))}</b>'
+                     f'{" (" + esc(outcomes) + ")" if outcomes else ""}. A plan runs only once; '
+                     f'make a new plan to run again.</p>')
+            body += (f'<form method="post" action="/plans/{plan_id}/report" class="inline">{csrf(session)}'
+                     f'<button>Report</button></form>')
+            return self.send_html(page("Plan", body, session))
         if check["issues"]:
             body += "<ul class='error'>" + "".join(f"<li>{esc(i)}</li>" for i in check["issues"]) + "</ul>"
         if check["verification_only"] and check["passed"]:
