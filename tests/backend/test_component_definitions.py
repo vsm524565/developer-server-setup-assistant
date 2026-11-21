@@ -108,8 +108,8 @@ class RepositoryDefinitionTests(unittest.TestCase):
         self.assertEqual(support["docker"], {"supported"})
         self.assertEqual(support["docker_compose"], {"supported"})
         self.assertEqual(support["nginx"], {"draft"})
-        for component in ("apache", "certbot", "chrony", "fail2ban", "firewall", "mariadb", "mysql",
-                          "nodejs", "php", "postgresql", "python", "redis", "swap"):
+        # Every components-phase definition stays draft until its lab run.
+        for component in set(support) - {"git", "docker", "docker_compose"}:
             self.assertEqual(support[component], {"draft"}, component)
 
     def test_git_and_nginx_match_on_package_manager_only(self):
