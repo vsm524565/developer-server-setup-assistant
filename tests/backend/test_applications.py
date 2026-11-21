@@ -32,10 +32,11 @@ from bridge.applications.planning import assess_application
 
 class TestApplicationCatalog(unittest.TestCase):
 
-    def test_catalog_contains_23_draft_applications(self):
+    def test_catalog_contains_25_draft_applications(self):
+        # 4.47 added firewall and chrony.
         registry = build_application_catalog()
 
-        self.assertEqual(len(registry), 23)
+        self.assertEqual(len(registry), 25)
         self.assertTrue(all(
             item.metadata["policy_state"] == "DRAFT"
             for item in registry.definitions()
