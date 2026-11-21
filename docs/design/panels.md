@@ -1,7 +1,8 @@
 # Control Panels — Decisions (draft)
 
-Status: all six decided with the project owner, 2026-11-21; build outline
-below awaits the go-ahead.
+Status: all six decided with the project owner, 2026-11-21. Built (engine,
+contracts, seven draft definitions); tests and the lab run still open, see
+"Build status" at the end.
 
 How panels differ from other components:
 - they install through the vendor's own installer, not a package;
@@ -108,3 +109,48 @@ carries the warning "Not reversible: take a VM snapshot first".
 6. **Tests** with a mocked installer and uninstaller, then the lab. The lab
    needs **fresh VMs** (clones or snapshots), because the current lab VMs
    have Docker and git and would be BLOCKED by decision 3.
+
+## Build status (2026-11-21)
+
+Done (commit 55821ca and the one after it):
+- **Engine:** the `vendor_installer` step, `panel_present` detection, the
+  fresh-server requirements, the owner split, password masking in the run
+  log, and BLOCKED panel removal.
+- **Definitions (draft)** from the vendors' docs and installer source:
+
+| Panel | Installer | Unattended | OS (DSSA lab) | Min RAM / swap / disk |
+|---|---|---|---|---|
+| aaPanel | www.aapanel.com/script/install_panel_en.sh | `-y` | Ubuntu 22/24/26, Debian 12/13, Alma/Rocky 9/10 | 512 MiB / – / 1 GiB |
+| CyberPanel | cyberpanel.net/install.sh | `-v ols -p r` (OpenLiteSpeed, random password; stored in /etc/cyberpanel/adminPass) | Ubuntu 22/24/26, Alma 9/10 | 1 GiB / – / 10 GiB |
+| HestiaCP | raw.githubusercontent.com/hestiacp/…/hst-install.sh | `--interactive no --force` plus hostname, email, user `hestiaadmin` and a password DSSA generates (root-only `/root/.dssa/hestia-admin-password`) | Ubuntu 22/24/26, Debian 12/13 | 1 GiB / – / 10 GiB; FQDN |
+| CloudPanel | installer.cloudpanel.io/ce/v2/install.sh | `DB_ENGINE=MARIADB_11.8` | Ubuntu 22/24/26, Debian 12/13 | 2 GiB / – / 10 GiB |
+| cPanel & WHM | securedownloads.cpanel.net/latest (run from /home) | none needed | Ubuntu 24.04, Alma 9/10 | 2 GiB / – / 25 GiB; FQDN |
+| Plesk | autoinstall.plesk.com/one-click-installer | none needed | Ubuntu 22/24/26, Debian 12/13, Alma 9/10 | 1 GiB / 1 GiB / 20 GiB |
+| DirectAdmin | download.directadmin.com/setup.sh | `DA_WEB_INSTALL=yes`: no key on the command line; the licence key is entered in DirectAdmin's own web page | Ubuntu 22/24/26, Debian 12/13, Alma/Rocky 9/10 | 4 GiB / 4 GiB / 2 GiB |
+
+Notes from building:
+- **Prompts:** the apply run is detached, so it survives a dropped
+  connection but its stdin is /dev/null. Installers therefore run
+  unattended. Decision 6 still holds: no key or password is typed into
+  DSSA, and DirectAdmin's key goes into its own web page.
+- **Uninstallers:** none of the seven has an official uninstaller (cPanel
+  says to reformat). Removal is BLOCKED, and a failed install needs review
+  (exit 4). The `uninstall_url` support is in place for a panel that gains
+  one.
+- **HestiaCP:** on Ubuntu its installer treats the preinstalled `ufw` as a
+  conflict and would prompt; `--force` skips that one check, since DSSA's
+  fresh-server check already guarantees no web, database or mail software.
+  Its admin password is passed on the installer's command line, where other
+  local processes can see it while the installer runs.
+- **CloudPanel:** create its admin user in the browser right after install
+  (the vendor warns that bots look for fresh installs).
+- **Plesk on Debian:** needs AppArmor disabled first (vendor note; checked in
+  the lab).
+- **Flags to confirm in the lab:** aaPanel's `-y` and the DirectAdmin
+  web-install flag were read from secondary sources.
+
+Open:
+- the tests: `tests/backend/test_panels.py` has the harness and a TODO list
+  of ten tests;
+- a lab guide and the lab run on **fresh VMs** (clones or snapshots of clean
+  installs, one per panel or panel family).
