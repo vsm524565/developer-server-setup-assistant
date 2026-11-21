@@ -36,6 +36,7 @@ OPERATION_ACTIONS = {
     "adopt": frozenset({"ADOPT", "BLOCKED"}),
     "update": frozenset({"UPDATE", "SKIP", "BLOCKED"}),
 }
+PANEL_DETAILS_KEYS = frozenset({"panel", "reversible"})
 # What a REMOVE (4.42) or UPDATE (4.43) step carries.
 DETAILS_KEYS = {
     "REMOVE": frozenset({
@@ -141,8 +142,13 @@ def validate_plan_document(plan):
             _require(isinstance(details, dict) and set(details) == DETAILS_KEYS[step["action"]],
                      f"{where}: {step['action']} needs its details")
             _require(isinstance(details["reversible"], bool), f"{where}: invalid reversible flag")
-        else:
-            _require("details" not in step, f"{where}: details only belong to REMOVE and UPDATE")
+        elif "details" in step:
+            # Panels (4.48): an install step may say which panel it is.
+            details = step["details"]
+            _require(isinstance(details, dict) and set(details) == PANEL_DETAILS_KEYS
+                     and isinstance(details["reversible"], bool)
+                     and isinstance(details["panel"], str) and COMPONENT_RE.fullmatch(details["panel"]),
+                     f"{where}: unexpected details")
         _require(step["planning_only"] is True, f"{where}: must be planning-only")
         _require(step["execution_allowed"] is False, f"{where}: must not allow execution")
         _require(isinstance(step["added_as_dependency"], bool), f"{where}: invalid flag")

@@ -16,7 +16,9 @@
           "certbot"
         ]
       },
-      "conflicts": {},
+      "conflicts": {
+        "panels": "any"
+      },
       "steps": [
         {
           "type": "package_metadata_refresh"
@@ -62,7 +64,9 @@
           "certbot"
         ]
       },
-      "conflicts": {},
+      "conflicts": {
+        "panels": "any"
+      },
       "steps": [
         {
           "type": "packages_install",

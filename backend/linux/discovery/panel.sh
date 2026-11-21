@@ -17,6 +17,7 @@ hestia|/usr/local/hestia
 cpanel|/usr/local/cpanel
 directadmin|/usr/local/directadmin
 plesk|/usr/local/psa
+cloudpanel|/home/clp/htdocs/app
 PANELS
 
     printf '%s\n' "${detected[@]}" |

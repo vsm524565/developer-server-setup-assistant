@@ -19,7 +19,8 @@
       "conflicts": {
         "tcp_ports": [
           11211
-        ]
+        ],
+        "panels": "any"
       },
       "steps": [
         {
@@ -83,7 +84,8 @@
       "conflicts": {
         "tcp_ports": [
           11211
-        ]
+        ],
+        "panels": "any"
       },
       "steps": [
         {

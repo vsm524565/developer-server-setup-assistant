@@ -81,6 +81,20 @@ plan_remove_component() {
         return 0
     fi
 
+    # Panels (4.48): no undo DSSA can do; the vendor uninstaller (where one
+    # exists) is run by hand until a panel definition carries one.
+    local panel_un
+    panel_un="$(jq -r --arg v "$(jq -r '.variant_id // ""' <<< "$entry")" \
+        '[.variants[] | select(.variant_id == $v) | .steps[] | select(.type == "vendor_installer")][0]
+         | if . == null then "" elif .uninstall_url then "vendor:\(.uninstall_url)" else "none" end' <<< "$definition")"
+    if [[ "$panel_un" == none ]]; then
+        _rm_entry BLOCKED '["A control panel cannot be removed: the vendor has no uninstaller. Reinstall the OS or restore the VM snapshot."]'
+        return 0
+    elif [[ "$panel_un" == vendor:* ]]; then
+        _rm_entry BLOCKED "$(jq -cn --arg u "${panel_un#vendor:}" '["Remove this panel with the vendor uninstaller (\($u)) by hand; DSSA runs it automatically only when an install fails."]')"
+        return 0
+    fi
+
     needed="$(jq -c --arg c "$component" --argjson sel "$selection" \
         '[.components | to_entries[] | select((.key as $k | $sel | index($k)) == null)
           | select((.value.depends_on // []) | index($c)) | .key]' <<< "$record")"

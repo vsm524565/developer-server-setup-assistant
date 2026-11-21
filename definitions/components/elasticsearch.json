@@ -22,7 +22,8 @@
         ],
         "tcp_ports": [
           9200
-        ]
+        ],
+        "panels": "any"
       },
       "steps": [
         {
@@ -106,7 +107,8 @@
         ],
         "tcp_ports": [
           9200
-        ]
+        ],
+        "panels": "any"
       },
       "steps": [
         {

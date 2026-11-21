@@ -21,7 +21,12 @@ PACKAGE_ROLES = frozenset({"prerequisite", "main"})
 # setup (components phase): a hook a step may run, e.g. postgresql initdb.
 HOOK_KINDS = frozenset({"precheck", "verify", "setup"})
 FIREWALL_SERVICES = frozenset({"ssh", "http", "https"})
-DETECTION_STATES = frozenset({"swap_active", "firewall_active"})
+DETECTION_STATES = frozenset({"swap_active", "firewall_active", "panel_present"})
+INSTALLER_ARG_RE = re.compile(r"^[A-Za-z0-9._@{}=:/,+-]{1,128}$")
+ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+PASSWORD_FILE_RE = re.compile(r"^/root/[.]dssa/[a-z0-9_-]{1,64}$")
+REQUIREMENT_KEYS = ("running_kernel_packages", "fresh_server", "conflicting_packages",
+                    "min_ram_mb", "min_disk_mb", "min_swap_mb", "fqdn_hostname")
 CONFIG_TEST_COMMANDS = frozenset({"nginx -t"})
 
 ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
@@ -127,6 +132,15 @@ def _version_pattern(value, where):
     except re.error:
         _fail(where, "not a valid regular expression")
     return value
+
+
+def _installer_env(value, where):
+    if not isinstance(value, dict):
+        _fail(where, "must be an object")
+    for name, text in value.items():
+        _text(name, f"{where} key", ENV_NAME_RE)
+        _text(text, f"{where}.{name}", INSTALLER_ARG_RE)
+    return dict(value)
 
 
 def _firewall_allow(value, where):
@@ -289,6 +303,16 @@ STEP_TYPES = {
     "hook": ({"name": lambda v, w: _text(v, w, HOOK_RE)}, {}),
     "firewall_enable": ({"allow": lambda v, w: _firewall_allow(v, w)}, {}),
     "swap_file": ({}, {"path": lambda v, w: _choice(v, w, frozenset({"/swapfile.dssa"}))}),
+    # Panels (4.48): the vendor installer, run unattended.
+    "vendor_installer": (
+        {"url": lambda v, w: _text(v, w, URL_RE)},
+        {"args": _texts(INSTALLER_ARG_RE),
+         "env": lambda v, w: _installer_env(v, w),
+         "workdir": _path,
+         "password_file": lambda v, w: _text(v, w, PASSWORD_FILE_RE),
+         "uninstall_url": lambda v, w: _text(v, w, URL_RE),
+         "uninstall_args": _texts(INSTALLER_ARG_RE)},
+    ),
     # 4.45: reload a running unit after its config test passes.
     "service_reload": (
         {"unit": lambda v, w: _text(v, w, UNIT_RE)},
@@ -434,23 +458,37 @@ def _variant(value, where):
     if "requirements" in value:
         requirements = _object(
             value["requirements"], f"{where}.requirements",
-            optional=("running_kernel_packages",),
+            optional=REQUIREMENT_KEYS,
         )
         running_kernel_packages = _texts(PACKAGE_RE)(
             requirements.get("running_kernel_packages", []),
             f"{where}.requirements.running_kernel_packages")
-        if platform.package_manager != "dnf":
-            _fail(f"{where}.requirements", "requirements need package manager dnf")
+        if running_kernel_packages and platform.package_manager != "dnf":
+            _fail(f"{where}.requirements", "running_kernel_packages need package manager dnf")
+        # Panels (4.48): the fresh-server requirements.
+        _texts(PACKAGE_RE)(requirements.get("conflicting_packages", []),
+                           f"{where}.requirements.conflicting_packages")
+        for flag in ("fresh_server", "fqdn_hostname"):
+            if not isinstance(requirements.get(flag, False), bool):
+                _fail(f"{where}.requirements.{flag}", "must be true or false")
+        for number in ("min_ram_mb", "min_disk_mb", "min_swap_mb"):
+            amount = requirements.get(number, 0)
+            if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
+                _fail(f"{where}.requirements.{number}", "must be a whole number of MiB")
 
     detection = _object(
         value["detection"], f"{where}.detection",
-        required=("packages_all",), optional=("state",),
+        required=("packages_all",), optional=("state", "panel"),
     )
     state = None
     if "state" in detection:
         state = _choice(detection["state"], f"{where}.detection.state", DETECTION_STATES)
         if detection["packages_all"] != []:
             _fail(f"{where}.detection", "a state detection has no packages")
+    if (state == "panel_present") != ("panel" in detection):
+        _fail(f"{where}.detection", "panel_present needs the panel's name, and only it")
+    if "panel" in detection:
+        _text(detection["panel"], f"{where}.detection.panel", ID_RE)
     rollback = _object(
         value["rollback"], f"{where}.rollback",
         required=("created_paths",),

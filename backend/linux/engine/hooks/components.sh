@@ -19,6 +19,8 @@
 #                           so it listens on localhost (no config file edited)
 
 DSSA_HOOKS="${DSSA_HOOKS:- }postgresql_initdb verify_firewall_active verify_swap_active verify_php_fpm postfix_local_only opensearch_admin_password "
+DSSA_HOOKS+="verify_panel_aapanel verify_panel_cyberpanel verify_panel_hestia verify_panel_cloudpanel "
+DSSA_HOOKS+="verify_panel_cpanel verify_panel_plesk verify_panel_directadmin "
 
 # EL's postgresql-server ships without a cluster; the service cannot start
 # until one exists. Debian/Ubuntu create theirs in the package.
@@ -83,3 +85,22 @@ opensearch_admin_password() {
     export OPENSEARCH_INITIAL_ADMIN_PASSWORD
     echo "opensearch: initial admin password stored root-only in /root/.dssa/opensearch-initial-admin-password" >&2
 }
+
+# Panels (4.48): read-only, the panel's own folder is there (the same
+# paths discover_panels reports).
+_dssa_verify_panel() {
+    local panel="$1"
+    if discover_panels 2>/dev/null | jq -e --arg p "$panel" '.panels | index($p) != null' >/dev/null; then
+        echo "$panel: installed" >&2
+    else
+        echo "$panel: not found" >&2
+        return 1
+    fi
+}
+verify_panel_aapanel() { _dssa_verify_panel aapanel; }
+verify_panel_cyberpanel() { _dssa_verify_panel cyberpanel; }
+verify_panel_hestia() { _dssa_verify_panel hestia; }
+verify_panel_cloudpanel() { _dssa_verify_panel cloudpanel; }
+verify_panel_cpanel() { _dssa_verify_panel cpanel; }
+verify_panel_plesk() { _dssa_verify_panel plesk; }
+verify_panel_directadmin() { _dssa_verify_panel directadmin; }

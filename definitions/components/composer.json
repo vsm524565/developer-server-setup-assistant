@@ -24,7 +24,8 @@
       "conflicts": {
         "unmanaged_executables": [
           "composer"
-        ]
+        ],
+        "panels": "any"
       },
       "steps": [
         {
@@ -72,7 +73,8 @@
       "conflicts": {
         "unmanaged_executables": [
           "composer"
-        ]
+        ],
+        "panels": "any"
       },
       "steps": [
         {

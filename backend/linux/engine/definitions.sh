@@ -99,6 +99,19 @@ def valid_step:
     only(["type","allow"]) and has_all(["allow"])
     and (.allow | type == "array" and index("ssh") != null
          and all(.[]; IN("ssh", "http", "https")))
+  elif .type == "vendor_installer" then
+    # Panels (4.48): the vendor installer from its own HTTPS URL, run
+    # unattended; {fqdn} and {password} are filled in on the server.
+    only(["type","url","args","env","workdir","password_file","uninstall_url","uninstall_args"])
+    and has_all(["url"]) and (.url | str(url_re))
+    and ((.args // []) | strs("^[A-Za-z0-9._@{}=:/,+-]{1,128}$"))
+    and ((.env // {}) | type == "object"
+         and all(keys[]; test("^[A-Z][A-Z0-9_]{0,63}$"))
+         and all(.[]; str("^[A-Za-z0-9._@{}=:/,+-]{1,128}$")))
+    and ((.workdir // "/root") | safe_path)
+    and ((.password_file // "/root/.dssa/x") | str("^/root/[.]dssa/[a-z0-9_-]{1,64}$"))
+    and ((.uninstall_url // "https://x") | str(url_re))
+    and ((.uninstall_args // []) | strs("^[A-Za-z0-9._@{}=:/,+-]{1,128}$"))
   elif .type == "swap_file" then
     # Components phase: one swap file at a fixed path, sized from RAM.
     only(["type","path"]) and (.path == "/swapfile.dssa")
@@ -156,18 +169,26 @@ def valid_variant:
   and (.platform | valid_platform)
   # A component is detected by its packages, or (components phase) by a
   # state: swap or a firewall that is on. With a state, packages_all is [].
-  and (.detection | only(["packages_all","state"])
-       and (if has("state") then (.state | IN("swap_active", "firewall_active")) and .packages_all == []
-            else (.packages_all | nonempty_strs(pkg_re)) end))
+  and (.detection | only(["packages_all","state","panel"])
+       and (if has("state") then (.state | IN("swap_active", "firewall_active", "panel_present")) and .packages_all == []
+            else (.packages_all | nonempty_strs(pkg_re)) end)
+       # panel_present (4.48) names the panel discover_panels reports.
+       and ((.state == "panel_present") == has("panel"))
+       and ((.panel // "x") | str(id_re)))
   and (.conflicts | valid_conflicts)
   and (.steps | type == "array" and length > 0 and all(.[]; valid_step))
   and (.verification | type == "array" and length > 0 and all(.[]; valid_check))
   and (.rollback | only(["created_paths"]) and (.created_paths | safe_paths))
   and ((.hooks // {}) | only(["precheck","verify","setup"]) and all(.[]; str(hook_re)))
   # 4.36: packages that must match the running kernel (dnf only).
-  and ((.requirements // {}) | only(["running_kernel_packages"])
-       and ((.running_kernel_packages // []) | strs(pkg_re)))
-  and (.requirements == null or .platform.package_manager == "dnf")
+  and ((.requirements // {}) | only(["running_kernel_packages","fresh_server","conflicting_packages",
+                                     "min_ram_mb","min_disk_mb","min_swap_mb","fqdn_hostname"])
+       and ((.running_kernel_packages // []) | strs(pkg_re))
+       and ((.conflicting_packages // []) | strs(pkg_re))
+       and ((.fresh_server // false) | type == "boolean")
+       and ((.fqdn_hostname // false) | type == "boolean")
+       and all((.min_ram_mb, .min_disk_mb, .min_swap_mb) // 0; type == "number" and . >= 0 and . == floor))
+  and (((.requirements.running_kernel_packages // []) == []) or .platform.package_manager == "dnf")
   and (((.hooks // {}) | [.[]]) as $declared
        | all((.steps + .verification)[] | select(.type == "hook"); .name as $n | $declared | index($n)))
   and (.platform.package_manager as $m
@@ -269,6 +290,20 @@ def decide($p; $f; $panels; $ports):
            else
              "Running kernel \($r.release) is older than the newest \($k) (\($r.latest)): installing would add a new kernel, and \($d.display_name) could not start until a reboot. Update the server and reboot first, then plan again."
            end] as $kernel_blocks
+      # Panels (4.48): a strict fresh-server check (no override).
+      | ($v.requirements // {}) as $req | ($f.fresh // {}) as $fresh
+      | [ if ($req.fresh_server // false) then
+            ( ([$fresh.panels[]? | select(. != ($v.detection.panel // ""))]) as $others
+              | if ($others | length) > 0 then "Another control panel is installed: \($others | join(", "))." else empty end ),
+            ( if ($fresh.record_components // 0) > 0 then "DSSA has already installed components here (install record not empty); a panel needs a fresh server." else empty end ),
+            ( if (($fresh.conflicting_present // []) | length) > 0 then "Already installed, a panel needs a fresh server: \($fresh.conflicting_present | join(", "))." else empty end )
+          else empty end,
+          ( if ($req.min_ram_mb // 0) > ($fresh.ram_mb // 0) then "Needs at least \($req.min_ram_mb) MiB of RAM (has \($fresh.ram_mb // 0))." else empty end ),
+          ( if ($req.min_swap_mb // 0) > ($fresh.swap_mb // 0) then "Needs at least \($req.min_swap_mb) MiB of swap (has \($fresh.swap_mb // 0)); add the swap component first." else empty end ),
+          ( if ($req.min_disk_mb // 0) > ($fresh.disk_mb // 0) then "Needs at least \($req.min_disk_mb) MiB of free disk (has \($fresh.disk_mb // 0))." else empty end ),
+          ( if ($req.fqdn_hostname // false) and (($fresh.fqdn // "") | test("^[A-Za-z0-9-]+([.][A-Za-z0-9-]+)+$") | not)
+            then "Needs a fully qualified host name (hostname -f gives \"\($fresh.fqdn // "")\")." else empty end )
+        ] as $fresh_blocks
       | if ($package_conflicts | length) > 0 then
           result("REVIEW"; $package_conflicts; $v)
         elif $installed then
@@ -277,6 +312,8 @@ def decide($p; $f; $panels; $ports):
                           else "\($d.display_name) is installed; verification required." end]; $v)
         elif ($kernel_blocks | length) > 0 then
           result("BLOCKED"; $kernel_blocks; $v)
+        elif ($fresh_blocks | length) > 0 then
+          result("BLOCKED"; $fresh_blocks; $v)
         else
           ( (if ($c.partial_packages // false) and ($present | length) > 0
              then ["Partial \($d.display_name) installation requires review: \($present | join(", "))"]
@@ -293,13 +330,18 @@ def decide($p; $f; $panels; $ports):
              | [$panels.panels[] | . as $panel
                 | select($want == "any" or ($want | index($panel)) != null)]
              | if length > 0
-               then ["Control panel evidence requires review: \(join(", "))"]
+               then ["Managed by \(join(", ")); use its own tools (DSSA installs only what the panel does not own)."]
                else [] end)
           + [($c.tcp_ports // [])[] as $port
              | select(any($ports.listening_tcp_ports[]; . == $port))
              | "TCP port \($port) is in use."]
           ) as $reasons
           | if ($reasons | length) > 0 then result("REVIEW"; $reasons; $v)
+            elif $v.detection.state == "panel_present" then
+              result("INSTALL"; ["Fresh-server checks passed.",
+                                 "Not reversible: take a VM snapshot first. The panel takes over the web server, PHP, databases and mail."]; $v)
+              | .details = {panel: $v.detection.panel,
+                            reversible: ([$v.steps[] | select(.type == "vendor_installer" and has("uninstall_url"))] | length > 0)}
             else result("INSTALL"; ["No conflicts found by definition checks."]; $v)
             end
         end
@@ -529,10 +571,38 @@ collect_variant_facts() {
         --argjson kernel "$kernel" \
         --argjson state "$(jq -cn --arg s "$(jq -r '.detection.state // empty' <<< "$variant")" \
             --arg swap "$(dssa_swap_active)" --arg fw "$(dssa_firewall_active "$manager")" \
-            'if $s == "swap_active" then ($swap == "true") elif $s == "firewall_active" then ($fw == "true") else null end')" \
+            --arg panel "$(jq -r '.detection.panel // empty' <<< "$variant")" \
+            --argjson panels "$(discover_panels 2>/dev/null | jq -c '.panels' 2>/dev/null || echo '[]')" \
+            'if $s == "swap_active" then ($swap == "true") elif $s == "firewall_active" then ($fw == "true")
+             elif $s == "panel_present" then ($panels | index($panel) != null) else null end')" \
+        --argjson fresh "$(dssa_fresh_server_facts "$variant" "$manager")" \
         '{packages: $packages, executables: $executables, paths: $paths,
           repository_patterns: $patterns, units: $units, running_kernel: $kernel,
-          state: $state}'
+          state: $state, fresh: $fresh}'
+}
+
+# Panels (4.48): what the fresh-server requirements need, read-only and
+# without sudo. Prints {} when the variant has none.
+dssa_fresh_server_facts() {
+    local variant="$1" manager="$2" req pkg present='[]' record_count
+    req="$(jq -c '.requirements // {}' <<< "$variant")"
+    jq -e 'has("fresh_server") or has("min_ram_mb") or has("min_disk_mb") or has("min_swap_mb") or has("fqdn_hostname")' \
+        <<< "$req" >/dev/null || { echo '{}'; return 0; }
+    while IFS= read -r pkg; do
+        [[ -n "$pkg" ]] && package_is_installed "$manager" "$pkg" >/dev/null 2>&1 &&
+            present="$(jq -c --arg p "$pkg" '. + [$p]' <<< "$present")"
+    done < <(jq -r '(.conflicting_packages // [])[]' <<< "$req")
+    record_count="$( (declare -F dssa_record_read >/dev/null && dssa_record_read 2>/dev/null || echo '{"components":{}}') |
+                     jq '.components | length' 2>/dev/null || echo 0)"
+    jq -cn --argjson present "$present" --argjson records "${record_count:-0}" \
+        --argjson panels "$(discover_panels 2>/dev/null | jq -c '.panels' 2>/dev/null || echo '[]')" \
+        --arg ram "$(awk '/^MemTotal:/ {print int($2/1024)}' "${DSSA_ROOT:-}/proc/meminfo" 2>/dev/null)" \
+        --arg swap "$(awk '/^SwapTotal:/ {print int($2/1024)}' "${DSSA_ROOT:-}/proc/meminfo" 2>/dev/null)" \
+        --arg disk "$(df --output=avail -m "${DSSA_ROOT:-/}" 2>/dev/null | tail -1 | tr -d ' ')" \
+        --arg fqdn "$(hostname -f 2>/dev/null)" '
+        {conflicting_present: $present, record_components: $records, panels: $panels,
+         ram_mb: ($ram | tonumber? // 0), swap_mb: ($swap | tonumber? // 0),
+         disk_mb: ($disk | tonumber? // 0), fqdn: $fqdn}'
 }
 
 # Is the firewall on? Read without root: ufw's own config on apt systems,

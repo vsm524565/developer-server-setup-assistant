@@ -33,7 +33,8 @@
         ],
         "paths": [
           "/var/lib/mongodb"
-        ]
+        ],
+        "panels": "any"
       },
       "steps": [
         {
@@ -135,7 +136,8 @@
         ],
         "paths": [
           "/var/lib/mongodb"
-        ]
+        ],
+        "panels": "any"
       },
       "steps": [
         {
@@ -237,7 +239,8 @@
         ],
         "paths": [
           "/var/lib/mongodb"
-        ]
+        ],
+        "panels": "any"
       },
       "steps": [
         {
@@ -339,7 +342,8 @@
         ],
         "paths": [
           "/var/lib/mongodb"
-        ]
+        ],
+        "panels": "any"
       },
       "steps": [
         {
@@ -447,7 +451,8 @@
         ],
         "paths": [
           "/var/lib/mongo"
-        ]
+        ],
+        "panels": "any"
       },
       "steps": [
         {

@@ -27,7 +27,7 @@
 
 DSSA_TX_RETENTION_DAYS=30
 DSSA_PLAN_ID_PATTERN='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-DSSA_SUPPORTED_STEPS=" package_metadata_refresh packages_install apt_vendor_repository dnf_vendor_repository firewalld_reload service_enable service_start managed_file service_reload hook firewall_enable swap_file "
+DSSA_SUPPORTED_STEPS=" package_metadata_refresh packages_install apt_vendor_repository dnf_vendor_repository firewalld_reload service_enable service_start managed_file service_reload hook firewall_enable swap_file vendor_installer "
 # Template texts for managed_file (4.45): [{"id", "content"}], set by
 # apply_plan from the approved bundle after checking their digests.
 DSSA_TEMPLATE_BUNDLE="${DSSA_TEMPLATE_BUNDLE:-[]}"
@@ -946,6 +946,87 @@ _tx_exec_swap_file() {
         "$(jq -cn --argjson s "$size_mb" '{size_mb: $s}')")"
 }
 
+# --- panels: the vendor installer (4.48) -----------------------------------------
+
+# Mask passwords that installers print (aaPanel, CyberPanel), so they do
+# not reach the run log. The panels keep their own copy (bt default,
+# /etc/cyberpanel/adminPass).
+_tx_redact_passwords() {
+    sed -u -E 's/((pass(word|wd)?)([^:=]*[:=]|[^[:alnum:]]+will be set to)[[:space:]]*)(\x1b\[[0-9;]*m)?[^[:space:]].*$/\1[hidden by DSSA]/I'
+}
+
+# Replace {fqdn} and {password} in one installer argument or env value.
+_tx_installer_fill() {
+    local text="$1" fqdn="$2" password="$3"
+    text="${text//\{fqdn\}/$fqdn}"
+    printf '%s' "${text//\{password\}/$password}"
+}
+
+# Download a vendor script over HTTPS only. Prints nothing; fails loudly.
+_tx_fetch_script() {
+    local url="$1" out="$2"
+    (umask 077 && curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 600 \
+        -o "$out" -- "$url" >&2) || { _tx_fail "Could not download $url."; return 1; }
+    [[ -s "$out" ]] || { _tx_fail "$url gave an empty file."; return 1; }
+}
+
+# Run a vendor installer (or uninstaller) script unattended, its output
+# (with passwords masked) going to the run log. Returns its exit code.
+_tx_run_vendor_script() {
+    local script="$1" workdir="$2" fqdn="$3" password="$4"; shift 4
+    local -a envs=() args=()
+    while [[ $# -gt 0 && "$1" != -- ]]; do envs+=("$(_tx_installer_fill "$1" "$fqdn" "$password")"); shift; done
+    shift
+    local arg
+    for arg in "$@"; do args+=("$(_tx_installer_fill "$arg" "$fqdn" "$password")"); done
+    ( cd -- "$(_tx_path "$workdir")" && exec env "${envs[@]}" bash "$script" "${args[@]}" ) < /dev/null 2>&1 |
+        _tx_redact_passwords >&2
+    return "${PIPESTATUS[0]}"
+}
+
+_tx_exec_vendor_installer() {
+    local plan_id="$1" component="$2" index="$3" step="$4"
+    local url workdir script sha size fqdn password="" password_file real_file rc
+    local -a envs=() args=()
+    url="$(jq -r .url <<< "$step")"
+    workdir="$(jq -r '.workdir // "/root"' <<< "$step")"
+    password_file="$(jq -r '.password_file // empty' <<< "$step")"
+    script="$(_tx_dir "$plan_id")/installer-$component-$index.sh"
+    fqdn="$(hostname -f 2>/dev/null || hostname)"
+
+    _tx_fetch_script "$url" "$script" || return 1
+    sha="sha256:$(sha256sum -- "$script" | awk '{print $1}')"
+    size="$(stat -c %s -- "$script")"
+    printf 'Vendor installer %s: %s bytes, %s\n' "$url" "$size" "$sha" >&2
+
+    # A generated admin password (HestiaCP), stored root-only, never logged.
+    if [[ -n "$password_file" ]]; then
+        real_file="$(_tx_path "$password_file")"
+        (umask 077 && mkdir -p -- "$(dirname -- "$real_file")") || return 1
+        if [[ ! -s "$real_file" ]]; then
+            password="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)Aa1"
+            (umask 077 && printf '%s\n' "$password" > "$real_file") || return 1
+        fi
+        password="$(head -1 -- "$real_file")"
+        echo "Admin password stored root-only in $password_file" >&2
+    fi
+
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" vendor_installer intent \
+        "$(jq -c --arg sha "$sha" --argjson size "$size" '{url, sha256: $sha, size: $size, workdir: (.workdir // "/root"),
+              uninstall_url: (.uninstall_url // null), uninstall_args: (.uninstall_args // [])}' <<< "$step")")" || return 1
+
+    mapfile -t envs < <(jq -r '(.env // {}) | to_entries[] | "\(.key)=\(.value)"' <<< "$step")
+    mapfile -t args < <(jq -r '(.args // [])[]' <<< "$step")
+    _tx_run_vendor_script "$script" "$workdir" "$fqdn" "$password" "${envs[@]}" -- "${args[@]}"
+    rc=$?
+    if (( rc != 0 )); then
+        _tx_fail "The vendor installer exited with $rc."
+        tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" vendor_installer failed null "$(jq -cn --argjson r "$rc" '{exit_code: $r}')")"
+        return 1
+    fi
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" vendor_installer done null "$(jq -cn --arg s "$sha" '{sha256: $s}')")"
+}
+
 # --- apply one component ------------------------------------------------------
 
 # Usage: apply_component PLAN_ID MANAGER DEFINITION_JSON VARIANT_ID [ALLOW_DRAFT]
@@ -1001,6 +1082,7 @@ apply_component() {
             hook) _tx_exec_setup_hook "$plan_id" "$component" "$index" "$step" ;;
             firewall_enable) _tx_exec_firewall_enable "$plan_id" "$component" "$index" "$manager" "$step" ;;
             swap_file) _tx_exec_swap_file "$plan_id" "$component" "$index" "$step" ;;
+            vendor_installer) _tx_exec_vendor_installer "$plan_id" "$component" "$index" "$step" ;;
         esac || { failed_step="$index"; failure="Step $((index + 1)) ($type) failed."; break; }
     done
 
@@ -1128,6 +1210,28 @@ rollback_component() {
             fi
         fi
     done < <(jq -r '[.[] | select(.type == "service_enable" and .phase == "intent")] | reverse[] | [.pre.unit, .pre.state] | @tsv' <<< "$entries")
+
+    # 1a. Panels (4.48): the vendor's uninstaller, or say there is none.
+    local vi_entry
+    vi_entry="$(jq -c '[.[] | select(.type == "vendor_installer" and .phase == "intent")][0] // empty' <<< "$entries")"
+    if [[ -n "$vi_entry" ]]; then
+        local un_url un_script fqdn
+        un_url="$(jq -r '.pre.uninstall_url // empty' <<< "$vi_entry")"
+        if [[ -z "$un_url" ]]; then
+            _issue "The vendor has no uninstaller: reinstall the OS or restore the VM snapshot." vendor_uninstall "$component"
+        else
+            un_script="$tx/uninstaller-$component.sh"
+            fqdn="$(hostname -f 2>/dev/null || hostname)"
+            local -a un_args=()
+            mapfile -t un_args < <(jq -r '.pre.uninstall_args[]?' <<< "$vi_entry")
+            if _tx_fetch_script "$un_url" "$un_script" &&
+               _tx_run_vendor_script "$un_script" "$(jq -r '.pre.workdir' <<< "$vi_entry")" "$fqdn" "" -- "${un_args[@]}"; then
+                _record vendor_uninstall "$component" ok
+            else
+                _issue "The vendor uninstaller failed: reinstall the OS or restore the VM snapshot." vendor_uninstall "$component"
+            fi
+        fi
+    fi
 
     # 1b. Components phase (before packages go): firewall rules and the swap file.
     local fw_entry spec

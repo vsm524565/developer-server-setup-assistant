@@ -93,6 +93,9 @@ class RepositoryDefinitionTests(unittest.TestCase):
             "swap",
             "varnish",
         ]
+        # Panels (4.48), all draft.
+        expected = sorted(expected + ["aapanel", "cloudpanel", "cpanel", "cyberpanel",
+                                      "directadmin", "hestia", "plesk"])
 
         self.assertEqual(sorted(self.definitions), expected)
 

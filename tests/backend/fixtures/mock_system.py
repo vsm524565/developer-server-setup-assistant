@@ -53,6 +53,8 @@ Components phase:
   ufw.json        {"active": bool, "rules": [...]}   ufw state (mirrors
                                               etc/ufw/ufw.conf ENABLED= under DSSA_ROOT)
   firewalld.json  {"ports": [...]}             firewalld permanent ports
+  installers.json {"url": "script"}            vendor installer scripts curl serves (4.48)
+  hostname.json   "fqdn"                       what hostname (-f) prints
   ss, ufw, firewall-offline-cmd, firewall-cmd, fallocate, mkswap and
   postgresql-setup are mocked; a started *.swap unit is listed in
   DSSA_ROOT/proc/swaps
@@ -548,7 +550,20 @@ def curl(args):
     if fail("curl"):
         return 22
     out = args[args.index("-o") + 1]
+    url = args[-1]
+    # Panels (4.48): vendor installer scripts by URL.
+    scripts = load("installers.json", {})
+    if url in scripts:
+        if fail("installer_download"):
+            return 22
+        Path(out).write_text(scripts[url])
+        return 0
     Path(out).write_bytes((STATE / "key.asc").read_bytes())
+    return 0
+
+
+def hostname(args):
+    print(load("hostname.json", "server1.example.com"))
     return 0
 
 
@@ -688,7 +703,7 @@ TOOLS = {
     "firewall-cmd": firewall_cmd, "apt-cache": apt_cache,
     "ss": ss, "ufw": ufw, "firewall-offline-cmd": firewall_offline_cmd,
     "fallocate": fallocate, "mkswap": mkswap, "postgresql-setup": postgresql_setup,
-    "debconf-set-selections": debconf_set_selections,
+    "debconf-set-selections": debconf_set_selections, "hostname": hostname,
 }
 
 if __name__ == "__main__":

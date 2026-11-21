@@ -1,0 +1,149 @@
+{
+  "schema_version": "1.0",
+  "id": "cyberpanel",
+  "display_name": "CyberPanel (OpenLiteSpeed)",
+  "category": "control_panel",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-vendor-installer",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "ubuntu",
+            "versions": [
+              "22.04",
+              "24.04",
+              "26.04"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [],
+        "state": "panel_present",
+        "panel": "cyberpanel"
+      },
+      "conflicts": {
+        "tcp_ports": [
+          80,
+          443
+        ]
+      },
+      "steps": [
+        {
+          "type": "vendor_installer",
+          "url": "https://cyberpanel.net/install.sh",
+          "args": [
+            "-v",
+            "ols",
+            "-p",
+            "r"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "hook",
+          "name": "verify_panel_cyberpanel"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      },
+      "hooks": {
+        "verify": "verify_panel_cyberpanel"
+      },
+      "requirements": {
+        "fresh_server": true,
+        "conflicting_packages": [
+          "nginx",
+          "apache2",
+          "mariadb-server",
+          "mysql-server",
+          "postgresql",
+          "postfix",
+          "exim4",
+          "dovecot-core",
+          "bind9"
+        ],
+        "min_ram_mb": 1024,
+        "min_disk_mb": 10240
+      }
+    },
+    {
+      "variant_id": "dnf-vendor-installer",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf",
+        "os": [
+          {
+            "id": "almalinux",
+            "versions": [
+              "9",
+              "10"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [],
+        "state": "panel_present",
+        "panel": "cyberpanel"
+      },
+      "conflicts": {
+        "tcp_ports": [
+          80,
+          443
+        ]
+      },
+      "steps": [
+        {
+          "type": "vendor_installer",
+          "url": "https://cyberpanel.net/install.sh",
+          "args": [
+            "-v",
+            "ols",
+            "-p",
+            "r"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "hook",
+          "name": "verify_panel_cyberpanel"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      },
+      "hooks": {
+        "verify": "verify_panel_cyberpanel"
+      },
+      "requirements": {
+        "fresh_server": true,
+        "conflicting_packages": [
+          "nginx",
+          "httpd",
+          "mariadb-server",
+          "mysql-server",
+          "mysql8.4-server",
+          "postgresql-server",
+          "dovecot",
+          "bind"
+        ],
+        "min_ram_mb": 1024,
+        "min_disk_mb": 10240
+      }
+    }
+  ]
+}

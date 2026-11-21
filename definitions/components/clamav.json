@@ -17,7 +17,9 @@
           "clamav-freshclam"
         ]
       },
-      "conflicts": {},
+      "conflicts": {
+        "panels": "any"
+      },
       "steps": [
         {
           "type": "package_metadata_refresh"
@@ -78,7 +80,9 @@
           "clamav-freshclam"
         ]
       },
-      "conflicts": {},
+      "conflicts": {
+        "panels": "any"
+      },
       "steps": [
         {
           "type": "packages_install",

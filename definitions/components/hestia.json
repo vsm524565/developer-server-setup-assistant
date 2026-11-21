@@ -1,0 +1,100 @@
+{
+  "schema_version": "1.0",
+  "id": "hestia",
+  "display_name": "HestiaCP",
+  "category": "control_panel",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-vendor-installer",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt",
+        "os": [
+          {
+            "id": "ubuntu",
+            "versions": [
+              "22.04",
+              "24.04",
+              "26.04"
+            ]
+          },
+          {
+            "id": "debian",
+            "versions": [
+              "12",
+              "13"
+            ]
+          }
+        ],
+        "architectures": [
+          "x86_64"
+        ]
+      },
+      "detection": {
+        "packages_all": [],
+        "state": "panel_present",
+        "panel": "hestia"
+      },
+      "conflicts": {
+        "tcp_ports": [
+          80,
+          443
+        ]
+      },
+      "steps": [
+        {
+          "type": "vendor_installer",
+          "url": "https://raw.githubusercontent.com/hestiacp/hestiacp/release/install/hst-install.sh",
+          "args": [
+            "--interactive",
+            "no",
+            "--force",
+            "--hostname",
+            "{fqdn}",
+            "--email",
+            "admin@{fqdn}",
+            "--username",
+            "hestiaadmin",
+            "--password",
+            "{password}"
+          ],
+          "password_file": "/root/.dssa/hestia-admin-password"
+        }
+      ],
+      "verification": [
+        {
+          "type": "hook",
+          "name": "verify_panel_hestia"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 8083
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      },
+      "hooks": {
+        "verify": "verify_panel_hestia"
+      },
+      "requirements": {
+        "fresh_server": true,
+        "conflicting_packages": [
+          "nginx",
+          "apache2",
+          "mariadb-server",
+          "mysql-server",
+          "postgresql",
+          "postfix",
+          "exim4",
+          "dovecot-core",
+          "bind9"
+        ],
+        "min_ram_mb": 1024,
+        "min_disk_mb": 10240,
+        "fqdn_hostname": true
+      }
+    }
+  ]
+}
