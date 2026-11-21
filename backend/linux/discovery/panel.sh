@@ -7,7 +7,8 @@ discover_panels() {
     local -a detected=()
 
     while IFS='|' read -r name path; do
-        if [[ -e "$path" ]]; then
+        # DSSA_ROOT prefixes the paths in tests, as elsewhere in the engine.
+        if [[ -e "${DSSA_ROOT:-}$path" ]]; then
             detected+=("$name")
         fi
     done <<'PANELS'

@@ -1,8 +1,8 @@
 # Control Panels — Decisions (draft)
 
-Status: all six decided with the project owner, 2026-11-21. Built (engine,
-contracts, seven draft definitions); tests and the lab run still open, see
-"Build status" at the end.
+Status: all six decided with the project owner, 2026-11-21. Built and
+unit-tested (10 panel tests); the lab run on fresh VMs is open
+(docs/testing/manual-4.48-panels.md).
 
 How panels differ from other components:
 - they install through the vendor's own installer, not a package;
@@ -150,7 +150,5 @@ Notes from building:
   web-install flag were read from secondary sources.
 
 Open:
-- the tests: `tests/backend/test_panels.py` has the harness and a TODO list
-  of ten tests;
-- a lab guide and the lab run on **fresh VMs** (clones or snapshots of clean
-  installs, one per panel or panel family).
+- the lab run on **fresh VMs** (clones or snapshots of clean installs, one
+  per panel): `docs/testing/manual-4.48-panels.md`.

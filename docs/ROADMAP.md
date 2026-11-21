@@ -1521,3 +1521,32 @@ per-component choices: `docs/design/components.md`.
 - [ ] Lab run, once the VMs are free (`docs/testing/manual-4.47-components.md`);
       then each verified component becomes supported, and 4.45's managed
       files are covered by Nginx, MariaDB and Fail2ban.
+
+### Milestone 4.48 — Control Panels — 2026-11-21
+
+Design and the owner's six decisions: `docs/design/panels.md`.
+
+- [x] Step `vendor_installer`:
+      - the vendor's installer over HTTPS only, run unattended;
+      - `{fqdn}` and `{password}` filled in on the server (a generated
+        password is stored root-only);
+      - password lines masked in the run log;
+      - the script's SHA-256 and size journaled;
+      - on failure, the vendor uninstaller where one exists, otherwise
+        needs review (exit 4).
+- [x] Detection `panel_present`. A strict fresh-server check, with no
+      override: no other panel, an empty install record, no web, database
+      or mail packages, minimum RAM, swap and disk, and an FQDN where
+      needed. Approving a panel needs its name typed.
+- [x] Owner split: on a panel server only swap, chrony, git, Python,
+      Node.js, Java and Docker stay installable; the rest say "Managed by
+      <panel>". Panel removal is BLOCKED (no vendor has an uninstaller).
+- [x] Seven draft definitions: aapanel, cyberpanel, hestia, cloudpanel,
+      cpanel, plesk, directadmin. The catalog has 40 entries, and panel
+      discovery knows CloudPanel and honours `DSSA_ROOT`.
+- [x] `tests/backend/test_panels.py`: 10 tests (plans, fresh-server blocks,
+      install and password masking, Hestia's generated password, failure
+      with and without an uninstaller, owner split, removal, typed name,
+      failed download).
+- [ ] Lab run on fresh VMs (`docs/testing/manual-4.48-panels.md`).
+

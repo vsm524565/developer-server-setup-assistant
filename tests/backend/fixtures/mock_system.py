@@ -55,6 +55,7 @@ Components phase:
   firewalld.json  {"ports": [...]}             firewalld permanent ports
   installers.json {"url": "script"}            vendor installer scripts curl serves (4.48)
   hostname.json   "fqdn"                       what hostname (-f) prints
+  disk.json       MiB                          free disk df reports (panel tests only)
   ss, ufw, firewall-offline-cmd, firewall-cmd, fallocate, mkswap and
   postgresql-setup are mocked; a started *.swap unit is listed in
   DSSA_ROOT/proc/swaps
@@ -562,6 +563,14 @@ def curl(args):
     return 0
 
 
+def df(args):
+    """df --output=avail -m|-k PATH: free space from disk.json (MiB)."""
+    mib = load("disk.json", 102400)
+    print("Avail")
+    print(mib if "-m" in args else mib * 1024)
+    return 0
+
+
 def hostname(args):
     print(load("hostname.json", "server1.example.com"))
     return 0
@@ -703,7 +712,7 @@ TOOLS = {
     "firewall-cmd": firewall_cmd, "apt-cache": apt_cache,
     "ss": ss, "ufw": ufw, "firewall-offline-cmd": firewall_offline_cmd,
     "fallocate": fallocate, "mkswap": mkswap, "postgresql-setup": postgresql_setup,
-    "debconf-set-selections": debconf_set_selections, "hostname": hostname,
+    "debconf-set-selections": debconf_set_selections, "hostname": hostname, "df": df,
 }
 
 if __name__ == "__main__":
