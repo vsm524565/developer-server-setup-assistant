@@ -1,0 +1,643 @@
+"""DSSA web UI on the master server (Milestone 4.46).
+
+Standard library only. The same steps as the command line, through the
+same bridge functions: plan, approve (the UI's own approval screen, with
+typed names), apply (a terminal job: sudo asks on the server's own
+terminal), report, resume-rollback, the install record, and batches of
+servers (decision 7: one approval, applied server by server, stopping at
+the first failure).
+
+Security (docs/design/web-ui.md):
+- HTTPS with the master's certificate; plain HTTP only on 127.0.0.1 (for
+  a reverse proxy on the same machine).
+- Login required for everything but /login and /static; sessions in
+  HttpOnly, SameSite=Strict cookies; a CSRF token on every POST.
+- Content-Security-Policy without inline scripts; no framing.
+- Every action is appended to the web UI's audit log with the user name.
+"""
+
+import hashlib
+import html
+import json
+import os
+import re
+import secrets
+import ssl
+import threading
+import time
+import urllib.parse
+from http import HTTPStatus
+from http.cookies import SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from bridge.components import run
+from bridge.components.approval import (
+    CONFIRMATION, ApprovalError, approve_plan, consume_approval, default_state_dir,
+    known_host_fingerprints, plan_digest, preflight_plan,
+)
+from bridge.components.loader import load_component_definitions
+from bridge.components.risk import risky_steps
+from bridge.webui import enrol as enrolment
+from bridge.webui.auth import AuthError, Sessions, Users
+from bridge.webui.jobs import Job, Jobs
+
+COOKIE = "dssa_session"
+PLAN_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+JOB_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+COMPONENT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+OPERATIONS = ("install", "update", "remove", "adopt")
+STATIC = Path(__file__).with_name("static")
+
+
+def esc(value):
+    return html.escape(str(value), quote=True)
+
+
+class Config:
+    """Paths the web UI uses. Everything private lives under ``home``."""
+
+    def __init__(self, home, definitions_dir=None, master_key=None, known_hosts=None):
+        self.home = Path(home)
+        self.users = self.home / "users.json"
+        self.inventory = self.home / "inventory.json"
+        self.audit = self.home / "audit.jsonl"
+        self.definitions_dir = definitions_dir
+        self.master_key = Path(master_key or Path.home() / ".ssh/dssa_master_ed25519")
+        self.known_hosts = Path(known_hosts or os.environ.get("DSSA_KNOWN_HOSTS") or Path.home() / ".ssh/known_hosts")
+
+
+class App:
+    def __init__(self, config, jobs=None, clock=time.monotonic):
+        self.config = config
+        self.users = Users(config.users)
+        self.sessions = Sessions(self.users, clock)
+        self.jobs = jobs or Jobs()
+        self.pending = {}   # host-key scans awaiting confirmation, by token
+        self.batches = {}   # batch id -> {"plans": [...], "user", "jobs": [], "state"}
+        self.lock = threading.Lock()
+
+    # --- helpers --------------------------------------------------------------
+
+    def audit(self, user, action, **details):
+        line = json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                           "user": user, "action": action, **details}, sort_keys=True)
+        self.config.home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(self.config.audit, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "a") as handle:
+            handle.write(line + "\n")
+
+    def inventory(self):
+        return str(self.config.inventory)
+
+    def targets(self):
+        if not self.config.inventory.exists():
+            return []
+        return run.list_targets(self.inventory())
+
+    def host_of(self, target):
+        for entry in self.targets():
+            if entry["target_id"] == target:
+                return entry["host"]
+        raise run.RunError(f"Unknown server: {target}")
+
+    def env(self):
+        env = dict(os.environ, DSSA_INVENTORY_FILE=self.inventory())
+        if self.config.definitions_dir:
+            env["DSSA_DEFINITIONS_DIR"] = str(self.config.definitions_dir)
+        return env
+
+    def check(self, plan_id):
+        plan_bytes, plan, path = run.load_plan(plan_id)
+        keys = known_host_fingerprints(self.host_of(plan["target"]["target_id"]))
+        return plan_bytes, plan, path, keys, preflight_plan(plan_bytes, keys, definitions_dir=self.config.definitions_dir)
+
+    # --- operations -------------------------------------------------------------
+
+    def make_plans(self, user, targets, components, operation, all_or_nothing):
+        if operation not in OPERATIONS:
+            raise ValueError("Unknown operation.")
+        if not targets or not all(TARGET_RE.fullmatch(t) for t in targets):
+            raise ValueError("Choose at least one server.")
+        if not components or not all(COMPONENT_RE.fullmatch(c) for c in components):
+            raise ValueError("Choose at least one component.")
+        plan_ids = []
+        for target in targets:
+            plan_bytes, plan = run.make_plan(target, components, False, self.inventory(), operation, all_or_nothing)
+            run.save_plan(plan_bytes)
+            plan_ids.append(plan["plan_id"])
+            self.audit(user, "plan", target=target, plan_id=plan["plan_id"], operation=operation,
+                       components=components)
+        return plan_ids
+
+    def approve(self, user, plan_id, typed):
+        """typed: {component: name typed, "_confirm": APPROVE}."""
+
+        plan_bytes, plan, _, keys, check = self.check(plan_id)
+        if check["verification_only"]:
+            return None
+        for name, _what, _warnings in risky_steps(plan):
+            if typed.get(name, "").strip() != name:
+                raise ApprovalError(f"{name} not confirmed; nothing was approved.")
+        record = approve_plan(plan_bytes, keys, typed.get("_confirm", "").strip(), operator=user,
+                              definitions_dir=self.config.definitions_dir)
+        self.audit(user, "approve", plan_id=plan_id, target=plan["target"]["target_id"])
+        return record
+
+    def start_apply(self, user, plan_id, on_finish=None):
+        """Like main.step_apply: log in first, then use the approval, then run."""
+
+        plan_bytes, plan, path, keys, check = self.check(plan_id)
+        target = plan["target"]["target_id"]
+        if not check["passed"] and not check["requires_approval"]:
+            raise ApprovalError("Apply refused: the plan failed its checks.", check["issues"])
+        if not check["verification_only"]:
+            if run.check_login(target, plan["target"]["host_key_sha256"], self.inventory()) != 0:
+                raise ApprovalError("Apply refused: cannot log in to the server. The approval was not used.")
+            consume_approval(plan_id, keys, definitions_dir=self.config.definitions_dir)
+            path = default_state_dir() / "approvals" / plan_id / "plan.json"
+            plan_bytes = path.read_bytes()
+        digest = "sha256:" + hashlib.sha256(plan_bytes).hexdigest()
+        job = Job("apply", ["bash", str(run.RUN_SCRIPT), "apply", target, str(path), digest],
+                  self.env(), plan_id, target, user, on_finish)
+        self.audit(user, "apply", plan_id=plan_id, target=target, job=job.id)
+        return self.jobs.start(job)
+
+    def start_remote(self, user, kind, plan_id):
+        _, plan, _ = run.load_plan(plan_id)
+        target, key = plan["target"]["target_id"], plan["target"]["host_key_sha256"]
+        command = "report" if kind == "report" else "resume-rollback"
+        job = Job(kind, ["bash", str(run.RUN_SCRIPT), command, target, plan_id, key],
+                  self.env(), plan_id, target, user)
+        self.audit(user, kind, plan_id=plan_id, target=target, job=job.id)
+        return self.jobs.start(job)
+
+    # --- batches (decision 7) -------------------------------------------------
+
+    def new_batch(self, user, plan_ids):
+        batch_id = secrets.token_hex(8)
+        with self.lock:
+            self.batches[batch_id] = {"plans": plan_ids, "user": user, "jobs": [], "state": "planned"}
+        return batch_id
+
+    def approve_batch(self, user, batch_id, typed):
+        batch = self.batches[batch_id]
+        for plan_id in batch["plans"]:
+            self.approve(user, plan_id, typed)
+        batch["state"] = "approved"
+
+    def apply_batch(self, user, batch_id):
+        batch = self.batches[batch_id]
+        if batch["state"] != "approved":
+            raise ApprovalError("Approve the batch first.")
+        batch["state"] = "running"
+        self._next_in_batch(user, batch_id, 0)
+
+    def _next_in_batch(self, user, batch_id, index):
+        batch = self.batches[batch_id]
+        if index >= len(batch["plans"]):
+            batch["state"] = "finished"
+            return
+
+        def done(job):
+            if job.code == 0:
+                self._next_in_batch(user, batch_id, index + 1)
+            else:
+                batch["state"] = f"stopped at {job.target} (exit {job.code}); the rest were not started"
+
+        try:
+            job = self.start_apply(user, batch["plans"][index], on_finish=done)
+            batch["jobs"].append(job.id)
+        except (ApprovalError, run.RunError, OSError) as error:
+            batch["state"] = f"stopped before {batch['plans'][index][:8]}: {error}"
+
+
+# --- HTTP ---------------------------------------------------------------------------
+
+def page(title, body, session=None):
+    nav = ""
+    if session:
+        nav = (f'<nav><a href="/">Servers</a> <a href="/servers/add">Add server</a> '
+               f'<a href="/jobs">Runs</a> <span class="user">{esc(session["user"])}</span>'
+               f'<form method="post" action="/logout" class="inline">{csrf(session)}'
+               f'<button>Log out</button></form></nav>')
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'<title>{esc(title)} · DSSA</title><link rel="stylesheet" href="/static/style.css">'
+            f'<script src="/static/app.js" defer></script></head>'
+            f'<body>{nav}<main><h1>{esc(title)}</h1>{body}</main></body></html>')
+
+
+def csrf(session):
+    return f'<input type="hidden" name="csrf" value="{esc(session["csrf"])}">'
+
+
+def plan_table(plan):
+    rows = []
+    for step in plan["steps"]:
+        reasons = "".join(f"<li>{esc(r)}</li>" for r in step["reasons"])
+        rows.append(f'<tr class="a-{esc(step["action"].lower())}"><td>{esc(step["component"])}</td>'
+                    f'<td>{esc(step["action"])}</td><td>{esc(step["variant_id"] or "-")}</td>'
+                    f'<td><ul>{reasons}</ul></td></tr>')
+    mode = " · ALL OR NOTHING" if plan.get("all_or_nothing") else ""
+    return (f'<p>Plan <code>{esc(plan["plan_id"])}</code> on <b>{esc(plan["target"]["target_id"])}</b> '
+            f'({esc(plan["package_manager"])}) · {esc(plan["operation"].upper())}{mode} · '
+            f'host key <code>{esc(plan["target"]["host_key_sha256"])}</code> · created {esc(plan["created_at"])}</p>'
+            f'<table><tr><th>Component</th><th>Action</th><th>Variant</th><th>Reasons</th></tr>{"".join(rows)}</table>')
+
+
+def confirm_fields(plan):
+    out = []
+    for name, what, warnings in risky_steps(plan):
+        notes = "".join(f'<p class="warn">{esc(w)}</p>' for w in warnings)
+        out.append(f'{notes}<label>Type <b>{esc(name)}</b> to {esc(what)}: '
+                   f'<input name="name_{esc(name)}" autocomplete="off" required></label>')
+    return "".join(out)
+
+
+class Handler(BaseHTTPRequestHandler):
+    app = None
+    secure = True
+    server_version = "DSSA"
+    sys_version = ""
+
+    # --- plumbing ---------------------------------------------------------------
+
+    def log_message(self, fmt, *args):  # no request bodies or query strings in logs
+        pass
+
+    def _headers(self, status, ctype="text/html; charset=utf-8", extra=()):
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; "
+                         "connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if self.secure:
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
+        for key, value in extra:
+            self.send_header(key, value)
+        self.end_headers()
+
+    def send_html(self, body, status=HTTPStatus.OK, extra=()):
+        data = body.encode()
+        self._headers(status, extra=extra)
+        self.wfile.write(data)
+
+    def send_json(self, value, status=HTTPStatus.OK):
+        self._headers(status, "application/json")
+        self.wfile.write(json.dumps(value).encode())
+
+    def redirect(self, where, extra=()):
+        self._headers(HTTPStatus.SEE_OTHER, extra=[("Location", where), *extra])
+
+    def session(self):
+        cookie = SimpleCookie(self.headers.get("Cookie", ""))
+        token = cookie[COOKIE].value if COOKIE in cookie else None
+        return token, self.app.sessions.get(token)
+
+    def form(self):
+        """Last value per field; self.fields keeps every value (checkbox lists)."""
+
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > 64 * 1024:
+            raise ValueError("Request too large.")
+        self.fields = urllib.parse.parse_qs(self.rfile.read(length).decode(), keep_blank_values=True)
+        return {k: v[-1] for k, v in self.fields.items()}
+
+    def fail(self, session, error, back="/"):
+        issues = "".join(f"<li>{esc(i)}</li>" for i in getattr(error, "issues", []) if str(i) != str(error))
+        self.send_html(page("Not done", f'<p class="error">{esc(error)}</p><ul>{issues}</ul>'
+                                        f'<p><a href="{esc(back)}">Back</a></p>', session),
+                       HTTPStatus.BAD_REQUEST)
+
+    # --- GET --------------------------------------------------------------------
+
+    def do_GET(self):
+        self._safely(self._get)
+
+    def do_POST(self):
+        self._safely(self._post)
+
+    def _safely(self, handler):
+        """An unexpected error answers 500 instead of dropping the
+        connection; the traceback goes to the UI's terminal only."""
+        try:
+            handler()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            try:
+                self.send_html(page("Error", "<p class='error'>Something went wrong in the web UI; "
+                                    "the details are in its terminal.</p><p><a href='/'>Back</a></p>"),
+                               HTTPStatus.INTERNAL_SERVER_ERROR)
+            except OSError:
+                pass
+
+    def _get(self):
+        url = urllib.parse.urlparse(self.path)
+        path = url.path
+        if path.startswith("/static/"):
+            return self.static(path[len("/static/"):])
+        if path == "/login":
+            return self.send_html(page("Log in", LOGIN_FORM))
+        token, session = self.session()
+        if session is None:
+            return self.redirect("/login")
+        try:
+            if path == "/":
+                return self.home(session)
+            if path == "/servers/add":
+                return self.send_html(page("Add a server", ADD_FORM.format(csrf=csrf(session)), session))
+            if path.startswith("/servers/"):
+                return self.server_page(session, path.split("/")[2])
+            if path.startswith("/plans/"):
+                return self.plan_page(session, path.split("/")[2])
+            if path.startswith("/batches/"):
+                return self.batch_page(session, path.split("/")[2])
+            if path == "/jobs":
+                return self.jobs_page(session)
+            if path.startswith("/jobs/"):
+                parts = path.split("/")
+                if len(parts) == 4 and parts[3] == "poll":
+                    return self.poll(parts[2], urllib.parse.parse_qs(url.query).get("offset", ["0"])[0])
+                return self.job_page(session, parts[2])
+        except (run.RunError, ApprovalError, ValueError, KeyError, OSError) as error:
+            return self.fail(session, error)
+        self.send_html(page("Not found", "", session), HTTPStatus.NOT_FOUND)
+
+    def static(self, name):
+        files = {"style.css": "text/css; charset=utf-8", "app.js": "text/javascript; charset=utf-8"}
+        if name not in files:
+            return self.send_html("", HTTPStatus.NOT_FOUND)
+        self._headers(HTTPStatus.OK, files[name])
+        self.wfile.write((STATIC / name).read_bytes())
+
+    def home(self, session):
+        rows = "".join(
+            f'<tr><td><a href="/servers/{esc(t["target_id"])}">{esc(t["target_id"])}</a></td>'
+            f'<td>{esc(t["host"])}</td><td>{"lab" if t["lab"] else ""}</td>'
+            f'<td><input type="checkbox" name="targets" value="{esc(t["target_id"])}"></td></tr>'
+            for t in self.app.targets())
+        catalog = load_component_definitions(self.app.config.definitions_dir)
+        options = "".join(f'<label><input type="checkbox" name="components" value="{esc(c)}"> '
+                          f'{esc(c)} <small>{esc(catalog[c].display_name)}</small></label>' for c in sorted(catalog))
+        body = (f'<form method="post" action="/plan">{csrf(session)}'
+                f'<table><tr><th>Server</th><th>Host</th><th></th><th>Plan</th></tr>{rows}</table>'
+                f'<fieldset><legend>Components</legend>{options}</fieldset>'
+                f'<label>Operation <select name="operation">'
+                + "".join(f'<option value="{o}">{o}</option>' for o in OPERATIONS)
+                + '</select></label> <label><input type="checkbox" name="all_or_nothing" value="1"> all or nothing</label> '
+                '<button>Make plan</button><p class="hint">Several servers make a batch: one approval, '
+                'applied server by server, stopping at the first failure.</p></form>')
+        self.send_html(page("Servers", body, session))
+
+    # Not "server": BaseHTTPRequestHandler.server is the HTTP server itself.
+    def server_page(self, session, target):
+        if not TARGET_RE.fullmatch(target):
+            raise ValueError("Invalid server.")
+        record = run.read_record(target, self.app.inventory())
+        rows = "".join(
+            f'<tr><td>{esc(c)}</td><td>{esc(e.get("how"))}</td><td>{esc(e.get("recorded_at"))}</td>'
+            f'<td>{esc(", ".join(p["package"] + " " + p["version"] for p in e.get("packages", [])))}</td></tr>'
+            for c, e in sorted(record["components"].items()))
+        body = (f'<h2>Installed by DSSA</h2><table><tr><th>Component</th><th>How</th><th>When</th>'
+                f'<th>Packages</th></tr>{rows or "<tr><td colspan=4>Nothing recorded yet.</td></tr>"}</table>')
+        self.send_html(page(target, body, session))
+
+    def plan_page(self, session, plan_id):
+        if not PLAN_ID_RE.fullmatch(plan_id):
+            raise ValueError("Invalid plan ID.")
+        _, plan, _, _, check = self.app.check(plan_id)
+        approvals = default_state_dir() / "approvals" / plan_id
+        approved = (approvals / "approval.json").exists()
+        used = (approvals / "consumed").exists()
+        body = plan_table(plan)
+        if check["issues"]:
+            body += "<ul class='error'>" + "".join(f"<li>{esc(i)}</li>" for i in check["issues"]) + "</ul>"
+        if check["verification_only"] and check["passed"]:
+            body += (f'<form method="post" action="/plans/{plan_id}/apply">{csrf(session)}'
+                     f'<p>Verification only: no approval needed.</p><button>Run verification</button></form>')
+        elif check["passed"] and not approved:
+            body += (f'<form method="post" action="/plans/{plan_id}/approve">{csrf(session)}'
+                     f'<p>Approving runs exactly: <b>{esc(", ".join(plan["runnable"]))}</b> (single use, '
+                     f'30 minutes from planning).</p>{confirm_fields(plan)}'
+                     f'<label>Type <b>{CONFIRMATION}</b> to approve: <input name="confirm" autocomplete="off" required></label>'
+                     f'<button>Approve</button></form>')
+        elif approved and not used:
+            body += (f'<form method="post" action="/plans/{plan_id}/apply">{csrf(session)}'
+                     f'<p>Approved. Apply logs in first; sudo will ask on the server, in the run page.</p>'
+                     f'<button>Apply</button></form>')
+        for kind in ("report", "resume"):
+            body += (f'<form method="post" action="/plans/{plan_id}/{kind}" class="inline">{csrf(session)}'
+                     f'<button>{"Report" if kind == "report" else "Resume rollback"}</button></form>')
+        self.send_html(page("Plan", body, session))
+
+    def batch_page(self, session, batch_id):
+        batch = self.app.batches[batch_id]
+        parts, plans = [], []
+        for plan_id in batch["plans"]:
+            plan_bytes, plan, _ = run.load_plan(plan_id)
+            plans.append(plan)
+            parts.append(plan_table(plan) + f'<p>Plan hash <code>{esc(plan_digest(plan_bytes))}</code></p>')
+        body = f'<p>State: <b>{esc(batch["state"])}</b></p>' + "".join(parts)
+        if batch["state"] == "planned":
+            fields, seen = [], set()
+            for plan in plans:
+                for name, what, warnings in risky_steps(plan):
+                    if name not in seen:
+                        seen.add(name)
+                        notes = "".join(f'<p class="warn">{esc(w)}</p>' for w in warnings)
+                        fields.append(f'{notes}<label>Type <b>{esc(name)}</b> to {esc(what)} on every server: '
+                                      f'<input name="name_{esc(name)}" autocomplete="off" required></label>')
+            body += (f'<form method="post" action="/batches/{batch_id}/approve">{csrf(session)}'
+                     f'<p>One approval for all {len(plans)} plans above (each bound to its hash).</p>'
+                     f'{"".join(fields)}<label>Type <b>{CONFIRMATION}</b>: <input name="confirm" autocomplete="off" required></label>'
+                     f'<button>Approve batch</button></form>')
+        elif batch["state"] == "approved":
+            body += (f'<form method="post" action="/batches/{batch_id}/apply">{csrf(session)}'
+                     f'<button>Apply server by server</button></form>')
+        body += "".join(f'<p><a href="/jobs/{j}">Run {esc(j)}</a></p>' for j in batch["jobs"])
+        self.send_html(page("Batch", body, session))
+
+    def jobs_page(self, session):
+        rows = "".join(
+            f'<tr><td><a href="/jobs/{j.id}">{esc(j.id)}</a></td><td>{esc(j.kind)}</td><td>{esc(j.target)}</td>'
+            f'<td>{esc(j.user)}</td><td>{"running" if j.finished is None else esc(j.code)}</td></tr>'
+            for j in self.app.jobs.recent())
+        self.send_html(page("Runs", f'<table><tr><th>Run</th><th>Kind</th><th>Server</th><th>By</th>'
+                                    f'<th>Exit</th></tr>{rows}</table>', session))
+
+    def job_page(self, session, job_id):
+        job = self.app.jobs.get(job_id) if JOB_ID_RE.fullmatch(job_id) else None
+        if job is None:
+            raise KeyError("No such run.")
+        body = (f'<p>{esc(job.kind)} of plan <a href="/plans/{esc(job.plan_id)}">{esc(job.plan_id)}</a> '
+                f'on {esc(job.target)}</p><pre id="terminal" data-job="{esc(job.id)}"></pre>'
+                f'<form id="input" method="post" action="/jobs/{esc(job.id)}/input">{csrf(session)}'
+                f'<label>Type into the server\'s terminal (for example the sudo password; it is not shown or stored): '
+                f'<input type="password" name="line" autocomplete="off"></label><button>Send</button></form>'
+                f'<p id="status"></p>')
+        self.send_html(page("Run", body, session))
+
+    def poll(self, job_id, offset):
+        job = self.app.jobs.get(job_id) if JOB_ID_RE.fullmatch(job_id) else None
+        if job is None or not offset.isdigit():
+            return self.send_json({"error": "No such run."}, HTTPStatus.NOT_FOUND)
+        self.send_json(job.view(int(offset)))
+
+    # --- POST -------------------------------------------------------------------
+
+    def _post(self):
+        path = urllib.parse.urlparse(self.path).path
+        try:
+            form = self.form()
+        except (ValueError, UnicodeDecodeError) as error:
+            return self.send_html(page("Not done", esc(error)), HTTPStatus.BAD_REQUEST)
+        if path == "/login":
+            return self.login(form)
+        token, session = self.session()
+        if session is None:
+            return self.redirect("/login")
+        if not Sessions.csrf_ok(session, form.get("csrf")):
+            return self.send_html(page("Refused", "<p>The form expired; reload the page.</p>", session),
+                                  HTTPStatus.FORBIDDEN)
+        user = session["user"]
+        try:
+            if path == "/logout":
+                self.app.sessions.logout(token)
+                return self.redirect("/login", [("Set-Cookie", self.cookie("", expire=True))])
+            if path == "/plan":
+                return self.post_plan(user, form)
+            if path == "/servers/scan":
+                return self.post_scan(session, form)
+            if path == "/servers/enrol":
+                return self.post_enrol(user, form)
+            parts = path.split("/")
+            if len(parts) == 4 and parts[1] == "plans" and PLAN_ID_RE.fullmatch(parts[2]):
+                plan_id, action = parts[2], parts[3]
+                if action == "approve":
+                    self.app.approve(user, plan_id, self.typed(form))
+                    return self.redirect(f"/plans/{plan_id}")
+                if action == "apply":
+                    return self.redirect(f"/jobs/{self.app.start_apply(user, plan_id).id}")
+                if action in ("report", "resume"):
+                    return self.redirect(f"/jobs/{self.app.start_remote(user, action, plan_id).id}")
+            if len(parts) == 4 and parts[1] == "batches" and parts[2] in self.app.batches:
+                if parts[3] == "approve":
+                    self.app.approve_batch(user, parts[2], self.typed(form))
+                elif parts[3] == "apply":
+                    self.app.apply_batch(user, parts[2])
+                return self.redirect(f"/batches/{parts[2]}")
+            if len(parts) == 4 and parts[1] == "jobs" and parts[3] == "input":
+                job = self.app.jobs.get(parts[2]) if JOB_ID_RE.fullmatch(parts[2]) else None
+                if job is None:
+                    raise KeyError("No such run.")
+                job.send(form.get("line", ""))
+                return self.send_json({"sent": True})
+        except (run.RunError, ApprovalError, enrolment.EnrolError, ValueError, KeyError, OSError) as error:
+            return self.fail(session, error)
+        self.send_html(page("Not found", "", session), HTTPStatus.NOT_FOUND)
+
+    def typed(self, form):
+        typed = {k[len("name_"):]: v for k, v in form.items() if k.startswith("name_")}
+        typed["_confirm"] = form.get("confirm", "")
+        return typed
+
+    def cookie(self, value, expire=False):
+        parts = [f"{COOKIE}={value}", "Path=/", "HttpOnly", "SameSite=Strict"]
+        if self.secure:
+            parts.append("Secure")
+        if expire:
+            parts.append("Max-Age=0")
+        return "; ".join(parts)
+
+    def login(self, form):
+        try:
+            token = self.app.sessions.login(form.get("user", ""), form.get("password", ""))
+        except AuthError as error:
+            self.app.audit(form.get("user", "")[:32], "login_failed")
+            return self.send_html(page("Log in", f'<p class="error">{esc(error)}</p>{LOGIN_FORM}'),
+                                  HTTPStatus.UNAUTHORIZED)
+        self.app.audit(form.get("user"), "login")
+        self.redirect("/", [("Set-Cookie", self.cookie(token))])
+
+    def post_plan(self, user, form):
+        targets = self.fields.get("targets", [])
+        components = self.fields.get("components", [])
+        plan_ids = self.app.make_plans(user, targets, components, form.get("operation", "install"),
+                                       form.get("all_or_nothing") == "1")
+        if len(plan_ids) == 1:
+            return self.redirect(f"/plans/{plan_ids[0]}")
+        return self.redirect(f"/batches/{self.app.new_batch(user, plan_ids)}")
+
+    def post_scan(self, session, form):
+        host, user = form.get("host", "").strip(), form.get("user", "").strip()
+        port = int(form.get("port") or 22)
+        name = form.get("name", "").strip()
+        keys = enrolment.scan(host, port)
+        pending = secrets.token_hex(8)
+        with self.app.lock:
+            self.app.pending[pending] = {"host": host, "port": port, "user": user, "name": name,
+                                         "lab": form.get("lab") == "1", "keys": keys,
+                                         "by": session["user"], "at": time.time()}
+        choices = "".join(f'<label><input type="radio" name="fingerprint" value="{esc(k["fingerprint"])}" required> '
+                          f'{esc(k["type"])} <code>{esc(k["fingerprint"])}</code></label>' for k in keys)
+        body = (f'<p>{esc(host)}:{port} offers these host keys. Compare one with the server\'s own '
+                f'(for example <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code> on its console) '
+                f'before you confirm it.</p><form method="post" action="/servers/enrol">{csrf(session)}'
+                f'<input type="hidden" name="pending" value="{pending}">{choices}'
+                f'<label>Password of <b>{esc(user)}</b> (used once to install the master\'s key, then dropped): '
+                f'<input type="password" name="password" autocomplete="off" required></label>'
+                f'<button>Confirm key and add server</button></form>')
+        self.send_html(page(f"Add {name}", body, session))
+
+    def post_enrol(self, user, form):
+        with self.app.lock:
+            pending = self.app.pending.pop(form.get("pending", ""), None)
+        if pending is None or pending["by"] != user or time.time() - pending["at"] > 600:
+            raise ValueError("The host key check expired; start again.")
+        entry = enrolment.enrol(pending["name"], pending["host"], pending["port"], pending["user"],
+                                form.get("password", ""), form.get("fingerprint", ""), pending["keys"],
+                                self.app.config.master_key, self.app.config.known_hosts,
+                                self.app.config.inventory, pending["lab"])
+        self.app.audit(user, "server_added", target=entry["target_id"], host=entry["host"],
+                       fingerprint=form.get("fingerprint"))
+        self.redirect(f"/servers/{entry['target_id']}")
+
+
+LOGIN_FORM = ('<form method="post" action="/login"><label>User <input name="user" autocomplete="username" required></label>'
+              '<label>Password <input type="password" name="password" autocomplete="current-password" required></label>'
+              '<button>Log in</button></form>')
+ADD_FORM = ('<form method="post" action="/servers/scan">{csrf}'
+            '<label>Name <input name="name" pattern="[a-z0-9][a-z0-9_-]{{0,63}}" required></label>'
+            '<label>Host <input name="host" required></label>'
+            '<label>Port <input name="port" type="number" value="22" min="1" max="65535"></label>'
+            '<label>SSH user <input name="user" required></label>'
+            '<label><input type="checkbox" name="lab" value="1"> lab server</label>'
+            '<button>Read its host key</button></form>')
+
+
+def serve(app, host, port, certfile=None, keyfile=None):
+    """Serve until interrupted. HTTPS unless bound to 127.0.0.1 without a certificate."""
+
+    if not certfile and host != "127.0.0.1":
+        raise SystemExit("Refusing plain HTTP on a non-loopback address; pass --cert and --key.")
+    handler = type("BoundHandler", (Handler,), {"app": app, "secure": bool(certfile)})
+    httpd = ThreadingHTTPServer((host, port), handler)
+    if certfile:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(certfile, keyfile)
+        httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+    print(f"DSSA web UI on {'https' if certfile else 'http'}://{host}:{port}/")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()

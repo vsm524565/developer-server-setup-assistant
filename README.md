@@ -107,6 +107,38 @@ approval, so a refused key or an unreachable server leaves the approval
 unused. Exit 5 means the plan never reached the server: nothing ran
 there, but the approval is used up.
 
+Web UI (4.46): `python -m bridge.webui` runs DSSA on a master server
+behind HTTPS on a subdomain: add servers (host key confirmed, password used
+once), plan, approve, apply with sudo typed into the server's own
+terminal, and batches of servers. See `docs/design/web-ui.md`.
+
+Machine-readable output (4.40): put `--json` before the command. stdout
+then carries JSON Lines (events, then one result); the usual text goes to
+stderr. Typed answers such as `APPROVE` are still read from the terminal.
+See `docs/design/json-output.md`.
+
+Managed files (4.45): a definition may create configuration files from
+templates in `definitions/templates/`. DSSA writes only new `dssa-*` files,
+never over an existing file; afterwards the file is yours.
+
+All or nothing (4.44): `plan --all-or-nothing …` makes any failure undo the
+whole run.
+
+Updates (4.43): a normal plan only mentions an available update.
+`main.py plan --update TARGET COMPONENT...` plans the exact versions;
+apply keeps the old package files first, so a failed update goes back.
+
+Uninstall and adopt (4.42): `main.py plan --remove TARGET COMPONENT...`
+removes only what the install record lists, keeps data, and keeps the
+removed versions' package files so a failure is undone. `plan --adopt`
+records an existing install so DSSA may later remove it. Approving either
+needs the component's name typed, then `APPROVE`.
+
+Install record (4.41): each server keeps `/var/lib/dssa/installed.json`,
+the components DSSA installed there and what it added (packages,
+dependencies, units, files). `main.py installed TARGET` shows it without
+sudo. Uninstall will only remove what this record lists.
+
 Preflight checks (4.39):
 - **Clock:** `plan` compares the server's clock with this computer's. Over
   60 s apart, or not NTP-synchronized, it warns; over 300 s it refuses,

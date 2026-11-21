@@ -69,7 +69,7 @@ runner_start() {
         return 2
     fi
     state="$(_tx_state_dir)"
-    mkdir -p -- "$state/runs" && chmod 700 -- "$state" "$state/runs" || return 2
+    mkdir -p -- "$state/runs" && chmod 711 -- "$state" && chmod 700 -- "$state/runs" || return 2
     _runner_retention
 
     run="$(_runner_dir "$plan_id")"
@@ -106,11 +106,11 @@ runner_start() {
 
 # Usage: runner_run PLAN_JSON DEFINITIONS_JSON   (inside the detached run)
 runner_run() {
-    local plan="$1" definitions="$2" plan_id run summary rc
+    local plan="$1" definitions="$2" templates="${3:-[]}" plan_id run summary rc
     plan_id="$(jq -r .plan_id <<< "$plan")"
     run="$(_runner_dir "$plan_id")"
 
-    summary="$(apply_plan "$plan" "$definitions")"
+    summary="$(apply_plan "$plan" "$definitions" "$templates")"
     rc=$?
     if ! jq -e 'type == "object"' <<< "${summary:-null}" >/dev/null 2>&1; then
         summary="$(jq -cn --arg p "$plan_id" --argjson rc "$rc" \

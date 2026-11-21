@@ -31,6 +31,21 @@ $MOCK_STATE, and filesystem effects under $DSSA_ROOT:
                                               imports one at install when a
                                               repo file names a gpgkey
   calls.log       one line per invocation
+
+Removal (4.42):
+  rdeps.json      {"pkg": ["dependent", ...]}  installed packages that need pkg:
+                                              a simulated purge lists them too,
+                                              rpm -e --test refuses
+  fail.json keys  "download": [pkg] (no package file), "unavailable": [pkg]
+                  (apt-cache show / dnf repoquery find no such version)
+Updates (4.43):
+  candidates.json {"pkg": "version"}          newest version in the package lists
+                                              (apt-cache policy, dnf repoquery --upgrades)
+  fail.json keys  "update_adds": [pkg] (a simulated/real upgrade also
+                  installs these new packages), "real_update_adds": [pkg]
+                  (only the real upgrade, not the simulation), "upgrade": bool
+  Package files written by "apt-get download" / "dnf download" hold JSON
+  {"name", "version"}; installing a ./path.deb or .rpm installs that.
 """
 
 import json
@@ -66,7 +81,57 @@ def fail(kind, item=None):
     return bool(rule)
 
 
+def from_files(names):
+    """Installing local package files (rollback of a removal, 4.42)."""
+    plain, files = [], {}
+    for name in names:
+        if name.endswith((".deb", ".rpm")):
+            data = json.loads(Path(name).read_text())
+            files[data["name"]] = data["version"]
+        else:
+            plain.append(name)
+    return plain, files
+
+
+def upgrade_to(specs):
+    """apt-get install --only-upgrade pkg=ver / dnf upgrade pkg-ver (4.43)."""
+    if fail("upgrade"):
+        print("E: mock failure upgrading", file=sys.stderr)
+        return 100
+    packages = load("packages.json", {})
+    for spec in specs:
+        match = re.match(r"^(.+?)=(.+)$", spec) or re.match(r"^(.+)-(\d+:.+)\.x86_64$", spec)
+        name, version = match.groups()
+        packages[name] = version.split(":", 1)[1] if re.match(r"^\d+:", version) and "=" not in spec else version
+    rules = load("fail.json", {})
+    for extra in rules.get("update_adds", []) + rules.get("real_update_adds", []):
+        packages[extra] = "1.0"
+    save("packages.json", packages)
+    return 0
+
+
 def install(names):
+    if "--only-upgrade" in sys.argv:
+        return upgrade_to(names)
+    names, from_file = from_files(names)
+    if from_file:
+        packages = load("packages.json", {})
+        if fail("reinstall"):
+            print("E: mock failure installing package files", file=sys.stderr)
+            return 100
+        for name, version in from_file.items():
+            packages[name] = version
+        save("packages.json", packages)
+        units = load("units.json", {})
+        for name in from_file:
+            for unit in load("pkg_units.json", {}).get(name, []):
+                units.setdefault(unit, {"file_state": "disabled", "active": "inactive"})
+            for binary in load("pkg_bins.json", {}).get(name, []):
+                (STATE / "bin" / binary).write_text("#!/bin/sh\necho mock-version\n")
+                (STATE / "bin" / binary).chmod(0o755)
+        save("units.json", units)
+        if not names:
+            return 0
     packages = load("packages.json", {})
     deps = load("deps.json", {})
     for package, version in load("upgrades.json", {}).items():
@@ -170,8 +235,65 @@ def positional(args):
     return words
 
 
+def bare(name):
+    return name[:-len(".x86_64")] if name.endswith(".x86_64") else name
+
+
+def would_remove(names):
+    """Names plus the installed packages that need them (rdeps.json)."""
+    packages = load("packages.json", {})
+    rdeps = load("rdeps.json", {})
+    out = [bare(n) for n in names if bare(n) in packages]
+    for name in list(out):
+        out += [d for d in rdeps.get(name, []) if d in packages and d not in out]
+    return out
+
+
+def download(specs, directory):
+    with open(STATE / "download_dirs.log", "a") as handle:  # where apt was asked to write
+        handle.write(str(directory) + "\n")
+    packages = load("packages.json", {})
+    for spec in specs:
+        match = re.match(r"^(.+?)=(.+)$", spec) or re.match(r"^(.+)-(\d+:.+)\.x86_64$", spec)
+        name, version = match.groups()
+        if fail("download", name):
+            print(f"E: mock: no package file for {spec}", file=sys.stderr)
+            return 100
+        suffix = "_amd64.deb" if "=" in spec else ".x86_64.rpm"
+        (Path(directory) / f"{name}_{version.replace(':', '%3a')}{suffix}").write_text(
+            json.dumps({"name": name if "=" in spec else name, "version": version}))
+    return 0
+
+
+def apt_cache(args):
+    words = positional(args)
+    if words[:1] == ["policy"]:
+        name = words[1]
+        installed = load("packages.json", {}).get(name, "(none)")
+        print(f"{name}:\n  Installed: {installed}\n  Candidate: {load('candidates.json', {}).get(name, installed)}")
+        return 0
+    if words[:1] == ["show"]:
+        name = words[1].split("=")[0]
+        return 100 if fail("unavailable", name) else 0
+    return 1
+
+
 def apt_get(args):
     action = positional(args)[0]
+    if action == "download":
+        return download(positional(args)[1:], os.getcwd())
+    if action == "install" and "-s" in args:
+        packages = load("packages.json", {})
+        for spec in positional(args)[1:]:
+            name, _, version = spec.partition("=")
+            print(f"Inst {name} [{packages.get(name, '?')}] ({version} mock [amd64])")
+        for extra in load("fail.json", {}).get("update_adds", []):
+            print(f"Inst {extra} (1.0 mock [amd64])")
+        return 0
+    if action in ("purge", "remove") and "-s" in args:
+        for name in would_remove(positional(args)[1:]):
+            print(f"Purg {name} [1.0]")
+        return 0
     if action == "update":
         if fail("apt_lock"):
             print("E: Could not get lock /var/lib/apt/lists/lock (timeout)", file=sys.stderr)
@@ -212,6 +334,26 @@ def import_repo_keys():
 
 def dnf(args):
     action = positional(args)[0]
+    if action == "download":
+        destdir = args[args.index("--destdir") + 1]
+        return download([w for w in positional(args)[1:] if w != destdir], destdir)
+    if action == "repoquery" and "--upgrades" in args:
+        name = bare(positional(args)[-1])
+        packages, candidates = load("packages.json", {}), load("candidates.json", {})
+        if name in candidates and candidates[name] != packages.get(name):
+            print(f"0:{candidates[name]}")
+        return 0
+    if action == "upgrade":
+        return upgrade_to(positional(args)[1:])
+    if action == "downgrade":
+        return install(positional(args)[1:])
+    if action == "repoquery":
+        spec = positional(args)[1]
+        name = re.match(r"^(.+)-\d+:", spec).group(1)
+        if fail("unavailable", name):
+            return 0
+        print(spec)
+        return 0
     if action == "makecache":
         return 1 if fail("update") else 0
     if action == "install":
@@ -237,6 +379,13 @@ def dpkg_query(args):
 
 def rpm(args):
     packages = load("packages.json", {})
+    if "-e" in args and "--test" in args:
+        names = [bare(n) for n in positional(args)]
+        extra = [n for n in would_remove(names) if n not in names]
+        if extra:
+            print(f"error: Failed dependencies: needed by {' '.join(extra)}", file=sys.stderr)
+            return 1
+        return 0
     if "-e" in args:
         keys = load("rpm_keys.json", [])
         names = positional(args)
@@ -259,7 +408,7 @@ def rpm(args):
                 print(f"{name}.x86_64\t0:{v}")
         return 0
     names = positional(args)
-    return 0 if names and names[0] in packages else 1
+    return 0 if names and bare(names[0]) in packages else 1
 
 
 def journalctl(args):
@@ -282,6 +431,12 @@ def systemctl(args):
     if action == "list-units":
         for name, state in sorted(units.items()):
             print(f"{name} loaded {state['active']} running mock")
+        return 0
+    if action == "reload":  # 4.45: only a running unit can be reloaded
+        unit = words[1]
+        if fail("reload", unit) or load("units.json", {}).get(unit, {}).get("active") != "active":
+            print(f"mock: cannot reload {unit}", file=sys.stderr)
+            return 1
         return 0
     if action == "daemon-reload":
         return 0
@@ -378,7 +533,7 @@ def firewall_cmd(args):
 TOOLS = {
     "apt-get": apt_get, "dnf": dnf, "dpkg-query": dpkg_query, "rpm": rpm,
     "systemctl": systemctl, "journalctl": journalctl, "curl": curl, "gpg": gpg, "dpkg": dpkg,
-    "firewall-cmd": firewall_cmd,
+    "firewall-cmd": firewall_cmd, "apt-cache": apt_cache,
 }
 
 if __name__ == "__main__":

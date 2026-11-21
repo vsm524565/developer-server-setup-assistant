@@ -83,6 +83,47 @@ DSSA_PLAN_PROPAGATE_JQ='
 | .steps
 '
 
+# Pure jq (4.42): remove and adopt act on the selection only, never on
+# dependencies it would pull in. Adopt keeps dependency order; remove
+# reverses it (dependents first).
+# Input: {"definitions": {...}, "selection": [...], "operation": "remove"|"adopt"}
+DSSA_PLAN_SELECTION_ORDER_JQ='
+def all_deps($defs; $id): [$defs[$id].depends_on[] | .id];
+def ordered($defs; $members; $selection):
+  def visit($id):
+    if (.seen | index($id)) then .
+    else .seen += [$id]
+      | reduce (all_deps($defs; $id)[] | select(. as $d | $members | index($d))) as $dep (.; visit($dep))
+      | .out += [$id]
+    end;
+  reduce $selection[] as $id ({seen: [], out: []}; visit($id)) | .out;
+.definitions as $defs | .operation as $op
+| (.selection | reduce .[] as $s ([]; if index($s) then . else . + [$s] end)) as $selection
+| ([$selection[] | select($defs[.] == null)]) as $missing
+| if ($missing | length) > 0 then error("unknown component: \($missing | join(", "))") else . end
+| ordered($defs; $selection; $selection)
+| (if $op == "remove" then reverse else . end)
+| map({id: ., added_as_dependency: false})
+'
+
+# Pure jq (4.42): in a remove plan, a component may go only when every
+# component in the plan that needs it is also being removed.
+# Input: {"order": [...], "entries": {id: entry}, "definitions": {...}}
+DSSA_PLAN_REMOVE_PROPAGATE_JQ='
+.definitions as $defs | .entries as $entries | .order as $order
+| [$order[].id] as $ids
+| [$order[] | $entries[.id] as $e
+   | [$ids[] as $other | select($other != $e.component)
+      | select([$defs[$other].depends_on[] | select(.required != false) | .id] | index($e.component))
+      | select($entries[$other].action != "REMOVE")] as $kept
+   | ($e + {added_as_dependency: false,
+            depends_on: [$defs[$e.component].depends_on[] | .id], blocked_by: []})
+   | if (.action == "REMOVE" and ($kept | length) > 0) then
+       .action = "BLOCKED" | .decision = "BLOCKED" | del(.details)
+       | .reasons = ["Still needed by \($kept | join(", ")), which this plan does not remove."]
+     else . end]
+'
+
 DSSA_PLAN_ID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 DSSA_PLAN_TIME_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
 DSSA_TARGET_ID_RE='^[a-z0-9][a-z0-9_-]{0,63}$'
@@ -149,11 +190,20 @@ _dssa_sha256() {
 # Validates every definition, resolves the dependency closure and embeds
 # only the definitions the plan needs, each with its SHA-256.
 build_plan_request() {
-    local allow_draft=false
-    if [[ "${1:-}" == --allow-draft ]]; then
-        allow_draft=true
+    local allow_draft=false operation=install all_or_nothing=false
+    while [[ "${1:-}" == --* ]]; do
+        case "$1" in
+            --allow-draft) allow_draft=true ;;
+            --all-or-nothing) all_or_nothing=true ;;
+            --remove) operation=remove ;;
+            --adopt) operation=adopt ;;
+            --update) operation=update ;;
+            *) printf 'ERROR: Unknown option: %s\n' "$1" >&2; return 2 ;;
+        esac
         shift
-    fi
+    done
+    [[ "$operation" == install || "$allow_draft" == false ]] ||
+        { echo "ERROR: --allow-draft applies to installs only." >&2; return 2; }
     local target_id="$1"
     local host_key="$2"
     local definitions_dir="$3"
@@ -195,10 +245,12 @@ build_plan_request() {
             '. + {($id): $c}' <<< "$contents")"
     done
 
+    local order_jq="$DSSA_PLAN_ORDER_JQ"
+    [[ "$operation" == install ]] || order_jq="$DSSA_PLAN_SELECTION_ORDER_JQ"
     order="$(
-        jq -c "$DSSA_PLAN_ORDER_JQ" 2>&1 <<< "$(
-            jq -cn --argjson defs "$definitions" \
-                '{definitions: $defs, selection: $ARGS.positional}' \
+        jq -c "$order_jq" 2>&1 <<< "$(
+            jq -cn --argjson defs "$definitions" --arg op "$operation" \
+                '{definitions: $defs, selection: $ARGS.positional, operation: $op}' \
                 --args "$@"
         )"
     )" || { printf 'ERROR: Selection could not be resolved: %s\n' "$order" >&2; return 2; }
@@ -216,17 +268,57 @@ build_plan_request() {
             '{id: $id, sha256: $h, content: $c}')")
     done < <(jq -r '.[].id' <<< "$order")
 
+    # 4.45: the templates those definitions' managed_file steps name, as
+    # exact text plus digest, so the approved plan binds them too.
+    local templates_dir template_file tid
+    local -a template_entries=()
+    templates_dir="${DSSA_TEMPLATES_DIR:-$(dirname -- "$definitions_dir")/templates}"
+    while IFS= read -r tid; do
+        [[ -n "$tid" ]] || continue
+        template_file="$templates_dir/$tid"
+        dssa_check_definition_path "$templates_dir" && dssa_check_definition_path "$template_file" ||
+            { printf 'ERROR: Template missing or unsafe: %s\n' "$tid" >&2; return 2; }
+        [[ -f "$template_file" ]] || { printf 'ERROR: Template is not a file: %s\n' "$tid" >&2; return 2; }
+        content="$(cat -- "$template_file")"
+        template_entries+=("$(jq -cn --arg id "$tid" --arg c "$content" --arg h "$(_dssa_sha256 "$content")" \
+            '{id: $id, sha256: $h, content: $c}')")
+    done < <(jq -r --argjson order "$order" '. as $c | [$order[].id | $c[.] | fromjson
+                 | .variants[].steps[] | select(.type == "managed_file") | .template] | unique[]' <<< "$contents")
+    local templates_json='[]'
+    (( ${#template_entries[@]} == 0 )) || templates_json="$(printf '%s\n' "${template_entries[@]}" | jq -cs .)"
+
     printf '%s\n' "${entries[@]}" | jq -cs \
+        --argjson templates "$templates_json" \
         --arg plan_id "$plan_id" --arg created_at "$created_at" \
         --arg target_id "$target_id" --arg host_key "$host_key" \
-        --argjson allow_draft "$allow_draft" \
+        --argjson allow_draft "$allow_draft" --arg operation "$operation" \
+        --argjson all_or_nothing "$all_or_nothing" \
         '{schema_version: "1.0", plan_id: $plan_id, created_at: $created_at,
           target: {target_id: $target_id, host_key_sha256: $host_key},
-          allow_draft: $allow_draft,
+          allow_draft: $allow_draft, operation: $operation, all_or_nothing: $all_or_nothing,
           selection: ($ARGS.positional
                       | reduce .[] as $s ([]; if index($s) then . else . + [$s] end)),
-          definitions: .}' \
+          definitions: ., templates: $templates}' \
         --args "$@"
+}
+
+# 4.45: an INSTALL whose managed_file target already exists is BLOCKED:
+# DSSA creates its files and never overwrites one (decision 3).
+dssa_managed_file_hold() {
+    local definition="$1" entry="$2" path existing='[]'
+    jq -e '.action == "INSTALL" and .variant_id != null' <<< "$entry" >/dev/null 2>&1 || { printf '%s\n' "$entry"; return 0; }
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        if [[ -e "${DSSA_ROOT:-}$path" || -L "${DSSA_ROOT:-}$path" ]]; then
+            existing="$(jq -c --arg p "$path" '. + [$p]' <<< "$existing")"
+        fi
+    done < <(jq -r --arg v "$(jq -r .variant_id <<< "$entry")" \
+        '.variants[] | select(.variant_id == $v) | .steps[] | select(.type == "managed_file") | .path' <<< "$definition")
+    jq -c --argjson x "$existing" '
+        if ($x | length) > 0 then
+          .decision = "BLOCKED" | .action = "BLOCKED"
+          | .reasons = ["DSSA would create \($x | join(", ")), but it already exists; DSSA never overwrites a file."]
+        else . end' <<< "$entry"
 }
 
 # Target side. Usage:
@@ -244,8 +336,17 @@ build_definition_plan() {
         --arg target_re "$DSSA_TARGET_ID_RE" --arg key_re "$DSSA_HOST_KEY_RE" '
         type == "object"
         and ((keys - ["schema_version","plan_id","created_at","target",
-                      "selection","definitions","allow_draft"]) | length == 0)
+                      "selection","definitions","allow_draft","operation","all_or_nothing",
+                      "templates"]) | length == 0)
+        and ((.templates // []) | type == "array"
+             and all(.[]; type == "object" and ((keys - ["id","sha256","content"]) | length == 0)
+                 and (.id | type == "string" and test("^[a-z0-9_-]+(/[a-z0-9_.-]+)*$"))
+                 and (.content | type == "string")
+                 and (.sha256 | type == "string" and test("^sha256:[0-9a-f]{64}$"))))
+        and ((.all_or_nothing // false) | type == "boolean")
         and ((.allow_draft // false) | type == "boolean")
+        and ((.operation // "install") | IN("install", "remove", "adopt", "update"))
+        and ((.operation // "install") == "install" or (.allow_draft // false) == false)
         and .schema_version == "1.0"
         and (.plan_id | type == "string" and test($plan_re))
         and (.created_at | type == "string" and test($time_re))
@@ -283,11 +384,18 @@ build_definition_plan() {
         definitions="$(jq -c --argjson d "$content" '. + {($d.id): $d}' <<< "$definitions")"
     done < <(jq -r '.definitions[].id' <<< "$request")
 
+    local operation order_jq="$DSSA_PLAN_ORDER_JQ" record='{"components": {}}'
+    operation="$(jq -r '.operation // "install"' <<< "$request")"
+    [[ "$operation" == install ]] || order_jq="$DSSA_PLAN_SELECTION_ORDER_JQ"
+    if [[ "$operation" == remove || "$operation" == adopt ]]; then
+        record="$(dssa_record_read)" || { echo "ERROR: The install record cannot be trusted; nothing can be removed or adopted." >&2; return 3; }
+    fi
+
     # Recompute the order here rather than trusting the laptop's.
     order="$(
-        jq -c --argjson defs "$definitions" \
-            '{definitions: $defs, selection: .selection}' <<< "$request" |
-            jq -c "$DSSA_PLAN_ORDER_JQ" 2>/dev/null
+        jq -c --argjson defs "$definitions" --arg op "$operation" \
+            '{definitions: $defs, selection: .selection, operation: $op}' <<< "$request" |
+            jq -c "$order_jq" 2>/dev/null
     )" || { echo "ERROR: Selection could not be resolved." >&2; return 2; }
 
     # The request must contain exactly the definitions the plan needs.
@@ -298,16 +406,46 @@ build_definition_plan() {
         return 2
     }
 
+    # 4.45: every template must match its digest, and be exactly the ones
+    # the definitions name.
+    local tid tcontent
+    while IFS= read -r tid; do
+        tcontent="$(jq -r --arg t "$tid" '.templates[] | select(.id == $t) | .content' <<< "$request")"
+        [[ "$(_dssa_sha256 "$tcontent")" == "$(jq -r --arg t "$tid" '.templates[] | select(.id == $t) | .sha256' <<< "$request")" ]] ||
+            { printf 'ERROR: Template digest mismatch: %s\n' "$tid" >&2; return 2; }
+    done < <(jq -r '(.templates // [])[].id' <<< "$request")
+    jq -e --argjson defs "$definitions" '
+        ([(.templates // [])[].id] | sort) ==
+        ([$defs[] | .variants[].steps[] | select(.type == "managed_file") | .template] | unique | sort)' \
+        <<< "$request" >/dev/null ||
+        { echo "ERROR: Plan request templates do not match the definitions." >&2; return 2; }
+
     allow_draft="$(jq -c '.allow_draft // false' <<< "$request")"
+    local definition propagate="$DSSA_PLAN_PROPAGATE_JQ"
     while IFS= read -r id; do
-        entry="$(
-            plan_component_from_definition \
-                "$(jq -c --arg id "$id" '.[$id]' <<< "$definitions")" \
-                "$manager" "$panel_facts" "$port_facts"
-        )" || return $?
-        entry="$(jq -c --argjson allow "$allow_draft" "$DSSA_PLAN_ALLOW_DRAFT_JQ allow_draft(\$allow)" <<< "$entry")" || return 1
+        definition="$(jq -c --arg id "$id" '.[$id]' <<< "$definitions")"
+        case "$operation" in
+            remove)
+                entry="$(plan_remove_component "$definition" "$manager" "$record" \
+                    "$(jq -c '.selection' <<< "$request")")" || return 3 ;;
+            adopt)
+                entry="$(plan_adopt_component "$definition" "$manager" "$panel_facts" "$port_facts" "$record")" || return $? ;;
+            update)
+                entry="$(plan_update_component "$definition" "$manager" "$panel_facts" "$port_facts")" || return $? ;;
+            *)
+                entry="$(plan_component_from_definition "$definition" "$manager" "$panel_facts" "$port_facts")" || return $?
+                entry="$(jq -c --argjson allow "$allow_draft" "$DSSA_PLAN_ALLOW_DRAFT_JQ allow_draft(\$allow)" <<< "$entry")" || return 1
+                # 4.43: an installed component reports an available update (info only).
+                declare -F dssa_update_info >/dev/null && entry="$(dssa_update_info "$definition" "$manager" "$entry")"
+                # 4.45: DSSA never overwrites a file, so an existing target path holds the install.
+                entry="$(dssa_managed_file_hold "$definition" "$entry")" ;;
+        esac
         entries="$(jq -c --arg id "$id" --argjson e "$entry" '. + {($id): $e}' <<< "$entries")"
     done < <(jq -r '.[].id' <<< "$order")
+    [[ "$operation" == remove ]] && propagate="$DSSA_PLAN_REMOVE_PROPAGATE_JQ"
+    # Adopt and update entries are independent: no dependency holds.
+    [[ "$operation" == adopt || "$operation" == update ]] && propagate='[.order[] as $o | .entries[$o.id] as $e | .definitions as $defs
+        | $e + {added_as_dependency: false, depends_on: [$defs[$o.id].depends_on[] | .id], blocked_by: []}]'
 
     jq -cn \
         --argjson request "$request" \
@@ -315,20 +453,24 @@ build_definition_plan() {
         --argjson order "$order" \
         --argjson entries "$entries" \
         --arg manager "$manager" \
+        --arg operation "$operation" \
         "{order: \$order, entries: \$entries, definitions: \$definitions}
-         | $DSSA_PLAN_PROPAGATE_JQ
+         | $propagate
          | . as \$steps
          | {schema_version: \"1.0\",
             plan_id: \$request.plan_id,
             created_at: \$request.created_at,
             target: \$request.target,
             allow_draft: (\$request.allow_draft // false),
+            templates: ((\$request.templates // []) | map({(.id): .sha256}) | add // {}),
+            operation: \$operation,
+            all_or_nothing: (\$request.all_or_nothing // false),
             package_manager: \$manager,
             selection: \$request.selection,
             definitions: (\$request.definitions | map({(.id): .sha256}) | add),
             steps: \$steps,
-            runnable: [\$steps[] | select(.action == \"INSTALL\" or .action == \"SKIP\") | .component],
-            held: [\$steps[] | select(.action != \"INSTALL\" and .action != \"SKIP\")
+            runnable: [\$steps[] | select(.action | IN(\"INSTALL\", \"SKIP\", \"REMOVE\", \"ADOPT\", \"UPDATE\")) | .component],
+            held: [\$steps[] | select(.action | IN(\"INSTALL\", \"SKIP\", \"REMOVE\", \"ADOPT\", \"UPDATE\") | not)
                    | {component, action, reasons, blocked_by}],
             planning_only: true,
             execution_allowed: false}"

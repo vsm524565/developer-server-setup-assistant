@@ -78,9 +78,15 @@ def valid_step:
     only(["type","path","template","mode","owner"])
     and has_all(["path","template","mode","owner"])
     and (.path | safe_path)
+    # 4.45: DSSA writes only files under its own names (decision 3).
+    and (.path | split("/") | last | test("^dssa-[A-Za-z0-9._-]+$"))
     and (.template | str("^[a-z0-9_-]+(/[a-z0-9_.-]+)*$"))
     and (.mode | str("^0[0-7]{3}$"))
     and (.owner | str("^[a-z_][a-z0-9_-]*(:[a-z_][a-z0-9_-]*)?$"))
+  elif .type == "service_reload" then
+    # 4.45: reload a running unit after its config test passes.
+    only(["type","unit","config_test"]) and has_all(["unit"]) and (.unit | str(unit_re))
+    and ((.config_test // "nginx -t") == "nginx -t")
   elif .type == "hook" then only(["type","name"]) and (.name | str(hook_re))
   else false end;
 

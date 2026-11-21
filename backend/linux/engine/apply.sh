@@ -26,7 +26,7 @@
 # Usage: apply_plan PLAN_JSON DEFINITIONS_JSON
 #   DEFINITIONS_JSON: [{"id": ..., "content": "<exact definition text>"}]
 apply_plan() {
-    local plan="$1" bundle="$2"
+    local plan="$1" bundle="$2" template_bundle="${3:-[]}"
     local plan_id manager allow_draft definitions='{}' id content expected
     local paths results='[]' failed='[]' stop_reason="" step component action
     local variant_id definition result rc entry panels ports now_key planned_key already_present
@@ -68,7 +68,22 @@ apply_plan() {
         . as $defs
         | [ $plan.steps[] | select(.action == "INSTALL" or .action == "SKIP") as $s
             | $defs[$s.component].variants[] | select(.variant_id == $s.variant_id)
-            | .rollback.created_paths[] ] | unique' <<< "$definitions")" || return 2
+            | .rollback.created_paths[] ]
+          # 4.42: files a removal deletes are snapshotted too.
+          + [ $plan.steps[] | select(.action == "REMOVE") | .details.repository_files[]?, .details.remove_files[]? ]
+          | unique' <<< "$definitions")" || return 2
+
+    # 4.45: exactly the plan's templates, each matching its digest.
+    jq -e --argjson plan "$plan" '
+        type == "array" and all(.[]; type == "object" and (.id | type == "string") and (.content | type == "string"))
+        and ([.[].id] | sort) == (($plan.templates // {}) | keys | sort)' <<< "$template_bundle" >/dev/null 2>&1 ||
+        { _tx_fail "Templates do not match the plan."; return 2; }
+    while IFS= read -r id; do
+        content="$(jq -r --arg id "$id" '.[] | select(.id == $id) | .content' <<< "$template_bundle")"
+        [[ "$(_dssa_sha256 "$content")" == "$(jq -r --arg id "$id" '.templates[$id]' <<< "$plan")" ]] ||
+            { _tx_fail "Template digest mismatch: $id"; return 2; }
+    done < <(jq -r '.[].id' <<< "$template_bundle")
+    DSSA_TEMPLATE_BUNDLE="$template_bundle"
 
     begin_transaction "$plan_id" "$manager" "$paths" || return 2
 
@@ -80,7 +95,7 @@ apply_plan() {
         variant_id="$(jq -r '.variant_id // ""' <<< "$step")"
         definition="$(jq -c --arg c "$component" '.[$c]' <<< "$definitions")"
 
-        if [[ "$action" != INSTALL && "$action" != SKIP ]]; then
+        if [[ "$action" != INSTALL && "$action" != SKIP && "$action" != REMOVE && "$action" != ADOPT && "$action" != UPDATE ]]; then
             result="$(jq -c '{component, outcome: "held", action, reasons, blocked_by}' <<< "$step")"
             failed="$(jq -c --arg c "$component" '. + [$c]' <<< "$failed")"
             results="$(jq -c --argjson r "$result" '. + [$r]' <<< "$results")"
@@ -94,9 +109,18 @@ apply_plan() {
             continue
         fi
 
-        blockers="$(jq -c --argjson failed "$failed" \
-            '[.depends_on[] | select(.required != false) | .id
-              | select(. as $d | $failed | index($d))]' <<< "$definition")"
+        if [[ "$action" == REMOVE ]]; then
+            # Removal runs dependents first: if removing one that needs
+            # this component failed, this one must stay (4.42).
+            blockers="$(jq -c --argjson failed "$failed" --arg c "$component" \
+                '[$failed[] as $f | select(.[$f] != null)
+                  | select([.[$f].depends_on[] | select(.required != false) | .id] | index($c)) | $f]' \
+                <<< "$definitions")"
+        else
+            blockers="$(jq -c --argjson failed "$failed" \
+                '[.depends_on[] | select(.required != false) | .id
+                  | select(. as $d | $failed | index($d))]' <<< "$definition")"
+        fi
         if [[ "$blockers" != "[]" ]]; then
             result="$(jq -cn --arg c "$component" --argjson b "$blockers" \
                 '{component: $c, outcome: "not_attempted",
@@ -109,13 +133,29 @@ apply_plan() {
         # Drift re-check: decide again on the live server.
         printf 'Component %s: re-checking the server before it runs\n' "$component" >&2
         entry=""
-        if panels="$(discover_panels)" && ports="$(discover_ports)"; then
-            entry="$(plan_component_from_definition "$definition" "$manager" "$panels" "$ports")" &&
-                entry="$(jq -c --argjson allow "$allow_draft" \
-                    "$DSSA_PLAN_ALLOW_DRAFT_JQ allow_draft(\$allow)" <<< "$entry")" || entry=""
+        local key_jq='{variant_id, decision, action}'
+        if [[ "$action" == REMOVE ]]; then
+            # What would be removed must be exactly what was approved.
+            key_jq='{decision, action, remove: [.details.remove_packages[]?.package], units: ((.details.stop_units // []) + (.details.disable_units // []))}'
+            local record_now
+            record_now="$(dssa_record_read)" &&
+                entry="$(plan_remove_component "$definition" "$manager" "$record_now" "$(jq -c .selection <<< "$plan")")" || entry=""
+        elif panels="$(discover_panels)" && ports="$(discover_ports)"; then
+            if [[ "$action" == ADOPT ]]; then
+                entry="$(plan_adopt_component "$definition" "$manager" "$panels" "$ports" "$(dssa_record_read)")" || entry=""
+            elif [[ "$action" == UPDATE ]]; then
+                # The same packages from the same versions; the target
+                # versions are checked again after the list refresh.
+                key_jq='{variant_id, decision, action, updates: [.details.updates[]? | {package, from}]}'
+                entry="$(plan_update_component "$definition" "$manager" "$panels" "$ports")" || entry=""
+            else
+                entry="$(plan_component_from_definition "$definition" "$manager" "$panels" "$ports")" &&
+                    entry="$(jq -c --argjson allow "$allow_draft" \
+                        "$DSSA_PLAN_ALLOW_DRAFT_JQ allow_draft(\$allow)" <<< "$entry")" || entry=""
+            fi
         fi
-        planned_key="$(jq -c '{variant_id, decision, action}' <<< "$step")"
-        now_key="$(jq -c '{variant_id, decision, action}' <<< "${entry:-null}" 2>/dev/null)" || now_key=null
+        planned_key="$(jq -c "$key_jq" <<< "$step")"
+        now_key="$(jq -c "$key_jq" <<< "${entry:-null}" 2>/dev/null)" || now_key=null
         # An INSTALL that is now SKIP (same variant) is already in place,
         # e.g. pulled in by an earlier component's install: verify it only.
         # That does less than was approved, so it is not drift (4.36).
@@ -141,7 +181,16 @@ apply_plan() {
             continue
         fi
 
-        if [[ "$action" == SKIP ]]; then
+        if [[ "$action" == REMOVE ]]; then
+            result="$(remove_component "$plan_id" "$manager" "$component" "$(jq -c .details <<< "$step")")"
+            rc=$?
+        elif [[ "$action" == ADOPT ]]; then
+            result="$(adopt_component "$plan_id" "$manager" "$definition" "$variant_id")"
+            rc=$?
+        elif [[ "$action" == UPDATE ]]; then
+            result="$(update_component "$plan_id" "$manager" "$definition" "$variant_id" "$(jq -c .details <<< "$step")")"
+            rc=$?
+        elif [[ "$action" == SKIP ]]; then
             result="$(verify_component "$manager" "$definition" "$variant_id")"
             rc=$?
             if [[ "$already_present" == true ]] && jq -e 'type == "object"' <<< "${result:-null}" >/dev/null 2>&1; then
@@ -166,6 +215,32 @@ apply_plan() {
         results="$(jq -c --argjson r "$result" '. + [$r]' <<< "$results")"
     done
 
+    # 4.44: all or nothing. Any failure undoes every component this run
+    # changed, the last one first.
+    if [[ "$(jq -r '.all_or_nothing // false' <<< "$plan")" == true ]] &&
+       jq -e 'any(.[]; .outcome | IN("installed", "verified", "removed", "updated", "adopted") | not)' <<< "$results" >/dev/null; then
+        printf 'All-or-nothing plan: a component did not complete; undoing the others.\n' >&2
+        local undo undone='[]' kind
+        while IFS= read -r component; do
+            kind="$(jq -r --arg c "$component" '.[] | select(.component == $c) | .outcome' <<< "$results")"
+            case "$kind" in
+                installed) undo="$(rollback_component "$plan_id" "$manager" "$component")" &&
+                               dssa_record_forget "$component" || true ;;
+                removed) undo="$(rollback_remove "$plan_id" "$manager" "$component")" ;;
+                updated) undo="$(rollback_update "$plan_id" "$manager" "$component")" ;;
+                adopted) dssa_record_forget "$component" &&
+                             undo='{"complete": true, "actions": [{"action": "record_forget", "result": "ok"}], "issues": []}' ||
+                             undo='{"complete": false, "actions": [], "issues": ["Could not undo the adoption."]}' ;;
+            esac
+            results="$(jq -c --arg c "$component" --argjson u "${undo:-null}" '
+                map(if .component == $c then
+                      .outcome = (if ($u.complete // false) then "undone_all_or_nothing" else "rollback_incomplete" end)
+                      | .undo = $u
+                      | .reason = "Undone: another component in this all-or-nothing plan did not complete."
+                    else . end)' <<< "$results")"
+        done < <(jq -r '[.[] | select(.outcome | IN("installed", "removed", "updated", "adopted")) | .component] | reverse[]' <<< "$results")
+    fi
+
     end_transaction "$plan_id" "$results" || {
         _tx_fail "Could not record the transaction result."
         jq -cn --argjson plan "$plan" --argjson r "$results" \
@@ -178,7 +253,8 @@ apply_plan() {
         ([$r[].outcome]) as $o
         | (if any($o[]; . == "rollback_incomplete" or . == "error") then "needs_review"
            elif any($o[]; . == "failed_rolled_back" or . == "drift_skipped"
-                          or . == "verification_failed" or . == "not_attempted") then "partial"
+                          or . == "verification_failed" or . == "not_attempted"
+                          or . == "undone_all_or_nothing") then "partial"
            else "completed" end) as $status
         | {schema_version: "1.0", plan_id: $plan.plan_id, target_id: $plan.target.target_id,
            package_manager: $plan.package_manager, finished_at: $at, status: $status,
@@ -186,7 +262,8 @@ apply_plan() {
 
     case "$(jq -r '[.[].outcome] | if any(. == "rollback_incomplete" or . == "error") then 4
                     elif any(. == "failed_rolled_back" or . == "drift_skipped"
-                             or . == "verification_failed" or . == "not_attempted") then 3
+                             or . == "verification_failed" or . == "not_attempted"
+                             or . == "undone_all_or_nothing") then 3
                     else 0 end' <<< "$results")" in
         0) return 0 ;;
         3) return 3 ;;

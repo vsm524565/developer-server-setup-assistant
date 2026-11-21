@@ -1,0 +1,21 @@
+# Example systemd unit for the DSSA web UI (4.46). Adjust User, paths and
+# the listen address; see docs/design/web-ui.md.
+[Unit]
+Description=DSSA web UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=dssa
+Group=dssa
+WorkingDirectory=/opt/developer-server-setup-assistant
+Environment=DSSA_WEBUI_HOME=/home/dssa/.config/dssa-webui
+ExecStart=/usr/bin/python3 -m bridge.webui serve --host 127.0.0.1 --port 8443
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/home/dssa
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -230,9 +230,16 @@ def preflight_plan(plan_bytes, current_host_keys, now=None, definitions_dir=None
 
         if not plan["runnable"]:
             issues.append("Nothing in the plan is runnable.")
+        # 4.44: all or nothing cannot start with part of the plan held.
+        if plan.get("all_or_nothing") and plan["held"]:
+            issues.append("All-or-nothing plan has held components ("
+                          + ", ".join(h["component"] for h in plan["held"])
+                          + "); plan again without them.")
 
+    # Anything that changes the server needs approval; only SKIP (verify)
+    # does not. REMOVE and ADOPT (4.42) change it or what DSSA may remove.
     requires_approval = bool(plan) and any(
-        step["action"] == "INSTALL" for step in plan["steps"]
+        step["action"] != "SKIP" for step in plan["steps"]
         if step["component"] in plan["runnable"]
     )
 

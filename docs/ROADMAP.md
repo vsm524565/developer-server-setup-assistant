@@ -1332,3 +1332,157 @@ Found in the 4.39 lab run.
       again. Exit 5 uses the same wording rule.
 - [x] 2 new tests; regression 763/763, 1 skipped.
 - [x] Manual check on ubuntu24, 2026-11-20 (`docs/testing/manual-4.39-preflight.md`, 4.39.1 section).
+
+### Milestone 4.40 — JSON Output — 2026-11-20
+
+Order of work, step 1 (`docs/design/application-flow.md`, decision 6).
+
+- [x] `main.py --json`: JSON Lines on stdout (events, then exactly one
+      result, also after errors); text for a person on stderr; exit codes
+      unchanged. Schema: `docs/design/json-output.md`.
+- [x] Events: `plan.saved`, `login.check`, `approval.consumed`,
+      `run.started`, `log` (one per line of the server's terminal),
+      `run.finished`.
+- [x] Typed answers are read from `/dev/tty`, never stdin; without a
+      terminal the step is refused. The guided session is refused.
+- [x] 9 new tests.
+- [x] Manual verification, 2026-11-20 (`docs/testing/manual-4.40-json.md`).
+
+### Milestone 4.41 — Permanent Install Record — 2026-11-20
+
+Order of work, step 2 (`docs/design/application-flow.md`, decision 2).
+
+- [x] `engine/record.sh`: `/var/lib/dssa/installed.json` (mode 0644,
+      never removed by retention). After a component is installed and
+      verified, its entry records: how (`installed`), variant, plan, time,
+      the packages DSSA added (requested ones and pulled-in dependencies,
+      with versions, never packages that were there before), units DSSA
+      enabled or started, created paths, and vendor repository files.
+- [x] The record is trusted only when it is a real file owned by root and
+      writable by root alone. A failed write does not undo a verified
+      install; the result says `recorded: false`.
+- [x] `/var/lib/dssa` is now mode 0711 (others may open the record by
+      name, nothing else); `transactions`, `runs` and `stage` stay 0700.
+- [x] `dssa-run.sh record TARGET` and `main.py installed TARGET` show the
+      record without sudo (also with `--json`: `data.record`).
+- [x] 9 new tests.
+- [ ] Manual verification (combined: `docs/testing/manual-4.41-4.46-combined.md`).
+
+### Milestone 4.42 — Uninstall and Adopt — 2026-11-20
+
+Order of work, step 3a (`docs/design/application-flow.md`, decisions 2, 4, 5b).
+
+- [x] `plan --remove TARGET COMPONENT...` (`engine/remove.sh`): only
+      components in the install record; otherwise BLOCKED "Not installed by
+      DSSA". BLOCKED while another recorded component needs it; removing
+      both orders dependents first. Packages only: data paths are kept and
+      listed. Packages another recorded component claims are never removed.
+- [x] The package manager's own simulation decides: dependencies that
+      something else still needs are kept; if a main package is needed,
+      the removal is BLOCKED (apt: `apt-get -s purge`; dnf: `rpm -e --test`,
+      then `dnf remove --noautoremove`).
+- [x] Undo (decision 5b): before anything changes, the installed versions'
+      package files are kept in the transaction folder (`apt-get download`
+      or the apt cache; `dnf download`). A failed removal reinstalls from
+      them and restores repository files, units and the record entry. If a
+      version cannot be obtained, the plan says NOT reversible.
+- [x] `plan --adopt`: an installed, verifiable component DSSA does not yet
+      manage becomes ADOPT; apply verifies it and records it
+      (`how: "adopted"`). Nothing else on the server changes.
+- [x] Typed names (decision 4): approving a REMOVE or ADOPT needs the
+      component's name typed, then `APPROVE`. REMOVE and ADOPT always need
+      approval. Drift re-check at apply: what would be removed must match.
+- [x] Plan documents carry `operation` (install | remove | adopt); REMOVE
+      steps carry `details`. `resume-rollback` undoes an interrupted removal.
+- [x] 15 new tests.
+- [x] Lab finding (combined test, step 7): `apt-get download` into the
+      root-only kept folder made apt fall back to downloading as root,
+      outside its `_apt` sandbox. Now it downloads into a private temporary
+      folder owned by `_apt` and the file is moved into `kept/` (mode 0600).
+- [ ] Manual verification (combined: `docs/testing/manual-4.41-4.46-combined.md`).
+
+### Milestone 4.43 — Updates — 2026-11-20
+
+Order of work, step 3b (`docs/design/application-flow.md`, decisions 1, 4, 5b).
+
+- [x] Normal plans report an available update for an installed (SKIP)
+      component as a reason: `Update available: pkg A -> B (plan --update
+      to apply it).` Nothing runs.
+- [x] `plan --update TARGET COMPONENT...` (`engine/update.sh`): UPDATE with
+      exact target versions for the variant's detection and main packages;
+      SKIP when up to date; BLOCKED when not installed, on a major-version
+      change, or when apt's simulation adds or removes packages.
+- [x] Apply: keep the installed versions' package files, refresh the lists
+      (the candidate must still be the planned version), upgrade exactly
+      (`--only-upgrade`, `--force-confold`; dnf `--setopt=obsoletes=0`),
+      refuse added/removed packages, bring services back to their state
+      before (running ones restart and must stay up), verify, and update the
+      install record's versions. A failure downgrades from the kept files.
+- [x] Typed name only when the update restarts a running service or is
+      not reversible (decision 4).
+- [x] 9 new tests.
+- [ ] Manual verification (combined: `docs/testing/manual-4.41-4.46-combined.md`).
+
+### Milestone 4.44 — All or Nothing — 2026-11-20
+
+Order of work, step 3c (`docs/design/application-flow.md`, decision 5a).
+
+- [x] `plan --all-or-nothing` (with any operation) writes
+      `all_or_nothing: true` into the plan, so it is approved knowingly.
+- [x] At apply, if any component does not complete (failed, drift,
+      not attempted), every component the run changed is undone, the last
+      one first: installs are rolled back and dropped from the record,
+      removals reinstalled from the kept files, updates downgraded,
+      adoptions forgotten. Their outcome is `undone_all_or_nothing`;
+      exit 3 (4 if an undo is incomplete).
+- [x] An all-or-nothing plan with held components cannot be approved.
+- [x] Default stays per component: without the flag, the others keep their
+      changes.
+- [x] 5 new tests.
+- [ ] Manual verification (combined: `docs/testing/manual-4.41-4.46-combined.md`).
+
+### Milestone 4.45 — Managed Files — 2026-11-20
+
+Order of work, step 3d (`docs/design/application-flow.md`, decision 3).
+
+- [x] `managed_file` runs: it creates a new file from a template in
+      `definitions/templates/` (mode and owner from the step). Only files
+      named `dssa-*` (validated in bash and Python); an existing path or a
+      symlink refuses the step, and plans an INSTALL as BLOCKED.
+- [x] Templates are bound like definitions: the plan carries
+      `templates: {id: sha256}`, apply sends exactly those texts, and a
+      template changed after planning refuses approve and apply.
+- [x] `service_reload` step: the config test (`nginx -t` only) must pass,
+      then a running unit is reloaded. A failure rolls back, which removes
+      the new file and reloads again.
+- [x] The install record lists each written file with its SHA-256.
+      Uninstall removes a DSSA file only if unchanged; an edited one is
+      kept and listed.
+- [x] 8 new tests.
+- [ ] Manual verification: with the Nginx component (its definition is
+      still draft), in the components phase.
+
+### Milestone 4.46 — Web UI on a Master Server — 2026-11-20
+
+Order of work, step 4 (`docs/design/application-flow.md`, decisions 6 and 7;
+design: `docs/design/web-ui.md`).
+
+- [x] `python -m bridge.webui init | adduser | serve` (standard library):
+      HTTPS with the master's certificate, or plain HTTP on 127.0.0.1 only.
+- [x] Login (scrypt, lockout), HttpOnly SameSite=Strict sessions, CSRF
+      tokens, strict CSP, audit log with the UI user.
+- [x] Add a server: confirm the offered host key's fingerprint, password
+      used once through SSH_ASKPASS to install the master's key, then
+      dropped; key login checked; server added to the UI's inventory.
+- [x] Plan (install, update, remove, adopt; all or nothing), the UI's own
+      approval screen (typed names shared with the CLI via
+      `bridge/components/risk.py`), apply/report/resume as terminal jobs:
+      sudo asks on the server, the password typed in the page goes to
+      that terminal only.
+- [x] Batches (decision 7): one approval for several servers, applied
+      server by server, stopping at the first failure.
+- [x] 18 new tests.
+- [x] Lab finding (combined test, step 4): the server page dropped the
+      connection: its method was named `server`, which is the handler's
+      HTTP server attribute. Renamed; any unexpected error now answers 500.
+- [ ] Manual verification (combined: `docs/testing/manual-4.41-4.46-combined.md`).

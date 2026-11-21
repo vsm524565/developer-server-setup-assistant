@@ -121,6 +121,13 @@ def _version_pattern(value, where):
     return value
 
 
+def _dssa_file(value, where):
+    # DSSA writes only files under its own names (decision 3, 4.45).
+    if not re.fullmatch(r"dssa-[A-Za-z0-9._-]+", value.rsplit("/", 1)[-1]):
+        _fail(where, "a managed file's name must start with dssa-")
+    return value
+
+
 def _port(value, where):
     if isinstance(value, bool) or not isinstance(value, int):
         _fail(where, "must be an integer port")
@@ -255,7 +262,7 @@ STEP_TYPES = {
     "service_start": ({"unit": lambda v, w: _text(v, w, UNIT_RE)}, {}),
     "managed_file": (
         {
-            "path": _path,
+            "path": lambda v, w: _dssa_file(_path(v, w), w),
             "template": lambda v, w: _text(v, w, TEMPLATE_RE),
             "mode": lambda v, w: _text(v, w, MODE_RE),
             "owner": lambda v, w: _text(v, w, OWNER_RE),
@@ -263,6 +270,11 @@ STEP_TYPES = {
         {},
     ),
     "hook": ({"name": lambda v, w: _text(v, w, HOOK_RE)}, {}),
+    # 4.45: reload a running unit after its config test passes.
+    "service_reload": (
+        {"unit": lambda v, w: _text(v, w, UNIT_RE)},
+        {"config_test": lambda v, w: _choice(v, w, CONFIG_TEST_COMMANDS)},
+    ),
 }
 
 CHECK_TYPES = {

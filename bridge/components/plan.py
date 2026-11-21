@@ -6,6 +6,7 @@ Python never re-decides a plan.
 """
 
 import hashlib
+import os
 import re
 from pathlib import Path
 
@@ -15,17 +16,35 @@ from bridge.components.loader import DEFAULT_DEFINITIONS_DIR
 PLAN_KEYS = frozenset({
     "schema_version", "plan_id", "created_at", "target", "allow_draft", "package_manager",
     "selection", "definitions", "steps", "runnable", "held",
-    "planning_only", "execution_allowed",
+    "planning_only", "execution_allowed", "operation", "all_or_nothing", "templates",
 })
 STEP_KEYS = frozenset({
     "component", "variant_id", "support", "decision", "action", "reasons",
     "package_manager", "planning_only", "execution_allowed",
     "added_as_dependency", "depends_on", "blocked_by",
 })
+# 4.42: a REMOVE step carries what it removes (details).
+OPTIONAL_STEP_KEYS = frozenset({"details"})
 HELD_KEYS = frozenset({"component", "action", "reasons", "blocked_by"})
 
-ACTIONS = frozenset({"INSTALL", "SKIP", "REVIEW", "BLOCKED"})
-RUNNABLE_ACTIONS = frozenset({"INSTALL", "SKIP"})
+ACTIONS = frozenset({"INSTALL", "SKIP", "REVIEW", "BLOCKED", "REMOVE", "ADOPT", "UPDATE"})
+RUNNABLE_ACTIONS = frozenset({"INSTALL", "SKIP", "REMOVE", "ADOPT", "UPDATE"})
+# Which actions each operation may plan (4.42).
+OPERATION_ACTIONS = {
+    "install": frozenset({"INSTALL", "SKIP", "REVIEW", "BLOCKED"}),
+    "remove": frozenset({"REMOVE", "BLOCKED"}),
+    "adopt": frozenset({"ADOPT", "BLOCKED"}),
+    "update": frozenset({"UPDATE", "SKIP", "BLOCKED"}),
+}
+# What a REMOVE (4.42) or UPDATE (4.43) step carries.
+DETAILS_KEYS = {
+    "REMOVE": frozenset({
+        "remove_packages", "kept_dependencies", "stop_units", "disable_units",
+        "repository_files", "kept_paths", "reversible", "unavailable", "record_entry",
+        "remove_files", "kept_files",
+    }),
+    "UPDATE": frozenset({"updates", "units", "running_units", "reversible", "unavailable"}),
+}
 
 PLAN_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
@@ -35,6 +54,7 @@ TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 HOST_KEY_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 COMPONENT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+TEMPLATE_ID_RE = re.compile(r"^[a-z0-9_-]+(/[a-z0-9_.-]+)*$")
 
 
 class PlanError(ValueError):
@@ -77,6 +97,10 @@ def validate_plan_document(plan):
     )
     _require(plan["package_manager"] in ("apt", "dnf"), "plan: invalid package manager")
     _require(isinstance(plan["allow_draft"], bool), "plan: allow_draft must be true or false")
+    _require(isinstance(plan["all_or_nothing"], bool), "plan: all_or_nothing must be true or false")
+    operation = plan["operation"]
+    _require(operation in OPERATION_ACTIONS, "plan: invalid operation")
+    _require(operation == "install" or not plan["allow_draft"], "plan: drafts apply to installs only")
 
     target = plan["target"]
     _exact_keys(target, ("target_id", "host_key_sha256"), "plan.target")
@@ -101,15 +125,24 @@ def validate_plan_document(plan):
     actions = {}
     for index, step in enumerate(steps):
         where = f"plan.steps[{index}]"
-        _exact_keys(step, STEP_KEYS, where)
+        _require(isinstance(step, dict), f"{where}: must be an object")
+        _require(STEP_KEYS <= set(step) <= STEP_KEYS | OPTIONAL_STEP_KEYS,
+                 f"{where}: unexpected or missing fields")
         component = step["component"]
         _require(
             isinstance(component, str) and COMPONENT_RE.fullmatch(component),
             f"{where}: invalid component",
         )
         _require(component not in seen, f"{where}: duplicate component {component}")
-        _require(step["action"] in ACTIONS, f"{where}: invalid action")
+        _require(step["action"] in OPERATION_ACTIONS[operation], f"{where}: invalid action for {operation}")
         _require(step["decision"] in ACTIONS, f"{where}: invalid decision")
+        if step["action"] in DETAILS_KEYS:
+            details = step.get("details")
+            _require(isinstance(details, dict) and set(details) == DETAILS_KEYS[step["action"]],
+                     f"{where}: {step['action']} needs its details")
+            _require(isinstance(details["reversible"], bool), f"{where}: invalid reversible flag")
+        else:
+            _require("details" not in step, f"{where}: details only belong to REMOVE and UPDATE")
         _require(step["planning_only"] is True, f"{where}: must be planning-only")
         _require(step["execution_allowed"] is False, f"{where}: must not allow execution")
         _require(isinstance(step["added_as_dependency"], bool), f"{where}: invalid flag")
@@ -122,13 +155,20 @@ def validate_plan_document(plan):
         depends_on = _strings(step["depends_on"], f"{where}.depends_on", COMPONENT_RE)
         blocked_by = _strings(step["blocked_by"], f"{where}.blocked_by", COMPONENT_RE)
 
-        # Dependencies present in the plan must come first.
+        # Dependencies present in the plan must come first; a removal
+        # goes the other way: dependents first (4.42).
         for dependency in depends_on:
             if dependency in {s["component"] for s in steps}:
-                _require(
-                    dependency in seen,
-                    f"{where}: dependency {dependency} is ordered after {component}",
-                )
+                if operation == "remove":
+                    _require(
+                        dependency not in seen,
+                        f"{where}: dependency {dependency} is removed before {component}",
+                    )
+                else:
+                    _require(
+                        dependency in seen,
+                        f"{where}: dependency {dependency} is ordered after {component}",
+                    )
 
         # A blocker must be an earlier, held dependency.
         for blocker in blocked_by:
@@ -164,6 +204,14 @@ def validate_plan_document(plan):
             "plan.held: inconsistent with steps",
         )
 
+    templates = plan["templates"]
+    _require(isinstance(templates, dict), "plan.templates: must be an object")
+    for template, digest in templates.items():
+        _require(isinstance(template, str) and TEMPLATE_ID_RE.fullmatch(template),
+                 f"plan.templates: invalid template id {template!r}")
+        _require(isinstance(digest, str) and DIGEST_RE.fullmatch(digest),
+                 f"plan.templates.{template}: invalid digest")
+
     definitions = plan["definitions"]
     _require(isinstance(definitions, dict), "plan.definitions: must be an object")
     _require(set(definitions) == set(seen), "plan.definitions: must match plan steps")
@@ -191,4 +239,11 @@ def changed_definitions(plan, directory=None):
         path = directory / f"{component}.json"
         if not path.is_file() or definition_digest(path) != digest:
             changed.append(component)
+    # 4.45: templates are bound the same way (DSSA_TEMPLATES_DIR, or the
+    # templates folder next to the definitions folder).
+    templates_dir = Path(os.environ.get("DSSA_TEMPLATES_DIR") or directory.parent / "templates")
+    for template, digest in sorted(plan.get("templates", {}).items()):
+        path = templates_dir / template
+        if not path.is_file() or definition_digest(path) != digest:
+            changed.append(f"template {template}")
     return changed

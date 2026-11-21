@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RUN_SCRIPT = ROOT / "backend/linux/bin/dssa-run.sh"
 MOCK_SYSTEM = ROOT / "tests/backend/fixtures/mock_system.py"
 MOCK_SSH = ROOT / "tests/backend/fixtures/mock_ssh.py"
-TOOLS = ("apt-get", "dnf", "dpkg-query", "dpkg", "rpm", "systemctl", "journalctl", "curl", "gpg")
+TOOLS = ("apt-get", "apt-cache", "dnf", "dpkg-query", "dpkg", "rpm", "systemctl", "journalctl", "curl", "gpg")
 HOST = "192.0.2.10"
 
 from bridge.components import run  # noqa: E402
@@ -745,6 +746,650 @@ class LoginCheckTests(Lab):
             self.assertIn("Plan again, then apply.", text)
             self.assertNotIn("approval", text)
             self.assertNotIn("may still be going", text)
+
+
+class FakeTty:
+    """Stands in for /dev/tty: records the prompt, answers one line."""
+
+    def __init__(self, answer):
+        # One answer, or a list answered in order (one per prompt).
+        self.answers = list(answer) if isinstance(answer, (list, tuple)) else None
+        self.answer, self.written = answer, ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def write(self, text):
+        self.written += text
+
+    def flush(self):
+        pass
+
+    def readline(self):
+        if self.answers is not None:
+            return self.answers.pop(0) + "\n"
+        return self.answer + "\n"
+
+
+class JsonLab(Lab):
+    """Helpers to run main.py --json in-process (4.40)."""
+
+    def setUp(self):
+        super().setUp()
+        import main
+        self.main = main
+        main.DEFINITIONS_DIR = str(self.defs)
+        self.addCleanup(setattr, main, "DEFINITIONS_DIR", None)
+        self.target = mock.patch.object(main, "target_host", return_value={"host": HOST})
+        self.target.start()
+        self.addCleanup(self.target.stop)
+
+    def run_json(self, *argv, tty=None):
+        stdout = io.StringIO()
+        stderr = io.TextIOWrapper(io.BytesIO(), write_through=True)
+        opener = (lambda: tty) if tty is not None else mock.Mock(side_effect=OSError("no tty"))
+        with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr), \
+             mock.patch.object(self.main, "_open_tty", opener), \
+             mock.patch("builtins.input", side_effect=AssertionError("stdin must not be read")):
+            code = self.main.main(["--json", *argv])
+        lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.check_shape(lines)
+        stderr.seek(0)
+        return code, lines[:-1], lines[-1], stderr.buffer.getvalue().decode(errors="replace")
+
+    def check_shape(self, lines):
+        self.assertTrue(lines, "stdout must end with a result")
+        for line in lines:
+            self.assertEqual(line["schema_version"], "1.0")
+        *events, result = lines
+        for event in events:
+            self.assertEqual(set(event), {"schema_version", "type", "event", "data"})
+            self.assertEqual(event["type"], "event")
+        self.assertEqual(set(result), {"schema_version", "type", "command", "ok", "exit_code", "data", "error"})
+        self.assertEqual(result["type"], "result")
+        self.assertEqual(result["ok"], result["exit_code"] == 0)
+
+
+
+class JsonOutputTests(JsonLab):
+    """main.py --json: JSON Lines on stdout, ending with one result (4.40)."""
+
+    def test_targets(self):
+        code, events, result, _ = self.run_json("targets")
+        self.assertEqual((code, events), (0, []))
+        self.assertEqual([t["target_id"] for t in result["data"]["targets"]], ["lab1", "prod1"])
+        self.assertIsNone(result["error"])
+
+    def test_plan_puts_text_on_stderr_and_the_plan_in_data(self):
+        code, events, result, stderr = self.run_json("plan", "lab1", "testtool")
+        self.assertEqual(code, 0)
+        plan = result["data"]["plan"]
+        self.assertEqual(plan["runnable"], ["testtool"])
+        self.assertTrue(Path(result["data"]["plan_path"]).is_file())
+        self.assertEqual(result["data"]["plan_sha256"], plan_digest(Path(result["data"]["plan_path"]).read_bytes()))
+        self.assertEqual([e["event"] for e in events], ["plan.saved"])
+        self.assertIn("=== PLAN ===", stderr)
+
+    def test_approve_reads_the_terminal_not_stdin(self):
+        _, _, planned, _ = self.run_json("plan", "lab1", "testtool")
+        plan_id = planned["data"]["plan"]["plan_id"]
+        tty = FakeTty("APPROVE")
+        code, _, result, _ = self.run_json("approve", plan_id, tty=tty)
+        self.assertEqual(code, 0, result)
+        self.assertIn("Type APPROVE to approve", tty.written)
+        self.assertEqual(result["data"]["approval"]["plan_id"], plan_id)
+        self.assertFalse(result["data"]["verification_only"])
+
+    def test_approve_without_a_terminal_is_refused(self):
+        _, _, planned, _ = self.run_json("plan", "lab1", "testtool")
+        plan_id = planned["data"]["plan"]["plan_id"]
+        code, _, result, _ = self.run_json("approve", plan_id)
+        self.assertEqual(code, 2)
+        self.assertIn("needs a person at a terminal", result["error"]["message"])
+        approvals = Path(os.environ["XDG_STATE_HOME"]) / "developer-server-setup-assistant/approvals" / plan_id
+        self.assertFalse((approvals / "approval.json").exists())
+
+    def test_wrong_confirmation_is_an_error(self):
+        _, _, planned, _ = self.run_json("plan", "lab1", "testtool")
+        code, _, result, _ = self.run_json("approve", planned["data"]["plan"]["plan_id"], tty=FakeTty("yes"))
+        self.assertEqual(code, 2)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["error"]["message"])
+
+    def test_apply_streams_events_and_returns_the_summary(self):
+        _, _, planned, _ = self.run_json("plan", "lab1", "testtool")
+        plan_id = planned["data"]["plan"]["plan_id"]
+        self.run_json("approve", plan_id, tty=FakeTty("APPROVE"))
+        code, events, result, stderr = self.run_json("apply", plan_id)
+        self.assertEqual(code, 0, stderr)
+        names = [e["event"] for e in events]
+        self.assertEqual(names[:3], ["login.check", "approval.consumed", "run.started"])
+        self.assertEqual(names[-1], "run.finished")
+        logs = [e["data"]["line"] for e in events if e["event"] == "log"]
+        self.assertTrue(any("packages_install" in line for line in logs), logs)
+        self.assertFalse(any(line.startswith("DSSA_") for line in logs), "markers stay hidden")
+        data = result["data"]
+        self.assertEqual(data["summary"]["status"], "completed")
+        self.assertTrue(data["approval_used"])
+        self.assertTrue(Path(data["saved_copy"]).is_dir())
+        self.assertIn("packages_install", stderr, "the operator still sees the live log")
+
+    def test_server_refusal_is_an_error_with_the_reason(self):
+        _, _, planned, _ = self.run_json("plan", "lab1", "testtool")
+        plan_id = planned["data"]["plan"]["plan_id"]
+        self.run_json("approve", plan_id, tty=FakeTty("APPROVE"))
+        os.environ["MOCK_REMOTE_HIDE"] = "jq"
+        code, _, result, _ = self.run_json("apply", plan_id)
+        self.assertEqual(code, 2)
+        self.assertIsNone(result["data"]["summary"])
+        self.assertIn("refused before any change", result["error"]["message"])
+
+    def test_errors_still_end_with_a_result(self):
+        code, events, result, stderr = self.run_json("plan", "nope", "testtool")
+        self.assertEqual(code, 2)
+        self.assertEqual(result["command"], "plan")
+        self.assertIn("Planning failed", result["error"]["message"])
+        code, _, result, _ = self.run_json("report", "not-a-plan-id")
+        self.assertEqual(code, 2)
+        self.assertIn("Invalid plan ID", result["error"]["message"])
+
+    def test_installed_shows_the_record_after_apply(self):
+        code, _, result, _ = self.run_json("installed", "lab1")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["data"]["record"]["components"], {})
+        _, _, planned, _ = self.run_json("plan", "lab1", "testapp")
+        plan_id = planned["data"]["plan"]["plan_id"]
+        self.run_json("approve", plan_id, tty=FakeTty("APPROVE"))
+        code, _, applied, stderr = self.run_json("apply", plan_id)
+        self.assertEqual(code, 0, stderr)
+        self.assertTrue(all(r["recorded"] for r in applied["data"]["summary"]["results"]))
+        code, _, result, stderr = self.run_json("installed", "lab1")
+        components = result["data"]["record"]["components"]
+        self.assertEqual(sorted(components), ["testapp", "testtool"])
+        self.assertEqual(components["testapp"]["plan_id"], plan_id)
+        self.assertIn("INSTALLED BY DSSA on lab1", stderr)
+        self.assertFalse(any(c["tty"] for c in self.ssh_calls() if c["command"] == "bash -s"),
+                         "reading the record needs no terminal")
+
+    def test_guided_session_is_refused(self):
+        code, events, result, _ = self.run_json()
+        self.assertEqual((code, events, result["command"]), (2, [], "guided"))
+        self.assertIn("needs a command", result["error"]["message"])
+
+
+class FlowLab(JsonLab):
+    """Install, plan an operation, approve and apply, all via --json."""
+
+    def install(self, *components):
+        _, _, planned, _ = self.run_json("plan", "lab1", *components)
+        plan_id = planned["data"]["plan"]["plan_id"]
+        self.run_json("approve", plan_id, tty=FakeTty("APPROVE"))
+        code, _, result, stderr = self.run_json("apply", plan_id)
+        self.assertEqual(code, 0, stderr)
+        return result
+
+    def plan_op(self, op, *components):
+        code, _, result, stderr = self.run_json("plan", f"--{op}", "lab1", *components)
+        self.assertEqual(code, 0, stderr)
+        return result["data"]["plan"]
+
+    def approve_and_apply(self, plan, answers):
+        code, _, approved, _ = self.run_json("approve", plan["plan_id"], tty=FakeTty(answers))
+        self.assertEqual(code, 0, approved)
+        return self.run_json("apply", plan["plan_id"])
+
+    def record(self):
+        return self.run_json("installed", "lab1")[2]["data"]["record"]["components"]
+
+    def steps(self, plan):
+        return {s["component"]: s for s in plan["steps"]}
+
+
+
+class RemoveAdoptTests(FlowLab):
+    """plan --remove / --adopt through the whole flow (4.42)."""
+
+    def test_remove_what_dssa_installed(self):
+        self.write_mock("deps.json", {"testtool": ["libtt"]})
+        self.install("testtool")
+        self.assertIn("libtt", self.read_mock("packages.json"))
+        plan = self.plan_op("remove", "testtool")
+        self.assertEqual(plan["operation"], "remove")
+        step = self.steps(plan)["testtool"]
+        self.assertEqual(step["action"], "REMOVE")
+        self.assertEqual([p["package"] for p in step["details"]["remove_packages"]], ["testtool", "libtt"])
+        self.assertTrue(step["details"]["reversible"])
+        code, events, result, stderr = self.approve_and_apply(plan, ["testtool", "APPROVE"])
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(result["data"]["summary"]["results"][0]["outcome"], "removed")
+        packages = self.read_mock("packages.json")
+        self.assertNotIn("testtool", packages)
+        self.assertNotIn("libtt", packages)
+        self.assertEqual(self.record(), {})
+        kept_dir = self.root / "var/lib/dssa/transactions" / plan["plan_id"] / "kept/testtool"
+        kept = list(kept_dir.iterdir())
+        self.assertEqual(len(kept), 2, "the removed versions' package files are kept")
+        self.assertTrue(all(stat.S_IMODE(f.stat().st_mode) == 0o600 for f in kept))
+        # apt downloads into its own temporary folder (its _apt sandbox can
+        # write there), never straight into the root-only kept folder.
+        dirs = (self.state / "download_dirs.log").read_text().split()
+        self.assertTrue(dirs and all(Path(d) != kept_dir for d in dirs), dirs)
+        self.assertFalse(any(Path(d).exists() for d in dirs), "temporary folders are removed")
+
+    def test_remove_needs_approval_and_the_typed_name(self):
+        self.install("testtool")
+        plan = self.plan_op("remove", "testtool")
+        code, _, result, _ = self.run_json("approve", plan["plan_id"], tty=FakeTty(["wrong", "APPROVE"]))
+        self.assertEqual(code, 2)
+        self.assertIn("not confirmed", result["error"]["message"])
+        self.assertFalse(result["data"]["verification_only"])
+        code, _, result, _ = self.run_json("apply", plan["plan_id"])
+        self.assertEqual(code, 2, "no approval exists")
+        self.assertIn("testtool", self.read_mock("packages.json"))
+
+    def test_not_installed_by_dssa_is_blocked(self):
+        self.write_mock("packages.json", {"base-files": "1.0", "testtool": "1.0"})
+        plan = self.plan_op("remove", "testtool")
+        step = self.steps(plan)["testtool"]
+        self.assertEqual(step["action"], "BLOCKED")
+        self.assertIn("Not installed by DSSA", step["reasons"][0])
+        self.assertEqual(plan["runnable"], [])
+
+    def test_dependency_needed_by_a_recorded_component_is_blocked(self):
+        self.install("testapp")  # pulls in testtool
+        plan = self.plan_op("remove", "testtool")
+        self.assertEqual(self.steps(plan)["testtool"]["action"], "BLOCKED")
+        self.assertIn("Still needed by testapp", self.steps(plan)["testtool"]["reasons"][0])
+        both = self.plan_op("remove", "testtool", "testapp")
+        self.assertEqual([s["component"] for s in both["steps"]], ["testapp", "testtool"], "dependents first")
+        code, _, result, stderr = self.approve_and_apply(both, ["testapp", "testtool", "APPROVE"])
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(self.record(), {})
+
+    def test_packages_other_software_needs_are_kept_or_blocked(self):
+        self.write_mock("deps.json", {"testtool": ["libtt"]})
+        self.install("testtool")
+        # Something DSSA did not install needs libtt: keep it, remove the rest.
+        packages = self.read_mock("packages.json")
+        self.write_mock("packages.json", {**packages, "otherapp": "1.0"})
+        self.write_mock("rdeps.json", {"libtt": ["otherapp"]})
+        step = self.steps(self.plan_op("remove", "testtool"))["testtool"]
+        self.assertEqual([p["package"] for p in step["details"]["remove_packages"]], ["testtool"])
+        self.assertEqual([p["package"] for p in step["details"]["kept_dependencies"]], ["libtt"])
+        # If the main package itself is needed, nothing is removed.
+        self.write_mock("rdeps.json", {"testtool": ["otherapp"]})
+        step = self.steps(self.plan_op("remove", "testtool"))["testtool"]
+        self.assertEqual(step["action"], "BLOCKED")
+        self.assertIn("otherapp", step["reasons"][0])
+
+    def test_failed_removal_is_undone_from_the_kept_files(self):
+        self.install("testtool")
+        before = self.read_mock("packages.json")
+        plan = self.plan_op("remove", "testtool")
+        self.write_mock("fail.json", {"purge_extra": ["base-files"]})
+        code, _, result, stderr = self.approve_and_apply(plan, ["testtool", "APPROVE"])
+        self.assertEqual(code, 3, stderr)
+        outcome = result["data"]["summary"]["results"][0]
+        self.assertEqual(outcome["outcome"], "failed_rolled_back")
+        self.assertIn("also removed: base-files", outcome["failure"])
+        packages = self.read_mock("packages.json")
+        self.assertEqual(packages["testtool"], before["testtool"], "reinstalled from the kept file")
+        self.assertIn("testtool", self.record(), "the record entry is back")
+
+    def test_unavailable_version_is_marked_not_reversible(self):
+        self.install("testtool")
+        self.write_mock("fail.json", {"unavailable": ["testtool"]})
+        plan = self.plan_op("remove", "testtool")
+        step = self.steps(plan)["testtool"]
+        self.assertFalse(step["details"]["reversible"])
+        self.assertTrue(any("NOT reversible" in r for r in step["reasons"]))
+        code, _, _, stderr = self.run_json("approve", plan["plan_id"], tty=FakeTty(["testtool", "APPROVE"]))
+        self.assertEqual(code, 0)
+        self.assertIn("This removal is NOT reversible (no package file for testtool 1.0)", stderr)
+
+    def test_download_failure_stops_a_reversible_removal(self):
+        self.install("testtool")
+        plan = self.plan_op("remove", "testtool")
+        self.write_mock("fail.json", {"download": ["testtool"]})
+        code, _, result, stderr = self.approve_and_apply(plan, ["testtool", "APPROVE"])
+        self.assertEqual(code, 3, stderr)
+        self.assertIn("nothing was removed", result["data"]["summary"]["results"][0]["failure"])
+        self.assertIn("testtool", self.read_mock("packages.json"))
+
+    def test_adopt_then_remove(self):
+        self.write_mock("packages.json", {"base-files": "1.0", "testtool": "1.0"})
+        binary = self.state / "bin/testtool"
+        binary.write_text("#!/bin/sh\necho mock-version\n")
+        binary.chmod(0o755)
+        plan = self.plan_op("adopt", "testtool")
+        self.assertEqual(self.steps(plan)["testtool"]["action"], "ADOPT")
+        code, _, result, stderr = self.approve_and_apply(plan, ["testtool", "APPROVE"])
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(result["data"]["summary"]["results"][0]["outcome"], "adopted")
+        entry = self.record()["testtool"]
+        self.assertEqual(entry["how"], "adopted")
+        self.assertEqual([p["package"] for p in entry["packages"]], ["testtool"])
+        self.assertEqual(self.steps(self.plan_op("adopt", "testtool"))["testtool"]["action"], "BLOCKED",
+                         "already managed")
+        removal = self.plan_op("remove", "testtool")
+        self.assertEqual(self.steps(removal)["testtool"]["action"], "REMOVE")
+
+    def test_adopt_needs_an_existing_install(self):
+        plan = self.plan_op("adopt", "testtool")
+        self.assertEqual(self.steps(plan)["testtool"]["action"], "BLOCKED")
+        self.assertIn("nothing to adopt", self.steps(plan)["testtool"]["reasons"][0])
+
+    def test_drift_between_approval_and_apply_skips_the_removal(self):
+        self.install("testtool")
+        plan = self.plan_op("remove", "testtool")
+        self.run_json("approve", plan["plan_id"], tty=FakeTty(["testtool", "APPROVE"]))
+        packages = self.read_mock("packages.json")
+        packages["otherapp"] = "1.0"
+        self.write_mock("packages.json", packages)
+        self.write_mock("rdeps.json", {"testtool": ["otherapp"]})
+        code, _, result, stderr = self.run_json("apply", plan["plan_id"])
+        self.assertEqual(code, 3, stderr)
+        self.assertEqual(result["data"]["summary"]["results"][0]["outcome"], "drift_skipped")
+        self.assertIn("testtool", self.read_mock("packages.json"))
+
+
+class UpdateTests(FlowLab):
+    """Update info in normal plans, and plan --update (4.43)."""
+
+    def service_definition(self):
+        d = definition("svcapp")
+        variant = d["variants"][0]
+        variant["steps"] += [{"type": "service_enable", "unit": "svcapp.service"},
+                             {"type": "service_start", "unit": "svcapp.service"}]
+        variant["verification"].append({"type": "service_active", "unit": "svcapp.service"})
+        self.write_definition(d)
+        self.write_mock("pkg_units.json", {"svcapp": ["svcapp.service"]})
+        self.write_mock("pkg_bins.json", {"testtool": ["testtool"], "svcapp": ["svcapp"]})
+
+    def test_normal_plan_reports_an_update_as_info_only(self):
+        self.install("testtool")
+        self.write_mock("candidates.json", {"testtool": "1.1"})
+        _, _, result, _ = self.run_json("plan", "lab1", "testtool")
+        step = result["data"]["plan"]["steps"][0]
+        self.assertEqual(step["action"], "SKIP")
+        self.assertIn("Update available: testtool 1.0 -> 1.1 (plan --update to apply it).", step["reasons"])
+
+    def test_update_to_the_exact_planned_version(self):
+        self.install("testtool")
+        self.write_mock("candidates.json", {"testtool": "1.1"})
+        plan = self.plan_op("update", "testtool")
+        step = self.steps(plan)["testtool"]
+        self.assertEqual(step["action"], "UPDATE")
+        self.assertEqual(step["details"]["updates"], [{"package": "testtool", "from": "1.0", "to": "1.1"}])
+        self.assertEqual(step["details"]["running_units"], [])
+        code, _, result, stderr = self.approve_and_apply(plan, ["APPROVE"])  # no name needed
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(result["data"]["summary"]["results"][0]["outcome"], "updated")
+        self.assertEqual(self.read_mock("packages.json")["testtool"], "1.1")
+        self.assertEqual(self.record()["testtool"]["packages"][0]["version"], "1.1", "the record follows")
+        calls = (self.state / "calls.log").read_text()
+        self.assertIn("--only-upgrade", calls)
+        self.assertIn("--force-confold", calls)
+
+    def test_up_to_date_is_skip(self):
+        self.install("testtool")
+        plan = self.plan_op("update", "testtool")
+        self.assertEqual(self.steps(plan)["testtool"]["action"], "SKIP")
+        self.assertIn("Up to date", " ".join(self.steps(plan)["testtool"]["reasons"]))
+
+    def test_major_version_change_is_blocked(self):
+        self.install("testtool")
+        self.write_mock("candidates.json", {"testtool": "2.0"})
+        step = self.steps(self.plan_op("update", "testtool"))["testtool"]
+        self.assertEqual(step["action"], "BLOCKED")
+        self.assertIn("Major version change", step["reasons"][0])
+
+    def test_update_that_adds_packages_is_blocked(self):
+        self.install("testtool")
+        self.write_mock("candidates.json", {"testtool": "1.1"})
+        self.write_mock("fail.json", {"update_adds": ["newlib"]})
+        step = self.steps(self.plan_op("update", "testtool"))["testtool"]
+        self.assertEqual(step["action"], "BLOCKED")
+        self.assertIn("newlib (new)", step["reasons"][0])
+
+    def test_not_installed_is_blocked(self):
+        step = self.steps(self.plan_op("update", "testtool"))["testtool"]
+        self.assertEqual(step["action"], "BLOCKED")
+
+    def test_failed_update_goes_back_to_the_kept_version(self):
+        self.install("testtool")
+        self.write_mock("candidates.json", {"testtool": "1.1"})
+        plan = self.plan_op("update", "testtool")
+        self.run_json("approve", plan["plan_id"], tty=FakeTty(["APPROVE"]))
+        self.write_mock("fail.json", {"real_update_adds": ["newlib"]})  # only the real upgrade
+        code, _, result, stderr = self.run_json("apply", plan["plan_id"])
+        self.assertEqual(code, 3, stderr)
+        outcome = result["data"]["summary"]["results"][0]
+        self.assertEqual(outcome["outcome"], "failed_rolled_back")
+        self.assertIn("added or removed packages: newlib", outcome["failure"])
+        self.assertEqual(self.read_mock("packages.json")["testtool"], "1.0", "downgraded from the kept file")
+
+    def test_candidate_moved_after_planning_changes_nothing(self):
+        self.install("testtool")
+        self.write_mock("candidates.json", {"testtool": "1.1"})
+        plan = self.plan_op("update", "testtool")
+        self.run_json("approve", plan["plan_id"], tty=FakeTty(["APPROVE"]))
+        self.write_mock("candidates.json", {"testtool": "1.2"})
+        code, _, result, stderr = self.run_json("apply", plan["plan_id"])
+        self.assertEqual(code, 3, stderr)
+        self.assertIn("available version changed", result["data"]["summary"]["results"][0]["failure"])
+        self.assertEqual(self.read_mock("packages.json")["testtool"], "1.0")
+
+    def test_restarting_a_running_service_needs_the_typed_name(self):
+        self.service_definition()
+        self.install("svcapp")
+        self.write_mock("candidates.json", {"svcapp": "1.1"})
+        plan = self.plan_op("update", "svcapp")
+        step = self.steps(plan)["svcapp"]
+        self.assertEqual(step["details"]["running_units"], ["svcapp.service"])
+        code, _, result, _ = self.run_json("approve", plan["plan_id"], tty=FakeTty(["APPROVE", "APPROVE"]))
+        self.assertEqual(code, 2, "APPROVE is not the component's name")
+        code, _, result, stderr = self.approve_and_apply(plan, ["svcapp", "APPROVE"])
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(self.read_mock("units.json")["svcapp.service"]["active"], "active", "running again")
+
+
+class AllOrNothingTests(FlowLab):
+    """--all-or-nothing: any failure undoes the whole run (4.44)."""
+
+    def plan_atomic(self, *argv):
+        code, _, result, stderr = self.run_json("plan", "--all-or-nothing", "lab1", *argv)
+        self.assertEqual(code, 0, stderr)
+        return result["data"]["plan"]
+
+    def test_failure_undoes_the_components_already_installed(self):
+        plan = self.plan_atomic("testtool", "othertool")
+        self.assertTrue(plan["all_or_nothing"])
+        self.write_mock("fail.json", {"install": ["othertool"]})
+        code, _, result, stderr = self.approve_and_apply(plan, ["APPROVE"])
+        self.assertEqual(code, 3, stderr)
+        outcomes = {r["component"]: r["outcome"] for r in result["data"]["summary"]["results"]}
+        self.assertEqual(outcomes, {"testtool": "undone_all_or_nothing", "othertool": "failed_rolled_back"})
+        packages = self.read_mock("packages.json")
+        self.assertNotIn("testtool", packages)
+        self.assertNotIn("othertool", packages)
+        self.assertEqual(self.record(), {}, "the undone install is not recorded")
+        self.assertIn("undoing the others", stderr)
+
+    def test_without_the_flag_the_others_stay(self):
+        _, _, planned, _ = self.run_json("plan", "lab1", "testtool", "othertool")
+        self.write_mock("fail.json", {"install": ["othertool"]})
+        code, _, result, _ = self.approve_and_apply(planned["data"]["plan"], ["APPROVE"])
+        self.assertEqual(code, 3)
+        self.assertIn("testtool", self.read_mock("packages.json"))
+
+    def test_success_keeps_everything(self):
+        plan = self.plan_atomic("testtool", "othertool")
+        code, _, result, stderr = self.approve_and_apply(plan, ["APPROVE"])
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(sorted(self.record()), ["othertool", "testtool"])
+
+    def test_held_components_cannot_be_approved(self):
+        plan = self.plan_atomic("testtool", "drafttool")
+        code, _, result, _ = self.run_json("approve", plan["plan_id"], tty=FakeTty(["APPROVE"]))
+        self.assertEqual(code, 2)
+        self.assertIn("All-or-nothing plan has held components (drafttool)", " ".join(result["error"]["issues"]))
+
+    def test_failed_removal_puts_the_earlier_removal_back(self):
+        self.install("testtool")
+        self.install("othertool")
+        code, _, result, stderr = self.run_json("plan", "--remove", "--all-or-nothing", "lab1", "testtool", "othertool")
+        self.assertEqual(code, 0, stderr)
+        plan = result["data"]["plan"]
+        self.write_mock("fail.json", {"download": ["othertool"]})
+        code, _, result, stderr = self.approve_and_apply(plan, ["othertool", "testtool", "APPROVE"])  # removal runs in reverse
+        self.assertEqual(code, 3, stderr)
+        self.assertIn("testtool", self.read_mock("packages.json"), "reinstalled from the kept file")
+        self.assertEqual(sorted(self.record()), ["othertool", "testtool"])
+
+
+class ManagedFileTests(FlowLab):
+    """managed_file and service_reload: DSSA creates, you own (4.45)."""
+
+    def setUp(self):
+        super().setUp()
+        templates = self.base / "templates/cfgtool"
+        templates.mkdir(parents=True)
+        (templates / "default.conf").write_text("# written by DSSA\nlisten 8080;\n")
+        self.script(self.tools / "nginx", '[ -f "$MOCK_STATE/nginx_fail" ] && { echo "nginx: [emerg] bad config" >&2; exit 1; }\necho "nginx: configuration file test is successful" >&2\n')
+        d = definition("cfgtool")
+        variant = d["variants"][0]
+        variant["steps"] += [
+            {"type": "managed_file", "path": "/etc/cfgtool/dssa-default.conf",
+             "template": "cfgtool/default.conf", "mode": "0640", "owner": "root:root"},
+            {"type": "service_enable", "unit": "cfgtool.service"},
+            {"type": "service_start", "unit": "cfgtool.service"},
+            {"type": "service_reload", "unit": "cfgtool.service", "config_test": "nginx -t"},
+        ]
+        self.write_definition(d)
+        self.write_mock("pkg_paths.json", {"cfgtool": ["/etc/cfgtool"]})
+        self.write_mock("pkg_units.json", {"cfgtool": ["cfgtool.service"]})
+        self.write_mock("pkg_bins.json", {"cfgtool": ["cfgtool"], "testtool": ["testtool"]})
+        self.conf = self.root / "etc/cfgtool/dssa-default.conf"
+
+    def test_file_is_created_from_the_approved_template_and_recorded(self):
+        _, _, planned, _ = self.run_json("plan", "lab1", "cfgtool")
+        plan = planned["data"]["plan"]
+        self.assertEqual(list(plan["templates"]), ["cfgtool/default.conf"])
+        code, _, result, stderr = self.approve_and_apply(plan, ["APPROVE"])
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(self.conf.read_text(), "# written by DSSA\nlisten 8080;\n")
+        self.assertEqual(stat.S_IMODE(self.conf.stat().st_mode), 0o640)
+        files = self.record()["cfgtool"]["files"]
+        self.assertEqual([f["path"] for f in files], ["/etc/cfgtool/dssa-default.conf"])
+        self.assertIn("configuration file test is successful", stderr)
+
+    def test_existing_file_blocks_the_install(self):
+        self.conf.parent.mkdir(parents=True)
+        self.conf.write_text("mine\n")
+        _, _, planned, _ = self.run_json("plan", "lab1", "cfgtool")
+        step = planned["data"]["plan"]["steps"][0]
+        self.assertEqual(step["action"], "BLOCKED")
+        self.assertIn("never overwrites a file", step["reasons"][0])
+        self.assertEqual(self.conf.read_text(), "mine\n")
+
+    def test_template_changed_after_planning_is_refused(self):
+        _, _, planned, _ = self.run_json("plan", "lab1", "cfgtool")
+        (self.base / "templates/cfgtool/default.conf").write_text("listen 9999;\n")
+        code, _, result, _ = self.run_json("approve", planned["data"]["plan"]["plan_id"], tty=FakeTty(["APPROVE"]))
+        self.assertEqual(code, 2)
+        self.assertIn("template cfgtool/default.conf", " ".join(result["error"]["issues"] + [result["error"]["message"]]))
+
+    def test_failed_config_test_removes_the_new_file(self):
+        _, _, planned, _ = self.run_json("plan", "lab1", "cfgtool")
+        (self.state / "nginx_fail").write_text("")
+        code, _, result, stderr = self.approve_and_apply(planned["data"]["plan"], ["APPROVE"])
+        self.assertEqual(code, 3, stderr)
+        self.assertIn("Config test failed", stderr)
+        self.assertFalse(self.conf.exists(), "rollback removed the file DSSA created")
+        self.assertNotIn("cfgtool", self.read_mock("packages.json"))
+
+    def test_uninstall_removes_the_file_only_if_unchanged(self):
+        self.install("cfgtool")
+        step = self.steps(self.plan_op("remove", "cfgtool"))["cfgtool"]
+        self.assertEqual(step["details"]["remove_files"], ["/etc/cfgtool/dssa-default.conf"])
+        self.conf.write_text("edited by the admin\n")
+        plan = self.plan_op("remove", "cfgtool")
+        step = self.steps(plan)["cfgtool"]
+        self.assertEqual(step["details"]["remove_files"], [])
+        self.assertEqual(step["details"]["kept_files"], ["/etc/cfgtool/dssa-default.conf"])
+        code, _, _, stderr = self.approve_and_apply(plan, ["cfgtool", "APPROVE"])
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(self.conf.read_text(), "edited by the admin\n", "an edited file is the admin's")
+
+    def test_unchanged_file_is_removed_with_the_component(self):
+        self.install("cfgtool")
+        plan = self.plan_op("remove", "cfgtool")
+        code, _, _, stderr = self.approve_and_apply(plan, ["cfgtool", "APPROVE"])
+        self.assertEqual(code, 0, stderr)
+        self.assertFalse(self.conf.exists())
+
+
+class WebFlowTests(Lab):
+    """The web UI's App drives the same flow (4.46): plan, approve, apply as a terminal job."""
+
+    def setUp(self):
+        super().setUp()
+        from bridge.webui.app import App, Config
+        home = self.base / "webui"
+        home.mkdir(mode=0o700)
+        shutil.copy(self.inventory, home / "inventory.json")
+        (home / "inventory.json").chmod(0o600)
+        self.app = App(Config(home, definitions_dir=str(self.defs)))
+        self.target = mock.patch.object(self.app, "host_of", return_value=HOST)
+        self.target.start()
+        self.addCleanup(self.target.stop)
+
+    def wait(self, job):
+        deadline = time.time() + 60
+        while job.view()["running"] and time.time() < deadline:
+            time.sleep(0.05)
+        return job.view()
+
+    def test_plan_approve_apply(self):
+        (plan_id,) = self.app.make_plans("alice", ["lab1"], ["testtool"], "install", False)
+        record = self.app.approve("alice", plan_id, {"_confirm": "APPROVE"})
+        self.assertEqual(record["approved_by"], "alice")
+        view = self.wait(self.app.start_apply("alice", plan_id))
+        self.assertEqual(view["exit_code"], 0, view["text"])
+        self.assertIn("packages_install", view["text"])
+        self.assertNotIn("DSSA_FILE", view["text"])
+        self.assertEqual(view["summary"]["status"], "completed")
+        self.assertIn("testtool", self.read_mock("packages.json"))
+        self.assertIn('"action": "apply"', (self.base / "webui/audit.jsonl").read_text())
+
+    def test_risky_actions_need_the_typed_name(self):
+        (plan_id,) = self.app.make_plans("alice", ["lab1"], ["testtool"], "install", False)
+        self.app.approve("alice", plan_id, {"_confirm": "APPROVE"})
+        self.wait(self.app.start_apply("alice", plan_id))
+        (removal,) = self.app.make_plans("alice", ["lab1"], ["testtool"], "remove", False)
+        with self.assertRaisesRegex(ApprovalError, "testtool not confirmed"):
+            self.app.approve("alice", removal, {"_confirm": "APPROVE"})
+        self.app.approve("alice", removal, {"testtool": "testtool", "_confirm": "APPROVE"})
+        view = self.wait(self.app.start_apply("alice", removal))
+        self.assertEqual(view["exit_code"], 0, view["text"])
+        self.assertNotIn("testtool", self.read_mock("packages.json"))
+
+    def test_batch_stops_at_the_first_failed_server(self):
+        plans = self.app.make_plans("alice", ["lab1", "prod1"], ["testtool"], "install", False)
+        batch = self.app.new_batch("alice", plans)
+        self.app.approve_batch("alice", batch, {"_confirm": "APPROVE"})
+        self.write_mock("fail.json", {"install": ["testtool"]})
+        self.app.apply_batch("alice", batch)
+        deadline = time.time() + 60
+        while not self.app.batches[batch]["state"].startswith(("stopped", "finished")) and time.time() < deadline:
+            time.sleep(0.05)
+        state = self.app.batches[batch]["state"]
+        self.assertTrue(state.startswith("stopped at lab1 (exit 3)"), state)
+        self.assertEqual(len(self.app.batches[batch]["jobs"]), 1, "prod1 was not started")
 
 
 class ClockCheckTests(Lab):

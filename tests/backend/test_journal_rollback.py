@@ -25,8 +25,11 @@ SOURCES = [
     ROOT / "backend/linux/modules/software/package_manager.sh",
     ROOT / "backend/linux/engine/definitions.sh",
     ROOT / "backend/linux/engine/journal.sh",
+    ROOT / "backend/linux/engine/record.sh",
+    ROOT / "backend/linux/engine/remove.sh",
+    ROOT / "backend/linux/engine/update.sh",
 ]
-TOOLS = ("apt-get", "dnf", "dpkg-query", "dpkg", "rpm", "systemctl", "journalctl", "curl", "gpg", "firewall-cmd")
+TOOLS = ("apt-get", "apt-cache", "dnf", "dpkg-query", "dpkg", "rpm", "systemctl", "journalctl", "curl", "gpg", "firewall-cmd")
 FPR = "0123456789ABCDEF0123456789ABCDEF01234567"
 PLAN_A = "11111111-1111-4111-8111-111111111111"
 PLAN_B = "22222222-2222-4222-8222-222222222222"
@@ -785,16 +788,17 @@ apt-get install -y -- testtool
         self.assert_back_to_snapshot()
 
     def test_unsupported_step_is_refused_before_any_change(self):
+        # Every contract step type has an executor since 4.45; an engine
+        # without one (here: no service_enable) must still refuse.
         definition = simple_definition()
-        definition["variants"][0]["steps"].append({
-            "type": "managed_file", "path": "/etc/testtool.conf",
-            "template": "testtool/conf", "mode": "0644", "owner": "root:root"})
+        definition["variants"][0]["steps"].append({"type": "service_enable", "unit": "testtool.service"})
         result = self.bash(f"""
+DSSA_SUPPORTED_STEPS=" package_metadata_refresh packages_install "
 begin_transaction {PLAN_A} apt '[]' || exit 90
 apply_component {PLAN_A} apt {shlex.quote(json.dumps(definition))} apt-test
 """)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Step type not supported by this engine: managed_file", result.stderr)
+        self.assertIn("Step type not supported by this engine: service_enable", result.stderr)
         self.assertEqual(self.read("packages.json"), INITIAL_PACKAGES)
         self.assertFalse(any(e["phase"] == "component_begin" for e in self.journal()))
 
@@ -1084,7 +1088,7 @@ class StateFolderTests(FakeServer):
         self.apply(simple_definition(), "apt-test")
         code, result, _ = self.apply(simple_definition(), "apt-test", plan_id=PLAN_B)
         self.assertEqual(code, 0)
-        self.assertEqual(stat.S_IMODE(self.state_dir().stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(self.state_dir().stat().st_mode), 0o711)
 
 
 class VersionPatternTests(FakeServer):
@@ -1133,6 +1137,131 @@ class VersionPatternTests(FakeServer):
             with self.subTest(pattern=pattern):
                 result = self.bash(f"validate_component_definition {shlex.quote(json.dumps(self.definition(pattern)))}")
                 self.assertNotEqual(result.returncode, 0)
+
+
+class InstallRecordTests(FakeServer):
+    """The permanent record of what DSSA installed (4.41)."""
+
+    def record_path(self):
+        return self.root / "var/lib/dssa/installed.json"
+
+    def record(self):
+        return json.loads(self.record_path().read_text())
+
+    def test_successful_install_is_recorded(self):
+        code, result, _ = self.apply(simple_definition(), "apt-test")
+        self.assertEqual(code, 0)
+        self.assertTrue(result["recorded"])
+        entry = self.record()["components"]["testtool"]
+        self.assertEqual(self.record()["schema_version"], "1.0")
+        self.assertEqual((entry["how"], entry["variant_id"], entry["plan_id"]), ("installed", "apt-test", PLAN_A))
+        self.assertEqual([p["package"] for p in entry["packages"]], ["testtool"])
+        self.assertEqual([p["package"] for p in entry["dependencies"]], ["libtt"])
+        self.assertEqual(entry["created_paths"], ["/var/lib/testtool"])
+        self.assertEqual(stat.S_IMODE(self.record_path().stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(self.record_path().parent.stat().st_mode), 0o711)
+        self.assertEqual(stat.S_IMODE((self.record_path().parent / "transactions").stat().st_mode), 0o700)
+
+    def test_vendor_install_records_units_and_repository_files(self):
+        code, result, run = self.apply(vendor_definition(), "apt-vendor")
+        self.assertEqual(code, 0, run.stderr)
+        entry = self.record()["components"]["vendorapp"]
+        self.assertEqual([p["package"] for p in entry["packages"]], ["helper", "vendorapp"])
+        self.assertEqual(entry["enabled_units"], ["vendorapp.service"])
+        self.assertEqual(entry["started_units"], ["vendorapp.service"])
+        self.assertEqual(entry["repository_files"],
+                         ["/etc/apt/keyrings/vendor.asc", "/etc/apt/sources.list.d/vendor.sources"])
+
+    def test_already_installed_packages_are_not_claimed(self):
+        definition = simple_definition()
+        definition["variants"][0]["steps"][1]["packages"] = ["testtool", "libshared"]
+        code, _, _ = self.apply(definition, "apt-test")
+        self.assertEqual(code, 0)
+        entry = self.record()["components"]["testtool"]
+        names = [p["package"] for p in entry["packages"] + entry["dependencies"]]
+        self.assertNotIn("libshared", names, "it was there before DSSA")
+
+    def test_failed_install_is_not_recorded(self):
+        self.write("fail.json", {"install": ["testtool"]})
+        code, result, _ = self.apply(simple_definition(), "apt-test")
+        self.assertEqual(code, 3)
+        self.assertFalse(self.record_path().exists())
+
+    def test_other_components_are_kept(self):
+        self.apply(simple_definition(), "apt-test")
+        self.apply(vendor_definition(), "apt-vendor", plan_id=PLAN_B)
+        self.assertEqual(sorted(self.record()["components"]), ["testtool", "vendorapp"])
+
+    def test_unsafe_record_is_not_trusted_or_changed(self):
+        self.record_path().parent.mkdir(parents=True)
+        self.record_path().parent.chmod(0o711)
+        self.record_path().write_text('{"schema_version": "1.0", "components": {}}')
+        self.record_path().chmod(0o666)
+        code, result, run = self.apply(simple_definition(), "apt-test")
+        self.assertEqual(code, 0, "a verified install is not undone")
+        self.assertFalse(result["recorded"])
+        self.assertIn("could not be added to the install record", run.stderr)
+        self.assertIn("not root-only writable", run.stderr)
+        self.assertEqual(self.record()["components"], {})
+
+    def test_symlinked_record_is_refused(self):
+        target = Path(self.tmp.name) / "elsewhere.json"
+        target.write_text('{"schema_version": "1.0", "components": {}}')
+        self.record_path().parent.mkdir(parents=True)
+        self.record_path().parent.chmod(0o711)
+        self.record_path().symlink_to(target)
+        result = self.bash("dssa_record_read")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is a symlink", result.stderr)
+
+    def test_missing_record_reads_as_empty_and_forget_removes(self):
+        empty = self.bash("dssa_record_read")
+        self.assertEqual(json.loads(empty.stdout), {"schema_version": "1.0", "components": {}})
+        self.apply(simple_definition(), "apt-test")
+        forget = self.bash("dssa_record_forget testtool")
+        self.assertEqual(forget.returncode, 0, forget.stderr)
+        self.assertEqual(self.record()["components"], {})
+
+
+class DnfRemoveTests(FakeServer):
+    """Removal on dnf: rpm names name.arch, versions epoch:version (4.42)."""
+
+    def test_plan_and_remove_on_dnf(self):
+        self.write("packages.json", {**INITIAL_PACKAGES, "testtool": "1.0", "libtt": "1.0"})
+        state = self.root / "var/lib/dssa"
+        state.mkdir(parents=True)
+        state.chmod(0o711)
+        record = {"schema_version": "1.0", "components": {"testtool": {
+            "how": "installed", "variant_id": "dnf-test", "plan_id": PLAN_B,
+            "recorded_at": "2026-11-20T00:00:00Z", "depends_on": [],
+            "packages": [{"package": "testtool.x86_64", "version": "0:1.0"}],
+            "dependencies": [{"package": "libtt.x86_64", "version": "0:1.0"}],
+            "enabled_units": [], "started_units": [], "created_paths": [],
+            "repository_files": [], "files": []}}}
+        (state / "installed.json").write_text(json.dumps(record))
+        (state / "installed.json").chmod(0o644)
+        definition = simple_definition()
+        planned = self.bash(f"plan_remove_component {shlex.quote(json.dumps(definition))} dnf "
+                            f"\"$(dssa_record_read)\" '[\"testtool\"]'")
+        self.assertEqual(planned.returncode, 0, planned.stderr)
+        step = json.loads(planned.stdout)
+        self.assertEqual(step["action"], "REMOVE")
+        self.assertEqual([p["package"] for p in step["details"]["remove_packages"]],
+                         ["testtool.x86_64", "libtt.x86_64"])
+        self.assertTrue(step["details"]["reversible"])
+
+        result = self.bash(f"""
+begin_transaction {PLAN_A} dnf '[]' || exit 90
+r="$(remove_component {PLAN_A} dnf testtool {shlex.quote(json.dumps(step["details"]))})"; rc=$?
+end_transaction {PLAN_A} "[$r]" || exit 91
+printf '%s\n' "$r"; exit $rc""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["outcome"], "removed")
+        self.assertEqual(self.read("packages.json"), INITIAL_PACKAGES)
+        self.assertEqual(json.loads((state / "installed.json").read_text())["components"], {})
+        calls = (self.state / "calls.log").read_text()
+        self.assertIn("dnf download -q --destdir", calls)
+        self.assertIn("dnf remove -y --noautoremove -- testtool.x86_64 libtt.x86_64", calls)
 
 
 class AuditPathTests(unittest.TestCase):

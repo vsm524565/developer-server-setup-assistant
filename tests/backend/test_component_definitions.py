@@ -320,6 +320,34 @@ class LoaderTests(unittest.TestCase):
                 )
 
 
+class ManagedFileContractTests(unittest.TestCase):
+    """managed_file paths use DSSA's own names; service_reload (4.45)."""
+
+    def with_step(self, step):
+        definition = load_repo_definition("git")
+        definition["variants"][0]["steps"].append(step)
+        return definition
+
+    def test_dssa_named_file_and_reload_are_valid(self):
+        for step in ({"type": "managed_file", "path": "/etc/nginx/conf.d/dssa-default.conf",
+                      "template": "nginx/default.conf", "mode": "0644", "owner": "root:root"},
+                     {"type": "service_reload", "unit": "nginx.service", "config_test": "nginx -t"}):
+            with self.subTest(step["type"]):
+                definition = self.with_step(step)
+                parse_component_definition(definition)
+                self.assertTrue(jq_accepts(definition))
+
+    def test_other_names_and_commands_are_refused(self):
+        for step in ({"type": "managed_file", "path": "/etc/nginx/nginx.conf",
+                      "template": "nginx/default.conf", "mode": "0644", "owner": "root:root"},
+                     {"type": "service_reload", "unit": "nginx.service", "config_test": "rm -rf /"}):
+            with self.subTest(step["type"]):
+                definition = self.with_step(step)
+                with self.assertRaises(DefinitionError):
+                    parse_component_definition(definition)
+                self.assertFalse(jq_accepts(definition))
+
+
 class VersionPatternContractTests(unittest.TestCase):
     """version_pattern on executable checks, in Python and bash (4.39)."""
 

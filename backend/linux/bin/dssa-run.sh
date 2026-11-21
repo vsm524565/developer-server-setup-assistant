@@ -6,8 +6,10 @@
 # terminal. Subcommands:
 #
 #   targets                                   JSON list of inventory targets
-#   plan [--allow-draft] TARGET COMPONENT...  read-only plan, no sudo; prints the plan JSON
+#   plan [--allow-draft|--remove|--adopt|--update] [--all-or-nothing] TARGET COMPONENT...
+#                                             read-only plan, no sudo; prints the plan JSON
 #   check TARGET HOST_KEY                     log in once with the pinned key; no sudo
+#   record TARGET                             print the install record (4.41); no sudo
 #   apply TARGET PLAN_FILE PLAN_SHA256        run an approved plan (sudo on the target)
 #   report TARGET PLAN_ID HOST_KEY            fetch the result of an earlier run (sudo)
 #   resume-rollback TARGET PLAN_ID HOST_KEY   roll back an interrupted run (sudo)
@@ -36,6 +38,8 @@ LINUX="$BASE_DIR/backend/linux"
 INVENTORY="$LINUX/connection/inventory.sh"
 AUDIT_SCRIPT="$LINUX/logging/audit.sh"
 DEFINITIONS_DIR="${DSSA_DEFINITIONS_DIR:-$BASE_DIR/definitions/components}"
+# 4.45: managed_file templates, next to the definitions folder by default.
+TEMPLATES_DIR="${DSSA_TEMPLATES_DIR:-$(dirname -- "$DEFINITIONS_DIR")/templates}"
 SSH_KEY=""
 KEY_SOURCE=""
 KNOWN_HOSTS="${DSSA_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
@@ -61,7 +65,7 @@ trap 'rm -rf -- "$WORK"' EXIT
 die() { printf 'ERROR: %s\n' "$2" >&2; exit "$1"; }
 
 usage() {
-    sed -n '2,30p' "${BASH_SOURCE[0]}" >&2
+    sed -n '2,32p' "${BASH_SOURCE[0]}" >&2
     exit 2
 }
 
@@ -223,8 +227,8 @@ emit_sources() {
 engine_bundle() {
     printf '%s\n' '#!/usr/bin/env bash' 'set -uo pipefail'
     emit_sources engine/preflight.sh modules/software/package_manager.sh discovery/panel.sh \
-        discovery/ports.sh engine/definitions.sh engine/plan.sh engine/journal.sh engine/apply.sh \
-        engine/runner.sh
+        discovery/ports.sh engine/definitions.sh engine/plan.sh engine/journal.sh engine/record.sh \
+        engine/remove.sh engine/update.sh engine/apply.sh engine/runner.sh
     local hook
     for hook in "$LINUX"/engine/hooks/*.sh; do
         cat -- "$hook"
@@ -253,7 +257,7 @@ run_as_root() {
     # 4.39: before root creates or writes anything, refuse a symlinked
     # state path, and (real system) one not owned by root or writable by
     # group/others. The engine checks the whole folder again.
-    root_cmd='r="${DSSA_ROOT:-}"; s="$r/var/lib/dssa"; for d in "$r/var" "$r/var/lib" "$s" "$s/stage"; do if [ -L "$d" ]; then echo "ERROR: Unsafe state folder: $d is a symlink; nothing was run." >&2; exit 2; fi; if [ -z "$r" ] && [ -e "$d" ]; then m="$(stat -c "%u %a" -- "$d")" || exit 2; if [ "${m% *}" != 0 ] || (( 8#${m#* } & 8#022 )); then echo "ERROR: Unsafe state folder: $d is not root-only (uid mode: $m); nothing was run." >&2; exit 2; fi; fi; done; mkdir -p -m 700 "$s/stage" && chmod 700 "$s" "$s/stage" || exit 2; dst="$(mktemp "$s/stage/bundle.XXXXXX")" || exit 2; cat -- "$1" > "$dst"; rm -f -- "$1"; [ "sha256:$(sha256sum -- "$dst" | cut -d" " -f1)" = "$2" ] || { echo "ERROR: Bundle digest mismatch; nothing was run." >&2; rm -f -- "$dst"; exit 2; }; exec bash "$dst" "$3"'
+    root_cmd='r="${DSSA_ROOT:-}"; s="$r/var/lib/dssa"; for d in "$r/var" "$r/var/lib" "$s" "$s/stage"; do if [ -L "$d" ]; then echo "ERROR: Unsafe state folder: $d is a symlink; nothing was run." >&2; exit 2; fi; if [ -z "$r" ] && [ -e "$d" ]; then m="$(stat -c "%u %a" -- "$d")" || exit 2; if [ "${m% *}" != 0 ] || (( 8#${m#* } & 8#022 )); then echo "ERROR: Unsafe state folder: $d is not root-only (uid mode: $m); nothing was run." >&2; exit 2; fi; fi; done; mkdir -p -m 700 "$s/stage" && chmod 711 "$s" && chmod 700 "$s/stage" || exit 2; dst="$(mktemp "$s/stage/bundle.XXXXXX")" || exit 2; cat -- "$1" > "$dst"; rm -f -- "$1"; [ "sha256:$(sha256sum -- "$dst" | cut -d" " -f1)" = "$2" ] || { echo "ERROR: Bundle digest mismatch; nothing was run." >&2; rm -f -- "$dst"; exit 2; }; exec bash "$dst" "$3"'
     remote="sudo -- bash -c $(printf %q "$root_cmd") _ $(printf %q "$stage") $(printf %q "$digest") $(printf %q "$kind")"
 
     set +e
@@ -282,12 +286,20 @@ cmd_targets() {
 }
 
 cmd_plan() {
-    local allow=() key request plan_json
-    if [[ "${1:-}" == --allow-draft ]]; then allow=(--allow-draft); shift; fi
+    local allow=() key request plan_json atomic=()
+    while [[ "${1:-}" == --* ]]; do
+        case "$1" in
+            --allow-draft|--remove|--adopt|--update) allow+=("$1") ;;
+            --all-or-nothing) atomic=(--all-or-nothing) ;;
+            *) usage ;;
+        esac
+        shift
+    done
+    (( ${#allow[@]} <= 1 )) || die 2 "Use only one of --allow-draft, --remove, --adopt, --update."
     [[ $# -ge 2 ]] || usage
     resolve_target "$1"
     shift
-    [[ ${#allow[@]} -eq 0 || "$lab" == true ]] ||
+    [[ "${allow[*]:-}" != --allow-draft || "$lab" == true ]] ||
         die 2 "--allow-draft is allowed only for inventory targets marked \"lab\": true."
 
     key="$(presented_host_key)"
@@ -296,7 +308,7 @@ cmd_plan() {
     printf 'Host key presented by %s: %s\n' "$host" "$key" >&2
     check_clock
 
-    request="$(build_plan_request "${allow[@]}" "$target" "$key" "$DEFINITIONS_DIR" "$@")" || exit 2
+    request="$(build_plan_request "${allow[@]}" "${atomic[@]}" "$target" "$key" "$DEFINITIONS_DIR" "$@")" || exit 2
 
     local -a opts
     mapfile -t opts < <(pinned_opts)
@@ -305,7 +317,8 @@ cmd_plan() {
         emit_sources engine/preflight.sh
         printf '%s\n' 'dssa_require_commands plan || exit 3'
         emit_sources modules/software/package_manager.sh discovery/panel.sh discovery/ports.sh \
-            engine/definitions.sh engine/plan.sh
+            engine/definitions.sh engine/plan.sh engine/journal.sh engine/record.sh engine/remove.sh \
+            engine/update.sh
         printf 'req=%q\n' "$request"
         printf '%s\n' 'build_definition_plan "$req" "$(select_package_manager)" "$(discover_panels)" "$(discover_ports)"'
     } > "$WORK/plan-bundle.sh"
@@ -314,7 +327,7 @@ cmd_plan() {
         die 3 "Planning failed on $host."
     [[ "$(jq -s 'length' <<< "$plan_json" 2>/dev/null)" == 1 ]] ||
         die 3 "The target did not return exactly one plan."
-    audit run.planned planned 0 "$(jq -c '{plan_id, runnable, held: [.held[].component], allow_draft}' <<< "$plan_json")" ||
+    audit run.planned planned 0 "$(jq -c '{plan_id, operation, runnable, held: [.held[].component], allow_draft}' <<< "$plan_json")" ||
         die 3 "Audit recording failed."
     printf '%s\n' "$plan_json"
 }
@@ -334,6 +347,28 @@ cmd_check() {
         exit 3
     }
     printf 'Login to %s (%s@%s) works with %s (%s).\n' "$target" "$user" "$host" "$SSH_KEY" "$KEY_SOURCE" >&2
+}
+
+# Print the target's install record (/var/lib/dssa/installed.json), read
+# without sudo. The host key is read and checked as for plan (4.41).
+cmd_record() {
+    [[ $# -eq 1 ]] || usage
+    local key
+    resolve_target "$1"
+    key="$(presented_host_key)"
+    [[ "$key" =~ $HOST_KEY_RE ]] || die 3 "Could not read the host key presented by $host."
+    pin_host_key "$key"
+    local -a opts
+    mapfile -t opts < <(pinned_opts)
+    {
+        printf '%s\n' 'set -uo pipefail'
+        emit_sources engine/preflight.sh
+        printf '%s\n' 'dssa_require_commands plan || exit 3'
+        emit_sources engine/journal.sh engine/record.sh
+        printf '%s\n' 'dssa_record_read'
+    } > "$WORK/record-bundle.sh"
+    "$SSH_BIN" "${opts[@]}" -- "$host" 'bash -s' < "$WORK/record-bundle.sh" ||
+        die 3 "Could not read the install record on $host."
 }
 
 cmd_apply() {
@@ -366,14 +401,26 @@ cmd_apply() {
         definitions="$(jq -c --arg id "$id" --arg c "$content" '. + [{id: $id, content: $c}]' <<< "$definitions")"
     done < <(jq -r '.definitions | keys[]' <<< "$plan")
 
+    # Exact template texts, checked against the plan's digests (4.45).
+    local templates='[]' tid
+    while IFS= read -r tid; do
+        [[ "$tid" =~ ^[a-z0-9_-]+(/[a-z0-9_.-]+)*$ && -f "$TEMPLATES_DIR/$tid" ]] || die 2 "Template missing: $tid"
+        dssa_check_definition_path "$TEMPLATES_DIR/$tid" || die 2 "Unsafe template file: $tid"
+        content="$(cat -- "$TEMPLATES_DIR/$tid")"
+        [[ "$(_dssa_sha256 "$content")" == "$(jq -r --arg t "$tid" '.templates[$t]' <<< "$plan")" ]] ||
+            die 2 "Template changed since planning: $tid"
+        templates="$(jq -c --arg id "$tid" --arg c "$content" '. + [{id: $id, content: $c}]' <<< "$templates")"
+    done < <(jq -r '(.templates // {}) | keys[]' <<< "$plan")
+
     {
         engine_bundle
         printf 'DSSA_PLAN_ID=%q\n' "$plan_id"
         printf 'DSSA_PLAN=%q\n' "$plan"
         printf 'DSSA_DEFINITIONS=%q\n' "$definitions"
+        printf 'DSSA_TEMPLATES=%q\n' "$templates"
         printf '%s\n' 'case "${1:-}" in' \
             '    start) runner_start "$DSSA_PLAN_ID" "$0" "$DSSA_PLAN" "$DSSA_DEFINITIONS" ;;' \
-            '    run) runner_run "$DSSA_PLAN" "$DSSA_DEFINITIONS" ;;' \
+            '    run) runner_run "$DSSA_PLAN" "$DSSA_DEFINITIONS" "$DSSA_TEMPLATES" ;;' \
             '    *) echo "ERROR: Unknown bundle mode." >&2; exit 2 ;;' \
             'esac'
     } > "$WORK/apply-bundle.sh"
@@ -424,6 +471,7 @@ case "$command" in
     targets) cmd_targets ;;
     plan) cmd_plan "$@" ;;
     check) cmd_check "$@" ;;
+    record) cmd_record "$@" ;;
     apply) cmd_apply "$@" ;;
     report) cmd_remote_simple report "$@" ;;
     resume-rollback) cmd_remote_simple resume "$@" ;;

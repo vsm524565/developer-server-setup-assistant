@@ -27,7 +27,10 @@
 
 DSSA_TX_RETENTION_DAYS=30
 DSSA_PLAN_ID_PATTERN='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-DSSA_SUPPORTED_STEPS=" package_metadata_refresh packages_install apt_vendor_repository dnf_vendor_repository firewalld_reload service_enable service_start "
+DSSA_SUPPORTED_STEPS=" package_metadata_refresh packages_install apt_vendor_repository dnf_vendor_repository firewalld_reload service_enable service_start managed_file service_reload "
+# Template texts for managed_file (4.45): [{"id", "content"}], set by
+# apply_plan from the approved bundle after checking their digests.
+DSSA_TEMPLATE_BUNDLE="${DSSA_TEMPLATE_BUNDLE:-[]}"
 # Hooks a definition may name. Hook files (engine/hooks/*.sh) register
 # theirs here, so a definition can never call an arbitrary engine function.
 DSSA_HOOKS="${DSSA_HOOKS:- }"
@@ -260,7 +263,8 @@ begin_transaction() {
     _tx_check_state_dir || return 1
     state="$(_tx_state_dir)"
     mkdir -p -- "$state/transactions" || return 1
-    chmod 700 -- "$state" "$state/transactions" || return 1
+    # 0711 (4.41): others may open the install record by name, nothing else.
+    chmod 711 -- "$state" && chmod 700 -- "$state/transactions" || return 1
 
     exec 8>"$state/run.lock" || return 1
     if ! flock -n 8; then
@@ -757,6 +761,77 @@ tx_run_check() {
     esac
 }
 
+# 4.45: create a new file from an approved template. Never overwrites:
+# an existing path (or a symlink) refuses the step.
+_tx_exec_managed_file() {
+    local plan_id="$1" component="$2" index="$3" step="$4"
+    local path template mode owner real dir content tmp sha
+    path="$(jq -r .path <<< "$step")"
+    template="$(jq -r .template <<< "$step")"
+    mode="$(jq -r .mode <<< "$step")"
+    owner="$(jq -r .owner <<< "$step")"
+    real="$(_tx_path "$path")"
+    dir="$(dirname -- "$real")"
+
+    jq -e --arg t "$template" 'any(.[]; .id == $t)' <<< "$DSSA_TEMPLATE_BUNDLE" >/dev/null 2>&1 ||
+        { _tx_fail "Template $template is not in the approved bundle."; return 1; }
+    if [[ -e "$real" || -L "$real" ]]; then
+        _tx_fail "$path already exists; DSSA never overwrites a file."
+        return 1
+    fi
+    [[ -d "$dir" && ! -L "$dir" ]] || { _tx_fail "Folder for $path is missing or a symlink."; return 1; }
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" managed_file intent \
+        "$(jq -cn --arg p "$path" '{path: $p, state: "absent"}')")" || return 1
+
+    content="$(jq -r --arg t "$template" '.[] | select(.id == $t) | .content' <<< "$DSSA_TEMPLATE_BUNDLE")"
+    tmp="$(mktemp "$dir/.dssa-new.XXXXXX")" || return 1
+    # Template texts are kept without trailing newlines (like definitions);
+    # the file ends with exactly one.
+    if ! printf '%s\n' "$content" > "$tmp" || ! chmod "$mode" -- "$tmp" ||
+       { [[ -z "${DSSA_ROOT:-}" ]] && ! chown -- "$owner" "$tmp"; }; then
+        rm -f -- "$tmp"
+        tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" managed_file failed)"
+        return 1
+    fi
+    # -n: never replace a file that appeared meanwhile.
+    mv -n -- "$tmp" "$real"
+    if [[ -e "$tmp" ]]; then
+        rm -f -- "$tmp"
+        _tx_fail "$path appeared meanwhile; not overwritten."
+        tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" managed_file failed)"
+        return 1
+    fi
+    sha="sha256:$(sha256sum -- "$real" | awk '{print $1}')"
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" managed_file done null \
+        "$(jq -cn --arg p "$path" --arg s "$sha" '{path: $p, sha256: $s}')")"
+}
+
+# 4.45: a running unit is reloaded only after its config test passes.
+_tx_exec_service_reload() {
+    local plan_id="$1" component="$2" index="$3" step="$4" unit test pre
+    unit="$(jq -r .unit <<< "$step")"
+    test="$(jq -r '.config_test // empty' <<< "$step")"
+    pre="$(tx_unit_active_state "$unit")"
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" service_reload intent \
+        "$(jq -cn --arg u "$unit" --arg s "$pre" '{unit: $u, state: $s}')")" || return 1
+    if [[ -n "$test" ]]; then
+        [[ "$test" == "nginx -t" ]] || { _tx_fail "Config test not allowed: $test"; return 1; }
+        nginx -t >&2 || {
+            _tx_fail "Config test failed ($test); not reloading $unit."
+            tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" service_reload failed)"
+            return 1
+        }
+    fi
+    if [[ "$pre" == active ]]; then
+        systemctl reload -- "$unit" >&2 || {
+            tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" service_reload failed)"
+            return 1
+        }
+    fi
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" service_reload done null \
+        "$(jq -cn --arg u "$unit" --argjson r "$([[ "$pre" == active ]] && echo true || echo false)" '{unit: $u, reloaded: $r}')")"
+}
+
 # --- apply one component ------------------------------------------------------
 
 # Usage: apply_component PLAN_ID MANAGER DEFINITION_JSON VARIANT_ID [ALLOW_DRAFT]
@@ -806,6 +881,8 @@ apply_component() {
             dnf_vendor_repository) _tx_exec_dnf_vendor_repository "$plan_id" "$component" "$index" "$manager" "$step" ;;
             firewalld_reload) _tx_exec_firewalld_reload "$plan_id" "$component" "$index" "$manager" "$step" ;;
             service_enable|service_start) _tx_exec_service "$plan_id" "$component" "$index" "$type" "$step" ;;
+            managed_file) _tx_exec_managed_file "$plan_id" "$component" "$index" "$step" ;;
+            service_reload) _tx_exec_service_reload "$plan_id" "$component" "$index" "$step" ;;
         esac || { failed_step="$index"; failure="Step $((index + 1)) ($type) failed."; break; }
     done
 
@@ -823,8 +900,16 @@ apply_component() {
     if [[ -z "$failed_step" && "$verify_failed" == false ]]; then
         outcome=installed
         tx_journal "$plan_id" "$(jq -cn --arg c "$component" '{component: $c, phase: "component_end", outcome: "installed"}')" || return 1
-        jq -cn --arg c "$component" --argjson up "$(_tx_upgraded "$plan_id" "$component")" \
-            '{component: $c, outcome: "installed", verification: "passed", upgraded_not_reverted: $up}'
+        # 4.41: remember what DSSA installed. A failed write does not undo
+        # a verified install; the result says it was not recorded.
+        local recorded=true
+        if ! declare -F dssa_record_installed >/dev/null ||
+           ! dssa_record_installed "$plan_id" "$manager" "$definition" "$variant_id"; then
+            recorded=false
+            echo "WARNING: $component was installed but could not be added to the install record." >&2
+        fi
+        jq -cn --arg c "$component" --argjson up "$(_tx_upgraded "$plan_id" "$component")" --argjson r "$recorded" \
+            '{component: $c, outcome: "installed", verification: "passed", upgraded_not_reverted: $up, recorded: $r}'
         return 0
     fi
 
@@ -1128,7 +1213,21 @@ rollback_component() {
         else _issue "firewalld reload failed; its running rules may still include the removed zone." reload firewalld; fi
     fi
 
-    # 5. Managed files: no executor yet, so nothing to restore.
+    # 5. Managed files (4.45): DSSA only ever creates them, so undo removes
+    #    the ones this run created; then reload the units it reloaded.
+    local mpath
+    while IFS= read -r mpath; do
+        [[ -n "$mpath" ]] || continue
+        if [[ ! -e "$(_tx_path "$mpath")" ]] || rm -f -- "$(_tx_path "$mpath")"; then _record remove_file "$mpath" ok
+        else _issue "Could not remove $mpath." remove_file "$mpath"; fi
+    done < <(jq -r '.[] | select(.type == "managed_file" and .phase == "intent" and .pre.state == "absent") | .pre.path' <<< "$entries")
+    local runit
+    while IFS= read -r runit; do
+        [[ -n "$runit" ]] || continue
+        [[ "$(tx_unit_active_state "$runit")" == active ]] || continue
+        if systemctl reload -- "$runit" >&2; then _record reload "$runit" ok
+        else _issue "Could not reload $runit after removing its files." reload "$runit"; fi
+    done < <(jq -r '[.[] | select(.type == "service_reload" and .phase == "done") | .detail.unit] | unique[]' <<< "$entries")
 
     # 6. Reload unit definitions after package and file changes.
     if systemctl daemon-reload >&2 2>/dev/null; then _record daemon_reload systemd ok
@@ -1179,8 +1278,18 @@ resume_rollback() {
 
     while IFS= read -r component; do
         [[ -n "$component" ]] || continue
-        result="$(rollback_component "$plan_id" "$manager" "$component")" ||
-            result='{"complete": false, "actions": [], "issues": ["Rollback could not run."]}'
+        # A removal (4.42) is undone by reinstalling, not by removing.
+        if declare -F rollback_remove >/dev/null &&
+           tx_entries "$plan_id" "$component" |
+               jq -e 'any(.[]; .phase == "component_begin" and .operation == "remove")' >/dev/null; then
+            result="$(rollback_remove "$plan_id" "$manager" "$component")"
+        elif declare -F rollback_update >/dev/null &&
+           tx_entries "$plan_id" "$component" |
+               jq -e 'any(.[]; .phase == "component_begin" and .operation == "update")' >/dev/null; then
+            result="$(rollback_update "$plan_id" "$manager" "$component")"
+        else
+            result="$(rollback_component "$plan_id" "$manager" "$component")"
+        fi || result='{"complete": false, "actions": [], "issues": ["Rollback could not run."]}'
         results="$(jq -c --arg c "$component" --argjson r "$result" \
             '. + [{component: $c, outcome: (if $r.complete then "failed_rolled_back" else "rollback_incomplete" end),
                    failure: "Run was interrupted.", rollback: $r}]' <<< "$results")"

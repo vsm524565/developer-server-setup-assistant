@@ -200,12 +200,20 @@ def list_targets(inventory=None):
     return json.loads(result.stdout)
 
 
-def make_plan(target, components, allow_draft=False, inventory=None):
-    """Build a read-only plan on the target. Returns (plan_bytes, plan)."""
+def make_plan(target, components, allow_draft=False, inventory=None, operation="install",
+              all_or_nothing=False):
+    """Build a read-only plan on the target. Returns (plan_bytes, plan).
+    operation: install (default), remove or adopt (4.42)."""
 
+    if operation not in ("install", "remove", "adopt", "update"):
+        raise RunError(f"Unknown operation: {operation}")
     argv = ["bash", str(RUN_SCRIPT), "plan"]
     if allow_draft:
         argv.append("--allow-draft")
+    if operation != "install":
+        argv.append(f"--{operation}")
+    if all_or_nothing:
+        argv.append("--all-or-nothing")
     argv += [target, *components]
     result = subprocess.run(
         argv, stdout=subprocess.PIPE, timeout=600, check=False,
@@ -217,6 +225,22 @@ def make_plan(target, components, allow_draft=False, inventory=None):
     return plan_bytes, validate_plan_document(json.loads(plan_bytes))
 
 
+def read_record(target, inventory=None):
+    """The target's install record (4.41), read without sudo."""
+
+    result = subprocess.run(
+        ["bash", str(RUN_SCRIPT), "record", target], stdout=subprocess.PIPE,
+        timeout=120, check=False, env=_env(inventory), stdin=subprocess.DEVNULL,
+    )
+    if result.returncode != 0:
+        raise RunError(f"Reading the install record failed (exit {result.returncode}).")
+    record = json.loads(result.stdout)
+    if not isinstance(record, dict) or record.get("schema_version") != "1.0" \
+            or not isinstance(record.get("components"), dict):
+        raise RunError("The target returned an invalid install record.")
+    return record
+
+
 def check_login(target, host_key, inventory=None):
     """Log in once with the pinned host key (no sudo). Returns the exit code;
     the backend's explanation goes to the terminal."""
@@ -224,6 +248,7 @@ def check_login(target, host_key, inventory=None):
     result = subprocess.run(
         ["bash", str(RUN_SCRIPT), "check", target, host_key],
         timeout=60, check=False, env=_env(inventory), stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,  # stdout stays clean for main.py --json
     )
     return result.returncode
 
