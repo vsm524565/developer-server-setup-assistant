@@ -1,0 +1,151 @@
+{
+  "schema_version": "1.0",
+  "id": "redis",
+  "display_name": "Redis (Valkey on EL 10)",
+  "category": "database",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "redis-server"
+        ]
+      },
+      "conflicts": {
+        "paths": [
+          "/var/lib/redis"
+        ],
+        "tcp_ports": [
+          6379
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "redis-server"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "redis-server.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "redis-server.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "redis-server"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "redis-server.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 6379
+        },
+        {
+          "type": "executable",
+          "name": "redis-server",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^Redis server v.[0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/var/lib/redis",
+          "/etc/redis"
+        ]
+      }
+    },
+    {
+      "variant_id": "dnf-valkey",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "valkey"
+        ]
+      },
+      "conflicts": {
+        "packages": [
+          "redis"
+        ],
+        "paths": [
+          "/var/lib/valkey"
+        ],
+        "tcp_ports": [
+          6379
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "valkey"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "valkey.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "valkey.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "valkey"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "valkey.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 6379
+        },
+        {
+          "type": "executable",
+          "name": "valkey-server",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^Valkey server v.[0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/var/lib/valkey",
+          "/etc/valkey"
+        ]
+      }
+    }
+  ]
+}

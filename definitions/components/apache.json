@@ -1,0 +1,136 @@
+{
+  "schema_version": "1.0",
+  "id": "apache",
+  "display_name": "Apache HTTP Server",
+  "category": "webserver",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "apache2"
+        ]
+      },
+      "conflicts": {
+        "paths": [
+          "/etc/apache2"
+        ],
+        "tcp_ports": [
+          80,
+          443
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "apache2"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "apache2.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "apache2.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "apache2"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "apache2.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 80
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/apache2",
+          "/var/log/apache2",
+          "/var/www/html"
+        ]
+      }
+    },
+    {
+      "variant_id": "dnf-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "httpd"
+        ]
+      },
+      "conflicts": {
+        "paths": [
+          "/etc/httpd"
+        ],
+        "tcp_ports": [
+          80,
+          443
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "httpd"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "httpd.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "httpd.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "httpd"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "httpd.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 80
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/httpd",
+          "/var/log/httpd",
+          "/var/www"
+        ]
+      }
+    }
+  ]
+}

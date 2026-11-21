@@ -1,0 +1,110 @@
+{
+  "schema_version": "1.0",
+  "id": "firewall",
+  "display_name": "Firewall (ufw / firewalld)",
+  "category": "system",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-ufw",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [],
+        "state": "firewall_active"
+      },
+      "conflicts": {
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "ufw"
+          ]
+        },
+        {
+          "type": "firewall_enable",
+          "allow": [
+            "ssh",
+            "http",
+            "https"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "ufw"
+          ]
+        },
+        {
+          "type": "hook",
+          "name": "verify_firewall_active"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      },
+      "hooks": {
+        "verify": "verify_firewall_active"
+      }
+    },
+    {
+      "variant_id": "dnf-firewalld",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [],
+        "state": "firewall_active"
+      },
+      "conflicts": {
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "firewalld"
+          ]
+        },
+        {
+          "type": "firewall_enable",
+          "allow": [
+            "ssh",
+            "http",
+            "https"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "firewalld"
+          ]
+        },
+        {
+          "type": "hook",
+          "name": "verify_firewall_active"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      },
+      "hooks": {
+        "verify": "verify_firewall_active"
+      }
+    }
+  ]
+}

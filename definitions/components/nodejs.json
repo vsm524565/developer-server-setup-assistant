@@ -1,0 +1,104 @@
+{
+  "schema_version": "1.0",
+  "id": "nodejs",
+  "display_name": "Node.js",
+  "category": "runtime",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "nodejs"
+        ]
+      },
+      "conflicts": {
+        "unmanaged_executables": [
+          "node"
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "nodejs",
+            "npm"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "nodejs"
+          ]
+        },
+        {
+          "type": "executable",
+          "name": "node",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^v[0-9]+\\."
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    },
+    {
+      "variant_id": "dnf-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "nodejs"
+        ]
+      },
+      "conflicts": {
+        "unmanaged_executables": [
+          "node"
+        ]
+      },
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "nodejs",
+            "npm"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "nodejs"
+          ]
+        },
+        {
+          "type": "executable",
+          "name": "node",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^v[0-9]+\\."
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    }
+  ]
+}

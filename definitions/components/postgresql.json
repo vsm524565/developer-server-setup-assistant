@@ -1,0 +1,154 @@
+{
+  "schema_version": "1.0",
+  "id": "postgresql",
+  "display_name": "PostgreSQL",
+  "category": "database",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "postgresql"
+        ]
+      },
+      "conflicts": {
+        "paths": [
+          "/var/lib/postgresql"
+        ],
+        "tcp_ports": [
+          5432
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "postgresql"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "postgresql.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "postgresql.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "postgresql"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "postgresql.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 5432
+        },
+        {
+          "type": "executable",
+          "name": "psql",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^psql \\(PostgreSQL\\) [0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/var/lib/postgresql",
+          "/etc/postgresql"
+        ]
+      }
+    },
+    {
+      "variant_id": "dnf-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "postgresql-server"
+        ]
+      },
+      "conflicts": {
+        "paths": [
+          "/var/lib/pgsql/data"
+        ],
+        "tcp_ports": [
+          5432
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "postgresql-server"
+          ]
+        },
+        {
+          "type": "hook",
+          "name": "postgresql_initdb"
+        },
+        {
+          "type": "service_enable",
+          "unit": "postgresql.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "postgresql.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "postgresql-server"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "postgresql.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 5432
+        },
+        {
+          "type": "executable",
+          "name": "psql",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^psql \\(PostgreSQL\\) [0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/var/lib/pgsql/data"
+        ]
+      },
+      "hooks": {
+        "setup": "postgresql_initdb"
+      }
+    }
+  ]
+}

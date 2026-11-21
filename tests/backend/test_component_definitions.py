@@ -59,8 +59,12 @@ class RepositoryDefinitionTests(unittest.TestCase):
         cls.definitions = load_component_definitions(catalog=cls.catalog)
 
     def test_expected_components_are_defined(self):
+        # Components phase: 13 new definitions, all draft until lab-verified.
         self.assertEqual(
-            sorted(self.definitions), ["docker", "docker_compose", "git", "nginx"],
+            sorted(self.definitions),
+            ["apache", "certbot", "chrony", "docker", "docker_compose", "fail2ban", "firewall",
+             "git", "mariadb", "mysql", "nginx", "nodejs", "php", "postgresql", "python",
+             "redis", "swap"],
         )
 
     def test_git_and_docker_are_supported_nginx_is_draft(self):
@@ -75,6 +79,9 @@ class RepositoryDefinitionTests(unittest.TestCase):
         self.assertEqual(support["docker"], {"supported"})
         self.assertEqual(support["docker_compose"], {"supported"})
         self.assertEqual(support["nginx"], {"draft"})
+        for component in ("apache", "certbot", "chrony", "fail2ban", "firewall", "mariadb", "mysql",
+                          "nodejs", "php", "postgresql", "python", "redis", "swap"):
+            self.assertEqual(support[component], {"draft"}, component)
 
     def test_git_and_nginx_match_on_package_manager_only(self):
         for component_id in ("git", "nginx"):

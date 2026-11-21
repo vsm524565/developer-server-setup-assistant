@@ -42,8 +42,24 @@
           ]
         },
         {
+          "type": "managed_file",
+          "path": "/etc/nginx/conf.d/dssa-hardening.conf",
+          "template": "nginx/hardening.conf",
+          "mode": "0644",
+          "owner": "root:root"
+        },
+        {
+          "type": "service_enable",
+          "unit": "nginx.service"
+        },
+        {
           "type": "service_start",
           "unit": "nginx.service"
+        },
+        {
+          "type": "service_reload",
+          "unit": "nginx.service",
+          "config_test": "nginx -t"
         }
       ],
       "verification": [
@@ -62,9 +78,16 @@
           "unit": "nginx.service"
         },
         {
-          "type": "http_local",
-          "port": 80,
-          "expect_status": "2xx"
+          "type": "tcp_listening",
+          "port": 80
+        },
+        {
+          "type": "executable",
+          "name": "nginx",
+          "version_args": [
+            "-v"
+          ],
+          "version_pattern": "^nginx version: nginx/[0-9]+"
         }
       ],
       "rollback": {
@@ -109,8 +132,24 @@
           ]
         },
         {
+          "type": "managed_file",
+          "path": "/etc/nginx/conf.d/dssa-hardening.conf",
+          "template": "nginx/hardening.conf",
+          "mode": "0644",
+          "owner": "root:root"
+        },
+        {
+          "type": "service_enable",
+          "unit": "nginx.service"
+        },
+        {
           "type": "service_start",
           "unit": "nginx.service"
+        },
+        {
+          "type": "service_reload",
+          "unit": "nginx.service",
+          "config_test": "nginx -t"
         }
       ],
       "verification": [
@@ -129,9 +168,16 @@
           "unit": "nginx.service"
         },
         {
-          "type": "http_local",
-          "port": 80,
-          "expect_status": "2xx"
+          "type": "tcp_listening",
+          "port": 80
+        },
+        {
+          "type": "executable",
+          "name": "nginx",
+          "version_args": [
+            "-v"
+          ],
+          "version_pattern": "^nginx version: nginx/[0-9]+"
         }
       ],
       "rollback": {

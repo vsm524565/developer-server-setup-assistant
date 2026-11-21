@@ -1,0 +1,169 @@
+{
+  "schema_version": "1.0",
+  "id": "mariadb",
+  "display_name": "MariaDB",
+  "category": "database",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "mariadb-server"
+        ]
+      },
+      "conflicts": {
+        "packages": [
+          "mysql-server"
+        ],
+        "paths": [
+          "/var/lib/mysql"
+        ],
+        "tcp_ports": [
+          3306
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "mariadb-server"
+          ]
+        },
+        {
+          "type": "managed_file",
+          "path": "/etc/mysql/mariadb.conf.d/dssa-bind.cnf",
+          "template": "mariadb/bind.cnf",
+          "mode": "0644",
+          "owner": "root:root"
+        },
+        {
+          "type": "service_enable",
+          "unit": "mariadb.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "mariadb.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "mariadb-server"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "mariadb.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 3306
+        },
+        {
+          "type": "executable",
+          "name": "mariadb",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "MariaDB"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/var/lib/mysql",
+          "/etc/mysql"
+        ]
+      }
+    },
+    {
+      "variant_id": "dnf-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "mariadb-server"
+        ]
+      },
+      "conflicts": {
+        "packages": [
+          "mysql-server",
+          "mysql8.4-server"
+        ],
+        "paths": [
+          "/var/lib/mysql"
+        ],
+        "tcp_ports": [
+          3306
+        ],
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "mariadb-server"
+          ]
+        },
+        {
+          "type": "managed_file",
+          "path": "/etc/my.cnf.d/dssa-bind.cnf",
+          "template": "mariadb/bind.cnf",
+          "mode": "0644",
+          "owner": "root:root"
+        },
+        {
+          "type": "service_enable",
+          "unit": "mariadb.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "mariadb.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "mariadb-server"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "mariadb.service"
+        },
+        {
+          "type": "tcp_listening",
+          "port": 3306
+        },
+        {
+          "type": "executable",
+          "name": "mariadb",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "MariaDB"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/var/lib/mysql",
+          "/var/log/mariadb"
+        ]
+      }
+    }
+  ]
+}

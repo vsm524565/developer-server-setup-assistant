@@ -1,0 +1,131 @@
+{
+  "schema_version": "1.0",
+  "id": "chrony",
+  "display_name": "Chrony (time sync)",
+  "category": "system",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "chrony"
+        ]
+      },
+      "conflicts": {
+        "packages": [
+          "systemd-timesyncd",
+          "ntp",
+          "ntpsec"
+        ]
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "chrony"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "chrony.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "chrony.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "chrony"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "chrony.service"
+        },
+        {
+          "type": "executable",
+          "name": "chronyc",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^chronyc \\(chrony\\) version [0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/chrony"
+        ]
+      }
+    },
+    {
+      "variant_id": "dnf-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "chrony"
+        ]
+      },
+      "conflicts": {
+        "packages": [
+          "ntp",
+          "ntpsec"
+        ]
+      },
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "chrony"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "chronyd.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "chronyd.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "chrony"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "chronyd.service"
+        },
+        {
+          "type": "executable",
+          "name": "chronyc",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^chronyc \\(chrony\\) version [0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    }
+  ]
+}

@@ -27,7 +27,7 @@
 
 DSSA_TX_RETENTION_DAYS=30
 DSSA_PLAN_ID_PATTERN='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-DSSA_SUPPORTED_STEPS=" package_metadata_refresh packages_install apt_vendor_repository dnf_vendor_repository firewalld_reload service_enable service_start managed_file service_reload "
+DSSA_SUPPORTED_STEPS=" package_metadata_refresh packages_install apt_vendor_repository dnf_vendor_repository firewalld_reload service_enable service_start managed_file service_reload hook firewall_enable swap_file "
 # Template texts for managed_file (4.45): [{"id", "content"}], set by
 # apply_plan from the approved bundle after checking their digests.
 DSSA_TEMPLATE_BUNDLE="${DSSA_TEMPLATE_BUNDLE:-[]}"
@@ -832,6 +832,104 @@ _tx_exec_service_reload() {
         "$(jq -cn --arg u "$unit" --argjson r "$([[ "$pre" == active ]] && echo true || echo false)" '{unit: $u, reloaded: $r}')")"
 }
 
+# --- components phase: setup hooks, firewall, swap ------------------------------
+
+# A registered setup hook (e.g. postgresql_initdb). What it creates must
+# be listed in the variant's rollback.created_paths; that is its undo.
+_tx_exec_setup_hook() {
+    local plan_id="$1" component="$2" index="$3" step="$4" hook
+    hook="$(jq -r .name <<< "$step")"
+    [[ "$DSSA_HOOKS" == *" $hook "* ]] && declare -F "$hook" >/dev/null ||
+        { _tx_fail "Setup hook not available: $hook"; return 1; }
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" hook intent \
+        "$(jq -cn --arg h "$hook" '{hook: $h}')")" || return 1
+    "$hook" >&2 || { tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" hook failed)"; return 1; }
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" hook done)"
+}
+
+# The TCP ports sshd listens on (never empty when it succeeds).
+_tx_ssh_ports() {
+    local ports
+    ports="$(ss -H -ltnp 2>/dev/null | awk '/"sshd"/ { n = split($4, a, ":"); print a[n] }' | sort -un | paste -sd' ' -)"
+    [[ -n "$ports" ]] || return 1
+    printf '%s\n' "$ports"
+}
+
+# Allow SSH (the ports sshd really uses) and the listed services, then
+# turn the firewall on. Refuses if the SSH port cannot be found: enabling
+# a firewall that blocks SSH would lock everyone out.
+_tx_exec_firewall_enable() {
+    local plan_id="$1" component="$2" index="$3" manager="$4" step="$5"
+    local ports port spec was_active added='[]' cmd
+    local -a specs=()
+    ports="$(_tx_ssh_ports)" || { _tx_fail "Cannot find the port sshd listens on; not enabling the firewall."; return 1; }
+    for port in $ports; do specs+=("$port/tcp"); done
+    jq -e 'index("http")' <<< "$(jq -c .allow <<< "$step")" >/dev/null && specs+=("80/tcp")
+    jq -e 'index("https")' <<< "$(jq -c .allow <<< "$step")" >/dev/null && specs+=("443/tcp")
+
+    case "$manager" in
+        apt) if ufw status 2>/dev/null | grep -q '^Status: active'; then was_active=true; else was_active=false; fi ;;
+        dnf) if [[ "$(systemctl is-active firewalld 2>/dev/null)" == active ]]; then was_active=true; else was_active=false; fi ;;
+    esac
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" firewall_enable intent \
+        "$(jq -cn --argjson a "$was_active" --arg m "$manager" '{was_active: $a, manager: $m}')")" || return 1
+
+    for spec in "${specs[@]}"; do
+        case "$manager" in
+            apt)
+                ufw show added 2>/dev/null | grep -qx "ufw allow $spec" && continue
+                ufw allow "$spec" >&2 || { _tx_fail "ufw allow $spec failed."; return 1; } ;;
+            dnf)
+                if [[ "$was_active" == true ]]; then cmd=(firewall-cmd --permanent); else cmd=(firewall-offline-cmd); fi
+                "${cmd[@]}" --query-port="$spec" >/dev/null 2>&1 && continue
+                "${cmd[@]}" --add-port="$spec" >&2 || { _tx_fail "Adding $spec to firewalld failed."; return 1; } ;;
+        esac
+        added="$(jq -c --arg s "$spec" '. + [$s]' <<< "$added")"
+        # Record each rule as it is added, so a failure later undoes it.
+        tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" firewall_enable rule null \
+            "$(jq -cn --arg s "$spec" '{added: $s}')")" || return 1
+    done
+
+    case "$manager" in
+        apt) ufw --force enable >&2 ;;
+        dnf) if [[ "$was_active" == true ]]; then firewall-cmd --reload >&2; else systemctl enable --now firewalld >&2; fi ;;
+    esac || { _tx_fail "Enabling the firewall failed."; tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" firewall_enable failed)"; return 1; }
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" firewall_enable done null \
+        "$(jq -cn --argjson a "$added" '{added_rules: $a}')")"
+}
+
+# One swap file, sized from RAM (2x up to 2 GiB, then = RAM, at most
+# 8 GiB), enabled through its own systemd swap unit: /etc/fstab is never
+# edited. Refuses if swap is already active or there is too little disk.
+_tx_exec_swap_file() {
+    local plan_id="$1" component="$2" index="$3" step="$4"
+    local path real unit unit_file ram_mb size_mb avail_mb
+    path="$(jq -r '.path // "/swapfile.dssa"' <<< "$step")"
+    real="$(_tx_path "$path")"
+    unit="swapfile.dssa.swap"
+    unit_file="$(_tx_path "/etc/systemd/system/$unit")"
+    [[ "$(dssa_swap_active)" == false ]] || { _tx_fail "Swap is already active; not adding a swap file."; return 1; }
+    [[ ! -e "$real" && ! -L "$real" && ! -e "$unit_file" ]] || { _tx_fail "$path or its unit already exists."; return 1; }
+    ram_mb=$(( $(awk '/^MemTotal:/ {print $2}' "$(_tx_path /proc/meminfo)") / 1024 ))
+    if (( ram_mb <= 2048 )); then size_mb=$(( ram_mb * 2 )); elif (( ram_mb <= 8192 )); then size_mb=$ram_mb; else size_mb=8192; fi
+    avail_mb=$(( $(df --output=avail -k "$(dirname -- "$real")" | tail -1) / 1024 ))
+    (( avail_mb > size_mb + size_mb / 5 + 1024 )) ||
+        { _tx_fail "Not enough free disk for a ${size_mb} MiB swap file (${avail_mb} MiB free)."; return 1; }
+
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" swap_file intent \
+        "$(jq -cn --arg p "$path" --arg u "$unit" --argjson s "$size_mb" '{path: $p, unit: $u, size_mb: $s}')")" || return 1
+    { fallocate -l "${size_mb}M" -- "$real" 2>/dev/null || dd if=/dev/zero of="$real" bs=1M count="$size_mb" status=none; } &&
+        chmod 600 -- "$real" && mkswap -- "$real" >&2 &&
+        printf '[Unit]\nDescription=DSSA swap file\n\n[Swap]\nWhat=%s\n\n[Install]\nWantedBy=swap.target\n' "$path" > "$unit_file" &&
+        systemctl daemon-reload >&2 && systemctl enable --now -- "$unit" >&2 || {
+        _tx_fail "Creating the swap file failed."
+        tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" swap_file failed)"
+        return 1
+    }
+    tx_journal "$plan_id" "$(_tx_step_entry "$component" "$index" swap_file done null \
+        "$(jq -cn --argjson s "$size_mb" '{size_mb: $s}')")"
+}
+
 # --- apply one component ------------------------------------------------------
 
 # Usage: apply_component PLAN_ID MANAGER DEFINITION_JSON VARIANT_ID [ALLOW_DRAFT]
@@ -847,6 +945,7 @@ apply_component() {
     validate_component_definition "$definition" || return 1
 
     component="$(jq -r .id <<< "$definition")"
+    DSSA_MANAGER="$manager"  # hooks read it (components phase)
     variant="$(jq -c --arg v "$variant_id" '.variants[] | select(.variant_id == $v)' <<< "$definition")"
     [[ -n "$variant" ]] || { _tx_fail "Unknown variant: $variant_id"; return 1; }
     [[ "$(jq -r .platform.package_manager <<< "$variant")" == "$manager" ]] ||
@@ -883,6 +982,9 @@ apply_component() {
             service_enable|service_start) _tx_exec_service "$plan_id" "$component" "$index" "$type" "$step" ;;
             managed_file) _tx_exec_managed_file "$plan_id" "$component" "$index" "$step" ;;
             service_reload) _tx_exec_service_reload "$plan_id" "$component" "$index" "$step" ;;
+            hook) _tx_exec_setup_hook "$plan_id" "$component" "$index" "$step" ;;
+            firewall_enable) _tx_exec_firewall_enable "$plan_id" "$component" "$index" "$manager" "$step" ;;
+            swap_file) _tx_exec_swap_file "$plan_id" "$component" "$index" "$step" ;;
         esac || { failed_step="$index"; failure="Step $((index + 1)) ($type) failed."; break; }
     done
 
@@ -936,6 +1038,7 @@ apply_component() {
 # reported, never rolled back. Prints one result JSON.
 verify_component() {
     local manager="$1" definition="$2" variant_id="$3" variant check component
+    DSSA_MANAGER="$manager"  # hooks read it (components phase)
     validate_component_definition "$definition" || return 1
     component="$(jq -r .id <<< "$definition")"
     variant="$(jq -c --arg v "$variant_id" '.variants[] | select(.variant_id == $v)' <<< "$definition")"
@@ -1009,6 +1112,40 @@ rollback_component() {
             fi
         fi
     done < <(jq -r '[.[] | select(.type == "service_enable" and .phase == "intent")] | reverse[] | [.pre.unit, .pre.state] | @tsv' <<< "$entries")
+
+    # 1b. Components phase (before packages go): firewall rules and the swap file.
+    local fw_entry spec
+    fw_entry="$(jq -c '[.[] | select(.type == "firewall_enable" and .phase == "intent")][0] // empty' <<< "$entries")"
+    if [[ -n "$fw_entry" ]]; then
+        local fw_manager fw_was_active
+        fw_manager="$(jq -r .pre.manager <<< "$fw_entry")"
+        fw_was_active="$(jq -r .pre.was_active <<< "$fw_entry")"
+        if [[ "$fw_was_active" != true ]]; then
+            case "$fw_manager" in
+                apt) ufw --force disable >&2 ;;
+                dnf) systemctl disable --now firewalld >&2 ;;
+            esac && _record firewall_disable "$fw_manager" ok || _issue "Could not turn the firewall off again." firewall_disable "$fw_manager"
+        fi
+        while IFS= read -r spec; do
+            [[ -n "$spec" ]] || continue
+            case "$fw_manager" in
+                apt) ufw delete allow "$spec" >&2 ;;
+                dnf) if [[ "$fw_was_active" == true ]]; then firewall-cmd --permanent --remove-port="$spec" >&2 && firewall-cmd --reload >&2
+                     else firewall-offline-cmd --remove-port="$spec" >&2; fi ;;
+            esac && _record firewall_rule_remove "$spec" ok || _issue "Could not remove firewall rule $spec." firewall_rule_remove "$spec"
+        done < <(jq -r '.[] | select(.type == "firewall_enable" and .phase == "rule") | .detail.added' <<< "$entries")
+    fi
+    local swap_entry
+    swap_entry="$(jq -c '[.[] | select(.type == "swap_file" and .phase == "intent")][0] // empty' <<< "$entries")"
+    if [[ -n "$swap_entry" ]]; then
+        local swap_unit swap_path
+        swap_unit="$(jq -r .pre.unit <<< "$swap_entry")"
+        swap_path="$(jq -r .pre.path <<< "$swap_entry")"
+        systemctl disable --now -- "$swap_unit" >&2 2>/dev/null || true
+        rm -f -- "$(_tx_path "/etc/systemd/system/$swap_unit")" "$(_tx_path "$swap_path")"
+        if [[ -e "$(_tx_path "$swap_path")" ]]; then _issue "Could not remove $swap_path." remove_file "$swap_path"
+        else _record remove_swap "$swap_path" ok; fi
+    fi
 
     # 2. Remove packages that are new since each install step began and
     #    were not installed when the run started.

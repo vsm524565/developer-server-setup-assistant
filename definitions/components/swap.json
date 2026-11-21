@@ -1,0 +1,77 @@
+{
+  "schema_version": "1.0",
+  "id": "swap",
+  "display_name": "Swap file",
+  "category": "system",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-swap-file",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [],
+        "state": "swap_active"
+      },
+      "conflicts": {
+        "paths": [
+          "/swapfile.dssa"
+        ]
+      },
+      "steps": [
+        {
+          "type": "swap_file",
+          "path": "/swapfile.dssa"
+        }
+      ],
+      "verification": [
+        {
+          "type": "hook",
+          "name": "verify_swap_active"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      },
+      "hooks": {
+        "verify": "verify_swap_active"
+      }
+    },
+    {
+      "variant_id": "dnf-swap-file",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [],
+        "state": "swap_active"
+      },
+      "conflicts": {
+        "paths": [
+          "/swapfile.dssa"
+        ]
+      },
+      "steps": [
+        {
+          "type": "swap_file",
+          "path": "/swapfile.dssa"
+        }
+      ],
+      "verification": [
+        {
+          "type": "hook",
+          "name": "verify_swap_active"
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      },
+      "hooks": {
+        "verify": "verify_swap_active"
+      }
+    }
+  ]
+}

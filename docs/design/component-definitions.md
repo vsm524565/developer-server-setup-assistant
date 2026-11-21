@@ -158,6 +158,13 @@ copied checks in today's planners and installers.
 | `service_enable` | `unit` | was-enabled state |
 | `service_start` | `unit` | was-active state |
 | `managed_file` | `path`, `template`, `mode`, `owner` | backup of the original file, or was-absent |
+| `service_reload` | `unit`, optional `config_test` (`nginx -t`) | reload again after the files are removed (4.45) |
+| `hook` | `name` (declared as `hooks.setup`) | what it creates is in `rollback.created_paths` (4.47) |
+| `firewall_enable` | `allow` (`ssh` required; `http`, `https`) | firewall off again if it was off; added rules deleted (4.47) |
+| `swap_file` | `path` (`/swapfile.dssa`) | swap unit stopped and removed, file removed (4.47) |
+
+Detection (4.47): `packages_all`, or `state` (`swap_active` | `firewall_active`)
+with `packages_all: []`.
 | `hook` | `name` | whatever the hook journals through the shared journal functions |
 
 Rules for every step type:

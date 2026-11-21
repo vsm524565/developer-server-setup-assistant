@@ -1,0 +1,153 @@
+{
+  "schema_version": "1.0",
+  "id": "fail2ban",
+  "display_name": "Fail2ban",
+  "category": "system",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "fail2ban"
+        ]
+      },
+      "conflicts": {},
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "fail2ban",
+            "python3-systemd"
+          ]
+        },
+        {
+          "type": "managed_file",
+          "path": "/etc/fail2ban/jail.d/dssa-sshd.local",
+          "template": "fail2ban/sshd.local",
+          "mode": "0644",
+          "owner": "root:root"
+        },
+        {
+          "type": "service_enable",
+          "unit": "fail2ban.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "fail2ban.service"
+        },
+        {
+          "type": "service_reload",
+          "unit": "fail2ban.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "fail2ban"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "fail2ban.service"
+        },
+        {
+          "type": "executable",
+          "name": "fail2ban-client",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^Fail2Ban v[0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/fail2ban"
+        ]
+      }
+    },
+    {
+      "variant_id": "dnf-epel",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "fail2ban"
+        ]
+      },
+      "conflicts": {},
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "prerequisite",
+          "packages": [
+            "epel-release"
+          ]
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "fail2ban",
+            "python3-systemd"
+          ]
+        },
+        {
+          "type": "managed_file",
+          "path": "/etc/fail2ban/jail.d/dssa-sshd.local",
+          "template": "fail2ban/sshd.local",
+          "mode": "0644",
+          "owner": "root:root"
+        },
+        {
+          "type": "service_enable",
+          "unit": "fail2ban.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "fail2ban.service"
+        },
+        {
+          "type": "service_reload",
+          "unit": "fail2ban.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "fail2ban"
+          ]
+        },
+        {
+          "type": "service_active",
+          "unit": "fail2ban.service"
+        },
+        {
+          "type": "executable",
+          "name": "fail2ban-client",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^Fail2Ban v[0-9]+"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/fail2ban"
+        ]
+      }
+    }
+  ]
+}

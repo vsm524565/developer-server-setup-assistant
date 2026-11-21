@@ -1,0 +1,131 @@
+{
+  "schema_version": "1.0",
+  "id": "php",
+  "display_name": "PHP-FPM",
+  "category": "runtime",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "php-fpm"
+        ]
+      },
+      "conflicts": {
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "php-fpm",
+            "php-cli",
+            "php-mysql",
+            "php-curl",
+            "php-mbstring",
+            "php-xml",
+            "php-zip"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "php-fpm"
+          ]
+        },
+        {
+          "type": "executable",
+          "name": "php",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^PHP [0-9]+\\."
+        },
+        {
+          "type": "hook",
+          "name": "verify_php_fpm"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/php"
+        ]
+      },
+      "hooks": {
+        "verify": "verify_php_fpm"
+      }
+    },
+    {
+      "variant_id": "dnf-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "php-fpm"
+        ]
+      },
+      "conflicts": {
+        "panels": "any"
+      },
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "php-fpm",
+            "php-cli",
+            "php-mysqlnd",
+            "php-mbstring",
+            "php-xml"
+          ]
+        },
+        {
+          "type": "service_enable",
+          "unit": "php-fpm.service"
+        },
+        {
+          "type": "service_start",
+          "unit": "php-fpm.service"
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "php-fpm"
+          ]
+        },
+        {
+          "type": "executable",
+          "name": "php",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^PHP [0-9]+\\."
+        },
+        {
+          "type": "service_active",
+          "unit": "php-fpm.service"
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/php-fpm.d"
+        ]
+      }
+    }
+  ]
+}

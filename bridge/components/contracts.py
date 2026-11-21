@@ -18,7 +18,10 @@ PACKAGE_MANAGERS = frozenset({"apt", "dnf"})
 SUPPORT_LEVELS = frozenset({"draft", "supported"})
 ARCHITECTURES = frozenset({"x86_64", "aarch64"})
 PACKAGE_ROLES = frozenset({"prerequisite", "main"})
-HOOK_KINDS = frozenset({"precheck", "verify"})
+# setup (components phase): a hook a step may run, e.g. postgresql initdb.
+HOOK_KINDS = frozenset({"precheck", "verify", "setup"})
+FIREWALL_SERVICES = frozenset({"ssh", "http", "https"})
+DETECTION_STATES = frozenset({"swap_active", "firewall_active"})
 CONFIG_TEST_COMMANDS = frozenset({"nginx -t"})
 
 ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
@@ -121,6 +124,13 @@ def _version_pattern(value, where):
     return value
 
 
+def _firewall_allow(value, where):
+    services = _list(value, where, lambda e, w: _choice(e, w, FIREWALL_SERVICES), allow_empty=False)
+    if "ssh" not in services:
+        _fail(where, "must allow ssh (the firewall is never enabled without it)")
+    return services
+
+
 def _dssa_file(value, where):
     # DSSA writes only files under its own names (decision 3, 4.45).
     if not re.fullmatch(r"dssa-[A-Za-z0-9._-]+", value.rsplit("/", 1)[-1]):
@@ -195,6 +205,8 @@ class Variant:
     hooks: Dict[str, str] = field(default_factory=dict)
     # 4.36: packages that must exist for the running kernel (dnf only).
     running_kernel_packages: Tuple[str, ...] = ()
+    # Components phase: detected by a state (swap, firewall), not packages.
+    detection_state: object = None
 
 
 @dataclass(frozen=True)
@@ -270,6 +282,8 @@ STEP_TYPES = {
         {},
     ),
     "hook": ({"name": lambda v, w: _text(v, w, HOOK_RE)}, {}),
+    "firewall_enable": ({"allow": lambda v, w: _firewall_allow(v, w)}, {}),
+    "swap_file": ({}, {"path": lambda v, w: _choice(v, w, frozenset({"/swapfile.dssa"}))}),
     # 4.45: reload a running unit after its config test passes.
     "service_reload": (
         {"unit": lambda v, w: _text(v, w, UNIT_RE)},
@@ -425,8 +439,13 @@ def _variant(value, where):
 
     detection = _object(
         value["detection"], f"{where}.detection",
-        required=("packages_all",),
+        required=("packages_all",), optional=("state",),
     )
+    state = None
+    if "state" in detection:
+        state = _choice(detection["state"], f"{where}.detection.state", DETECTION_STATES)
+        if detection["packages_all"] != []:
+            _fail(f"{where}.detection", "a state detection has no packages")
     rollback = _object(
         value["rollback"], f"{where}.rollback",
         required=("created_paths",),
@@ -478,8 +497,9 @@ def _variant(value, where):
         variant_id=_text(value["variant_id"], f"{where}.variant_id", ID_RE),
         support=_choice(value["support"], f"{where}.support", SUPPORT_LEVELS),
         platform=platform,
-        detection_packages=_texts(PACKAGE_RE, allow_empty=False)(
+        detection_packages=_texts(PACKAGE_RE, allow_empty=state is not None)(
             detection["packages_all"], f"{where}.detection.packages_all"),
+        detection_state=state,
         conflicts=_conflicts(value["conflicts"], f"{where}.conflicts"),
         steps=steps,
         verification=verification,

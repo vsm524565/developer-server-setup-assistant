@@ -44,6 +44,18 @@ Updates (4.43):
   fail.json keys  "update_adds": [pkg] (a simulated/real upgrade also
                   installs these new packages), "real_update_adds": [pkg]
                   (only the real upgrade, not the simulation), "upgrade": bool
+Components phase:
+  bin_versions.json {"binary": "output"}       what a package's executable prints
+                                              (default "mock-version")
+  unit_ports.json {"unit": [port, ...]}        TCP ports an active unit listens on
+  autostart.json  {"pkg": ["unit", ...]}       units the package starts on install
+  ssh_ports.json  [port, ...]                  ports sshd listens on (default [22])
+  ufw.json        {"active": bool, "rules": [...]}   ufw state (mirrors
+                                              etc/ufw/ufw.conf ENABLED= under DSSA_ROOT)
+  firewalld.json  {"ports": [...]}             firewalld permanent ports
+  ss, ufw, firewall-offline-cmd, firewall-cmd, fallocate, mkswap and
+  postgresql-setup are mocked; a started *.swap unit is listed in
+  DSSA_ROOT/proc/swaps
   Package files written by "apt-get download" / "dnf download" hold JSON
   {"name", "version"}; installing a ./path.deb or .rpm installs that.
 """
@@ -79,6 +91,11 @@ def fail(kind, item=None):
     if isinstance(rule, list):
         return item in rule
     return bool(rule)
+
+
+def bin_script(binary):
+    output = load("bin_versions.json", {}).get(binary, "mock-version")
+    return "#!/bin/sh\nprintf '%s\\n' " + json.dumps(output) + "\n"
 
 
 def from_files(names):
@@ -127,7 +144,7 @@ def install(names):
             for unit in load("pkg_units.json", {}).get(name, []):
                 units.setdefault(unit, {"file_state": "disabled", "active": "inactive"})
             for binary in load("pkg_bins.json", {}).get(name, []):
-                (STATE / "bin" / binary).write_text("#!/bin/sh\necho mock-version\n")
+                (STATE / "bin" / binary).write_text(bin_script(binary))
                 (STATE / "bin" / binary).chmod(0o755)
         save("units.json", units)
         if not names:
@@ -145,7 +162,7 @@ def install(names):
         for dep in deps.get(name, []):
             packages.setdefault(dep, "1.0")
             for binary in load("pkg_bins.json", {}).get(dep, []):
-                (STATE / "bin" / binary).write_text("#!/bin/sh\necho mock-version\n")
+                (STATE / "bin" / binary).write_text(bin_script(binary))
                 (STATE / "bin" / binary).chmod(0o755)
         save("packages.json", packages)
         if name in load("fail.json", {}).get("crash_on_install", []):
@@ -159,13 +176,16 @@ def install(names):
         units = load("units.json", {})
         for unit in load("pkg_units.json", {}).get(name, []):
             units.setdefault(unit, {"file_state": "disabled", "active": "inactive"})
+        # Debian/Ubuntu packages start their own service (autostart.json).
+        for unit in load("autostart.json", {}).get(name, []):
+            units[unit] = {"file_state": "enabled", "active": "active"}
         save("units.json", units)
         for path in load("pkg_paths.json", {}).get(name, []):
             (ROOT / path.lstrip("/")).mkdir(parents=True, exist_ok=True)
         bindir = STATE / "bin"
         for binary in load("pkg_bins.json", {}).get(name, []):
             target = bindir / binary
-            target.write_text("#!/bin/sh\necho mock-version\n")
+            target.write_text(bin_script(binary))
             target.chmod(0o755)
     save("packages.json", packages)
     return 0
@@ -420,16 +440,34 @@ def systemctl(args):
     units = load("units.json", {})
     words = [a for a in args if a not in ("--no-legend", "--no-pager", "--plain", "--all", "--")]
     quiet = "--quiet" in words
-    words = [w for w in words if w != "--quiet"]
+    now = "--now" in words
+    words = [w for w in words if w not in ("--quiet", "--now")]
     action = words[0]
     unit = words[1] if len(words) > 1 else None
+    if unit and "." not in unit and not unit.startswith("-"):
+        unit = unit + ".service"  # systemctl accepts "firewalld" for "firewalld.service"
+        words[1] = unit
+    # A unit file DSSA wrote (the swap unit) becomes a known unit.
+    if unit and unit not in units and (ROOT / "etc/systemd/system" / unit).exists():
+        units[unit] = {"file_state": "disabled", "active": "inactive"}
+        save("units.json", units)
+    if now and action in ("enable", "disable"):
+        first = systemctl([action, unit])
+        return first or systemctl(["start" if action == "enable" else "stop", unit])
 
     if action == "list-unit-files":
         for name, state in sorted(units.items()):
             print(f"{name} {state['file_state']} enabled")
         return 0
     if action == "list-units":
+        import fnmatch
+        patterns = [w for w in words[1:] if not w.startswith("-")]
+        wanted = next((w.split("=", 1)[1] for w in words if w.startswith("--state=")), None)
         for name, state in sorted(units.items()):
+            if patterns and not any(fnmatch.fnmatch(name, p) for p in patterns):
+                continue
+            if wanted and state["active"] != wanted:
+                continue
             print(f"{name} loaded {state['active']} running mock")
         return 0
     if action == "reload":  # 4.45: only a running unit can be reloaded
@@ -481,12 +519,21 @@ def systemctl(args):
         return 1
     if action == "start":
         units[unit]["active"] = "active"
+        if unit.endswith(".swap"):
+            swaps = ROOT / "proc/swaps"
+            swaps.parent.mkdir(parents=True, exist_ok=True)
+            lines = swaps.read_text().splitlines() if swaps.exists() else ["Filename Type Size Used Priority"]
+            lines.append(f"/{unit[:-5]} file 1024 0 -2")
+            swaps.write_text("\n".join(lines) + "\n")
         for name in load("start_files.json", {}).get(unit, []):
             path = ROOT / name.lstrip("/")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"written by {unit}\n")
     elif action == "stop":
         units[unit]["active"] = "inactive"
+        swaps = ROOT / "proc/swaps"
+        if unit.endswith(".swap") and swaps.exists():
+            swaps.write_text("\n".join(l for l in swaps.read_text().splitlines() if f"/{unit[:-5]} " not in l) + "\n")
     elif action == "enable":
         units[unit]["file_state"] = "enabled"
     elif action == "disable":
@@ -520,7 +567,105 @@ def dpkg(args):
 
 
 
+def ss(args):
+    """LISTEN lines for sshd and the ports of active units; honours "sport = :N"."""
+    units = load("units.json", {})
+    listening = [(p, "sshd") for p in load("ssh_ports.json", [22])]
+    for unit, ports in load("unit_ports.json", {}).items():
+        if units.get(unit, {}).get("active") == "active":
+            listening += [(p, unit.split(".")[0]) for p in ports]
+    text = " ".join(args)
+    match = re.search(r"sport = :(\d+)", text)
+    for port, name in listening:
+        if match and int(match.group(1)) != port:
+            continue
+        print(f'LISTEN 0 4096 0.0.0.0:{port} 0.0.0.0:* users:(("{name}",pid=1,fd=3))')
+    return 0
+
+
+def _ufw_state(state=None):
+    if state is None:
+        return load("ufw.json", {"active": False, "rules": []})
+    save("ufw.json", state)
+    conf = ROOT / "etc/ufw/ufw.conf"
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text(f"ENABLED={'yes' if state['active'] else 'no'}\n")
+    return state
+
+
+def ufw(args):
+    state = _ufw_state()
+    words = [a for a in args if a != "--force"]
+    if words == ["status"]:
+        print(f"Status: {'active' if state['active'] else 'inactive'}")
+        if state["active"]:
+            for rule in state["rules"]:
+                print(f"{rule:<26} ALLOW       Anywhere")
+        return 0
+    if words == ["show", "added"]:
+        print("Added user rules (see 'ufw status' for running firewall):")
+        for rule in state["rules"]:
+            print(f"ufw allow {rule}")
+        return 0
+    if words[:1] == ["allow"]:
+        if words[1] not in state["rules"]:
+            state["rules"].append(words[1])
+        _ufw_state(state)
+        return 0
+    if words[:2] == ["delete", "allow"]:
+        state["rules"] = [r for r in state["rules"] if r != words[2]]
+        _ufw_state(state)
+        return 0
+    if words in (["enable"], ["disable"]):
+        if fail("ufw_enable") and words == ["enable"]:
+            print("ERROR: mock ufw enable failure", file=sys.stderr)
+            return 1
+        state["active"] = words == ["enable"]
+        _ufw_state(state)
+        print("Firewall is " + ("active and enabled on system startup" if state["active"] else "stopped"))
+        return 0
+    return 1
+
+
+def firewall_offline_cmd(args):
+    state = load("firewalld.json", {"ports": []})
+    for arg in args:
+        key, _, value = arg.partition("=")
+        if key == "--query-port":
+            return 0 if value in state["ports"] else 1
+        if key == "--add-port":
+            state["ports"].append(value)
+        elif key == "--remove-port":
+            state["ports"] = [p for p in state["ports"] if p != value]
+    save("firewalld.json", state)
+    return 0
+
+
+def fallocate(args):
+    if fail("fallocate"):
+        return 1
+    Path(args[-1]).write_text("swap\n")
+    return 0
+
+
+def mkswap(args):
+    return 1 if fail("mkswap") else 0
+
+
+def postgresql_setup(args):
+    data = ROOT / "var/lib/pgsql/data"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "PG_VERSION").write_text("16\n")
+    return 0
+
+
 def firewall_cmd(args):
+    if args == ["--state"]:
+        running = load("units.json", {}).get("firewalld.service", {}).get("active") == "active"
+        print("running" if running else "not running")
+        return 0 if running else 252
+    if "--permanent" in args:
+        return firewall_offline_cmd([a for a in args if a != "--permanent"])
     if args == ["--reload"]:
         if fail("firewalld_reload"):
             print("mock failure: firewall-cmd --reload", file=sys.stderr)
@@ -534,6 +679,8 @@ TOOLS = {
     "apt-get": apt_get, "dnf": dnf, "dpkg-query": dpkg_query, "rpm": rpm,
     "systemctl": systemctl, "journalctl": journalctl, "curl": curl, "gpg": gpg, "dpkg": dpkg,
     "firewall-cmd": firewall_cmd, "apt-cache": apt_cache,
+    "ss": ss, "ufw": ufw, "firewall-offline-cmd": firewall_offline_cmd,
+    "fallocate": fallocate, "mkswap": mkswap, "postgresql-setup": postgresql_setup,
 }
 
 if __name__ == "__main__":

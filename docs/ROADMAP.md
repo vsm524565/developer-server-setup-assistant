@@ -1489,3 +1489,24 @@ design: `docs/design/web-ui.md`).
       connection: its method was named `server`, which is the handler's
       HTTP server attribute. Renamed; any unexpected error now answers 500.
 - [x] Manual verification, 2026-11-20/21 (combined, through the web UI: `docs/testing/manual-4.41-4.46-combined.md`).
+
+### Milestone 4.47 — Components — 2026-11-21
+
+Order of work, step 5 (`docs/design/application-flow.md`). Design and the
+per-component choices: `docs/design/components.md`.
+
+- [x] 13 new definitions, all **draft** until their lab run: apache,
+      certbot, chrony, fail2ban, firewall, mariadb (default database),
+      mysql, nodejs, php, postgresql, python, redis (Valkey on EL 10), swap.
+      Nginx is finished, but stays draft until its lab run.
+- [x] Detection by state (`swap_active`, `firewall_active`); new steps
+      `firewall_enable` (allows SSH first, refuses without the SSH port)
+      and `swap_file` (own systemd unit, never fstab); `setup` hooks
+      (`postgresql_initdb`); each with undo.
+- [x] Catalog entries for `firewall` and `chrony`.
+- [x] `tests/backend/test_components.py`: every new component plans,
+      installs and verifies on apt and dnf (mocked), plus conflicts, state
+      detection, and firewall/swap failure and undo.
+- [ ] Lab run, once the VMs are free (`docs/testing/manual-4.47-components.md`);
+      then each verified component becomes supported, and 4.45's managed
+      files are covered by Nginx, MariaDB and Fail2ban.

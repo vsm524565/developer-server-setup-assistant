@@ -1,0 +1,105 @@
+{
+  "schema_version": "1.0",
+  "id": "certbot",
+  "display_name": "Certbot (Let's Encrypt)",
+  "category": "proxy_ssl",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "certbot"
+        ]
+      },
+      "conflicts": {},
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "certbot"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "certbot"
+          ]
+        },
+        {
+          "type": "executable",
+          "name": "certbot",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^certbot [0-9]+\\."
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/letsencrypt"
+        ]
+      }
+    },
+    {
+      "variant_id": "dnf-epel",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "certbot"
+        ]
+      },
+      "conflicts": {},
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "prerequisite",
+          "packages": [
+            "epel-release"
+          ]
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "certbot"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "certbot"
+          ]
+        },
+        {
+          "type": "executable",
+          "name": "certbot",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^certbot [0-9]+\\."
+        }
+      ],
+      "rollback": {
+        "created_paths": [
+          "/etc/letsencrypt"
+        ]
+      }
+    }
+  ]
+}

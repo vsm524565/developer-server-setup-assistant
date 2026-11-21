@@ -1,0 +1,103 @@
+{
+  "schema_version": "1.0",
+  "id": "python",
+  "display_name": "Python 3 tooling",
+  "category": "runtime",
+  "depends_on": [],
+  "variants": [
+    {
+      "variant_id": "apt-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "apt"
+      },
+      "detection": {
+        "packages_all": [
+          "python3",
+          "python3-venv",
+          "python3-pip"
+        ]
+      },
+      "conflicts": {},
+      "steps": [
+        {
+          "type": "package_metadata_refresh"
+        },
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "python3",
+            "python3-venv",
+            "python3-pip"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "python3",
+            "python3-venv",
+            "python3-pip"
+          ]
+        },
+        {
+          "type": "executable",
+          "name": "python3",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^Python 3\\."
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    },
+    {
+      "variant_id": "dnf-os-repository",
+      "support": "draft",
+      "platform": {
+        "package_manager": "dnf"
+      },
+      "detection": {
+        "packages_all": [
+          "python3",
+          "python3-pip"
+        ]
+      },
+      "conflicts": {},
+      "steps": [
+        {
+          "type": "packages_install",
+          "role": "main",
+          "packages": [
+            "python3",
+            "python3-pip"
+          ]
+        }
+      ],
+      "verification": [
+        {
+          "type": "packages_installed",
+          "packages": [
+            "python3",
+            "python3-pip"
+          ]
+        },
+        {
+          "type": "executable",
+          "name": "python3",
+          "version_args": [
+            "--version"
+          ],
+          "version_pattern": "^Python 3\\."
+        }
+      ],
+      "rollback": {
+        "created_paths": []
+      }
+    }
+  ]
+}

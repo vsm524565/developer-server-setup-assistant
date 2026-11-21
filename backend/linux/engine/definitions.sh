@@ -88,6 +88,15 @@ def valid_step:
     only(["type","unit","config_test"]) and has_all(["unit"]) and (.unit | str(unit_re))
     and ((.config_test // "nginx -t") == "nginx -t")
   elif .type == "hook" then only(["type","name"]) and (.name | str(hook_re))
+  elif .type == "firewall_enable" then
+    # Components phase: allow SSH (always) and the listed services, then
+    # enable the firewall (ufw on apt, firewalld on dnf).
+    only(["type","allow"]) and has_all(["allow"])
+    and (.allow | type == "array" and index("ssh") != null
+         and all(.[]; IN("ssh", "http", "https")))
+  elif .type == "swap_file" then
+    # Components phase: one swap file at a fixed path, sized from RAM.
+    only(["type","path"]) and (.path == "/swapfile.dssa")
   else false end;
 
 def valid_check:
@@ -140,12 +149,16 @@ def valid_variant:
   and (.variant_id | str(id_re))
   and (.support == "draft" or .support == "supported")
   and (.platform | valid_platform)
-  and (.detection | only(["packages_all"]) and (.packages_all | nonempty_strs(pkg_re)))
+  # A component is detected by its packages, or (components phase) by a
+  # state: swap or a firewall that is on. With a state, packages_all is [].
+  and (.detection | only(["packages_all","state"])
+       and (if has("state") then (.state | IN("swap_active", "firewall_active")) and .packages_all == []
+            else (.packages_all | nonempty_strs(pkg_re)) end))
   and (.conflicts | valid_conflicts)
   and (.steps | type == "array" and length > 0 and all(.[]; valid_step))
   and (.verification | type == "array" and length > 0 and all(.[]; valid_check))
   and (.rollback | only(["created_paths"]) and (.created_paths | safe_paths))
-  and ((.hooks // {}) | only(["precheck","verify"]) and all(.[]; str(hook_re)))
+  and ((.hooks // {}) | only(["precheck","verify","setup"]) and all(.[]; str(hook_re)))
   # 4.36: packages that must match the running kernel (dnf only).
   and ((.requirements // {}) | only(["running_kernel_packages"])
        and ((.running_kernel_packages // []) | strs(pkg_re)))
@@ -233,6 +246,9 @@ def decide($p; $f; $panels; $ports):
       | [($c.packages // [])[] | select($f.packages[.] == true)
           | "Conflicting package requires review: \(.)"] as $package_conflicts
       | [$v.detection.packages_all[] | select($f.packages[.] == true)] as $present
+      # A state (components phase: swap, firewall) decides, not packages.
+      | (if $v.detection.state != null then ($f.state == true)
+         else ($present | length) == ($v.detection.packages_all | length) end) as $installed
       # 4.36: a package built for one kernel (kernel-modules-extra) must
       # exist for the RUNNING kernel. If the repositories only offer a
       # newer build, dnf installs a whole new kernel and the component
@@ -250,8 +266,10 @@ def decide($p; $f; $panels; $ports):
            end] as $kernel_blocks
       | if ($package_conflicts | length) > 0 then
           result("REVIEW"; $package_conflicts; $v)
-        elif ($present | length) == ($v.detection.packages_all | length) then
-          result("SKIP"; ["\($d.display_name) is installed; verification required."]; $v)
+        elif $installed then
+          result("SKIP"; [if $v.detection.state == "swap_active" then "Swap is already active; verification required."
+                          elif $v.detection.state == "firewall_active" then "The firewall is already on; verification required."
+                          else "\($d.display_name) is installed; verification required." end]; $v)
         elif ($kernel_blocks | length) > 0 then
           result("BLOCKED"; $kernel_blocks; $v)
         else
@@ -504,8 +522,30 @@ collect_variant_facts() {
         --argjson patterns "$(printf '%s\n' "${patterns[@]}" | _dssa_pairs)" \
         --argjson units "$(printf '%s\n' "${units[@]}" | _dssa_pairs)" \
         --argjson kernel "$kernel" \
+        --argjson state "$(jq -cn --arg s "$(jq -r '.detection.state // empty' <<< "$variant")" \
+            --arg swap "$(dssa_swap_active)" --arg fw "$(dssa_firewall_active "$manager")" \
+            'if $s == "swap_active" then ($swap == "true") elif $s == "firewall_active" then ($fw == "true") else null end')" \
         '{packages: $packages, executables: $executables, paths: $paths,
-          repository_patterns: $patterns, units: $units, running_kernel: $kernel}'
+          repository_patterns: $patterns, units: $units, running_kernel: $kernel,
+          state: $state}'
+}
+
+# Is the firewall on? Read without root: ufw's own config on apt systems,
+# firewalld's unit state on dnf systems (components phase).
+dssa_firewall_active() {
+    local conf="${DSSA_ROOT:-}/etc/ufw/ufw.conf"
+    case "${1:-${DSSA_MANAGER:-$(select_package_manager 2>/dev/null)}}" in
+        apt) [[ -r "$conf" ]] && grep -Eq '^ENABLED=yes' "$conf" && { echo true; return; } ;;
+        dnf) [[ "$(systemctl is-active firewalld 2>/dev/null)" == active ]] && { echo true; return; } ;;
+    esac
+    echo false
+}
+
+# Is any swap active? (components phase: the swap component is detected
+# by this, as it has no package). Reads /proc/swaps (DSSA_ROOT for tests).
+dssa_swap_active() {
+    local file="${DSSA_ROOT:-}/proc/swaps"
+    if [[ -r "$file" ]] && (( $(wc -l < "$file") > 1 )); then echo true; else echo false; fi
 }
 
 # Pure decision: definition + facts -> plan entry. No probing.
