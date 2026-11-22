@@ -115,7 +115,7 @@ class App:
 
     # --- operations -------------------------------------------------------------
 
-    def make_plans(self, user, targets, components, operation, all_or_nothing):
+    def make_plans(self, user, targets, components, operation, all_or_nothing, allow_draft=False):
         if operation not in OPERATIONS:
             raise ValueError("Unknown operation.")
         if not targets or not all(TARGET_RE.fullmatch(t) for t in targets):
@@ -124,7 +124,9 @@ class App:
             raise ValueError("Choose at least one component.")
         plan_ids = []
         for target in targets:
-            plan_bytes, plan = run.make_plan(target, components, False, self.inventory(), operation, all_or_nothing)
+            # Drafts: lab servers only; dssa-run.sh refuses them elsewhere.
+            plan_bytes, plan = run.make_plan(target, components, allow_draft and operation == "install",
+                                             self.inventory(), operation, all_or_nothing)
             run.save_plan(plan_bytes)
             plan_ids.append(plan["plan_id"])
             self.audit(user, "plan", target=target, plan_id=plan["plan_id"], operation=operation,
@@ -137,7 +139,7 @@ class App:
         plan_bytes, plan, _, keys, check = self.check(plan_id)
         if check["verification_only"]:
             return None
-        for name, _what, _warnings in risky_steps(plan):
+        for name, _what, _warnings in risky_steps(plan, include_drafts=True):
             if typed.get(name, "").strip() != name:
                 raise ApprovalError(f"{name} not confirmed; nothing was approved.")
         record = approve_plan(plan_bytes, keys, typed.get("_confirm", "").strip(), operator=user,
@@ -249,7 +251,7 @@ def plan_table(plan):
 
 def confirm_fields(plan):
     out = []
-    for name, what, warnings in risky_steps(plan):
+    for name, what, warnings in risky_steps(plan, include_drafts=True):
         notes = "".join(f'<p class="warn">{esc(w)}</p>' for w in warnings)
         out.append(f'{notes}<label>Type <b>{esc(name)}</b> to {esc(what)}: '
                    f'<input name="name_{esc(name)}" autocomplete="off" required></label>')
@@ -392,6 +394,7 @@ class Handler(BaseHTTPRequestHandler):
                 f'<label>Operation <select name="operation">'
                 + "".join(f'<option value="{o}">{o}</option>' for o in OPERATIONS)
                 + '</select></label> <label><input type="checkbox" name="all_or_nothing" value="1"> all or nothing</label> '
+                '<label><input type="checkbox" name="allow_draft" value="1"> allow drafts (lab servers only)</label> '
                 '<button>Make plan</button><p class="hint">Several servers make a batch: one approval, '
                 'applied server by server, stopping at the first failure.</p></form>')
         self.send_html(page("Servers", body, session))
@@ -463,7 +466,7 @@ class Handler(BaseHTTPRequestHandler):
         if batch["state"] == "planned":
             fields, seen = [], set()
             for plan in plans:
-                for name, what, warnings in risky_steps(plan):
+                for name, what, warnings in risky_steps(plan, include_drafts=True):
                     if name not in seen:
                         seen.add(name)
                         notes = "".join(f'<p class="warn">{esc(w)}</p>' for w in warnings)
@@ -585,7 +588,7 @@ class Handler(BaseHTTPRequestHandler):
         targets = self.fields.get("targets", [])
         components = self.fields.get("components", [])
         plan_ids = self.app.make_plans(user, targets, components, form.get("operation", "install"),
-                                       form.get("all_or_nothing") == "1")
+                                       form.get("all_or_nothing") == "1", form.get("allow_draft") == "1")
         if len(plan_ids) == 1:
             return self.redirect(f"/plans/{plan_ids[0]}")
         return self.redirect(f"/batches/{self.app.new_batch(user, plan_ids)}")

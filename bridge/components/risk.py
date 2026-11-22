@@ -10,10 +10,18 @@ Drafts are confirmed at plan time (4.34) and are not listed here.
 """
 
 
-def risky_steps(plan):
-    """[(component, verb, [warnings])] for the runnable steps that need a typed name."""
+def risky_steps(plan, include_drafts=False):
+    """[(component, verb, [warnings])] for the runnable steps that need a typed name.
+
+    include_drafts: the web UI confirms draft components at approval (the
+    command line confirms them at plan time instead)."""
 
     out = []
+    if include_drafts and plan.get("allow_draft"):
+        for step in plan["steps"]:
+            if (step["component"] in plan["runnable"] and step.get("support") == "draft"
+                    and step["action"] == "INSTALL" and not (step.get("details") or {}).get("panel")):
+                out.append((step["component"], "install this draft component (lab servers only)", []))
     for step in plan["steps"]:
         if step["component"] not in plan["runnable"]:
             continue

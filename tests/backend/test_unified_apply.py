@@ -1392,6 +1392,17 @@ class WebFlowTests(Lab):
         self.assertEqual(view["exit_code"], 0, view["text"])
         self.assertNotIn("testtool", self.read_mock("packages.json"))
 
+    def test_drafts_on_lab_servers_need_their_typed_name(self):
+        (plan_id,) = self.app.make_plans("alice", ["lab1"], ["drafttool"], "install", False, allow_draft=True)
+        with self.assertRaisesRegex(ApprovalError, "drafttool not confirmed"):
+            self.app.approve("alice", plan_id, {"_confirm": "APPROVE"})
+        self.app.approve("alice", plan_id, {"drafttool": "drafttool", "_confirm": "APPROVE"})
+        view = self.wait(self.app.start_apply("alice", plan_id))
+        self.assertEqual(view["exit_code"], 0, view["text"])
+        self.assertIn("drafttool", self.read_mock("packages.json"))
+        with self.assertRaises(run.RunError):
+            self.app.make_plans("alice", ["prod1"], ["drafttool"], "install", False, allow_draft=True)
+
     def test_batch_stops_at_the_first_failed_server(self):
         plans = self.app.make_plans("alice", ["lab1", "prod1"], ["testtool"], "install", False)
         batch = self.app.new_batch("alice", plans)

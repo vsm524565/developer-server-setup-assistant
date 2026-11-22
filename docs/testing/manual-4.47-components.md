@@ -35,4 +35,9 @@ where it repeats:
 
 ## Result
 
-Not run yet.
+In progress (owner's lab run, 2026-11-21/22).
+
+| Component | apt (ubuntu24) | dnf (alma10) | Notes |
+|---|---|---|---|
+| python | installed (plan 4f148d98), exit 0, Python 3.12.3 | installed, exit 0, Python 3.12.16 (python3 already there, pip added) | The first ubuntu24 apply was refused: an interrupted nodejs run (187d4615) left an unfinished transaction. It was rolled back; `report` then showed `DSSA_STATUS none` |
+
