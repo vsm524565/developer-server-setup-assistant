@@ -73,11 +73,11 @@
         },
         {
           "type": "service_enable",
-          "unit": "lshttpd.service"
+          "unit": "lsws.service"
         },
         {
           "type": "service_start",
-          "unit": "lshttpd.service"
+          "unit": "lsws.service"
         }
       ],
       "verification": [
@@ -89,7 +89,7 @@
         },
         {
           "type": "service_active",
-          "unit": "lshttpd.service"
+          "unit": "lsws.service"
         },
         {
           "type": "tcp_listening",
@@ -170,11 +170,11 @@
         },
         {
           "type": "service_enable",
-          "unit": "lshttpd.service"
+          "unit": "lsws.service"
         },
         {
           "type": "service_start",
-          "unit": "lshttpd.service"
+          "unit": "lsws.service"
         }
       ],
       "verification": [
@@ -186,7 +186,7 @@
         },
         {
           "type": "service_active",
-          "unit": "lshttpd.service"
+          "unit": "lsws.service"
         },
         {
           "type": "tcp_listening",
@@ -267,11 +267,11 @@
         },
         {
           "type": "service_enable",
-          "unit": "lshttpd.service"
+          "unit": "lsws.service"
         },
         {
           "type": "service_start",
-          "unit": "lshttpd.service"
+          "unit": "lsws.service"
         }
       ],
       "verification": [
@@ -283,7 +283,7 @@
         },
         {
           "type": "service_active",
-          "unit": "lshttpd.service"
+          "unit": "lsws.service"
         },
         {
           "type": "tcp_listening",
@@ -364,11 +364,11 @@
         },
         {
           "type": "service_enable",
-          "unit": "lshttpd.service"
+          "unit": "lsws.service"
         },
         {
           "type": "service_start",
-          "unit": "lshttpd.service"
+          "unit": "lsws.service"
         }
       ],
       "verification": [
@@ -380,7 +380,7 @@
         },
         {
           "type": "service_active",
-          "unit": "lshttpd.service"
+          "unit": "lsws.service"
         },
         {
           "type": "tcp_listening",
@@ -452,11 +452,11 @@
         },
         {
           "type": "service_enable",
-          "unit": "lshttpd.service"
+          "unit": "lsws.service"
         },
         {
           "type": "service_start",
-          "unit": "lshttpd.service"
+          "unit": "lsws.service"
         }
       ],
       "verification": [
@@ -468,7 +468,7 @@
         },
         {
           "type": "service_active",
-          "unit": "lshttpd.service"
+          "unit": "lsws.service"
         },
         {
           "type": "tcp_listening",

@@ -162,6 +162,17 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(response.status, 500)
         self.assertNotIn("boom", body, "details stay in the terminal")
 
+    def test_planning_errors_show_the_backend_reason(self):
+        # Lab run 4.47: "Planning failed (exit 3)" alone hid a clock refusal.
+        cookie = self.login()
+        token = re.search(r'name="csrf" value="([^"]+)"', self.request("GET", "/servers/add", cookie=cookie)[1]).group(1)
+        error = __import__("bridge.components.run", fromlist=["RunError"]).RunError(
+            "Planning failed (exit 3).", ["The clock on debian13 is 456 s behind this computer (limit 300 s)."])
+        with mock.patch("bridge.components.run.make_plan", side_effect=error):
+            response, body = self.request("POST", "/plan", f"csrf={token}&targets=debian13&components=git", cookie)
+        self.assertEqual(response.status, 400)
+        self.assertIn("456 s behind this computer", body)
+
     def test_static_files_only(self):
         response, body = self.request("GET", "/static/app.js")
         self.assertEqual(response.status, 200)

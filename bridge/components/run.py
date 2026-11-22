@@ -36,7 +36,11 @@ MARKER = b"DSSA_"
 
 
 class RunError(RuntimeError):
-    """The backend could not plan or run."""
+    """The backend could not plan or run. issues: the backend's error lines."""
+
+    def __init__(self, message, issues=()):
+        super().__init__(message)
+        self.issues = list(issues)
 
 
 # --- state on the control machine -----------------------------------------
@@ -216,11 +220,17 @@ def make_plan(target, components, allow_draft=False, inventory=None, operation="
         argv.append("--all-or-nothing")
     argv += [target, *components]
     result = subprocess.run(
-        argv, stdout=subprocess.PIPE, timeout=600, check=False,
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600, check=False,
         env=_env(inventory), stdin=subprocess.DEVNULL,
     )
+    # Show the backend's messages as before, and keep its errors for the
+    # web UI, which has no terminal (lab run 4.47).
+    messages = result.stderr.decode(errors="replace")
+    sys.stderr.write(messages)
+    sys.stderr.flush()
     if result.returncode != 0:
-        raise RunError(f"Planning failed (exit {result.returncode}).")
+        errors = [line[len("ERROR: "):] for line in messages.splitlines() if line.startswith("ERROR: ")]
+        raise RunError(f"Planning failed (exit {result.returncode}).", errors)
     plan_bytes = result.stdout
     return plan_bytes, validate_plan_document(json.loads(plan_bytes))
 

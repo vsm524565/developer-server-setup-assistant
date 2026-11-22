@@ -1119,9 +1119,11 @@ class VersionPatternTests(FakeServer):
         self.assertIn('Version output of testtool does not match "^testtool [0-9]+\\.": usage: testtool',
                       result.stderr)
 
-    def test_only_the_first_line_counts(self):
+    def test_a_warning_before_the_version_line_is_fine(self):
+        # Lab run 4.47: Composer as root prints two warnings first.
         result = self.verify("Warning: old config\ntesttool 2.4.1")
-        self.assertEqual(result.returncode, 5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.verify("usage: testtool\nsee the manual").returncode, 5)
 
     def test_failed_match_after_install_rolls_back(self):
         self.write("pkg_bins.json", {})

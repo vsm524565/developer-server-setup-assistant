@@ -39,5 +39,19 @@ In progress (owner's lab run, 2026-11-21/22).
 
 | Component | apt (ubuntu24) | dnf (alma10) | Notes |
 |---|---|---|---|
+| *web UI run* | | | From here on, through the web UI (`DSSA_WEBUI_HOME=~/dssa-lab-4.47`), one plan per VM, all six VMs added as lab servers with confirmed fingerprints |
+| certbot, clamav, php, php82, php84, fail2ban, firewall, mariadb, nginx, postfix, redis, swap | installed (plan f34ad4d9, one approval for 15 components) | | swap: 3.8 GiB `/swapfile.dssa`; php83 verified (Ubuntu 24's own PHP 8.3); chrony held (systemd-timesyncd), as designed |
+| composer | failed_rolled_back in f34ad4d9, then installed (plan 6b5d4185) | | **Finding:** as root, Composer prints two warnings before `Composer version 2.7.1`, and the version check read only the first line. Fixed: any output line may match |
+| memcached, nodejs | installed (plan 6b5d4185), exit 0 | | |
+| certbot, clamav, memcached, php82, php83, php84, postfix, redis (Valkey) | | installed (plan efc12d86) | Remi and EPEL repositories added; Valkey 8.1.10 |
+| chrony, firewall, mariadb, nginx, nodejs, postgresql, python, swap | | verified (already present) | |
+| php (OS), composer | | failed_rolled_back / not attempted | **Finding:** alma10 already had EL 10's parallel `php8.4-*` AppStream packages (installed 2026-11-19, not by these runs), which conflict with the default `php-*` 8.3. Fixed: the dnf `php` variant now lists `php8.4-common`/`php8.5-common` as conflicts, so it plans REVIEW. php, composer and fail2ban on dnf move to rocky10 |
+| apache, haproxy, java, mysql, php83, postgresql, swap, varnish | installed on **ubuntu22** (plan 538f048a), exit 0 | | MySQL 8.0.46, OpenJDK 21.0.13, HAProxy 2.4.30; php83 from Ondřej's PPA |
+| caddy, java, swap | installed on **ubuntu26** (plan 63283d07) | | Caddy from the cloudsmith repository, key accepted |
+| mongodb, php84 | failed_rolled_back on ubuntu26 (plan 63283d07) | | **Finding:** both repositories have a `resolute` release file but publish no server packages for 26.04 (Ondřej's PPA: 0 packages; MongoDB: Atlas tools only), and MongoDB has none for Debian 13 either. Fixed: those variants removed (MongoDB gains Debian 12), so the plan says BLOCKED instead of failing mid-install |
+| *debian13 plan* | | | Refused by the 4.39 clock check: debian13 was 456 s behind (limit 300 s). **Finding:** the web UI showed only "Planning failed (exit 3)". Fixed: the plan step keeps the backend's error lines and the page shows them |
+| chrony, memcached, php82 | installed on **debian13** (plan 3fb4484c) | | chrony gave debian13 a time service (it had none; that is why its clock drifted); php82 from sury |
+| mongodb | BLOCKED on debian13, as intended | | "MongoDB 8.0 requires: ubuntu 22.04; ubuntu 24.04; debian 12; … detected debian 13" |
+| openlitespeed | failed_rolled_back on debian13 (plan 3fb4484c) | | **Finding:** on Debian, the package's `rc-inst.sh` installs `/etc/init.d/lsws` and never creates `lshttpd.service`. Fixed: the unit is `lsws.service` everywhere (Ubuntu and EL have it as a link) |
 | python | installed (plan 4f148d98), exit 0, Python 3.12.3 | installed, exit 0, Python 3.12.16 (python3 already there, pip added) | The first ubuntu24 apply was refused: an interrupted nodejs run (187d4615) left an unfinished transaction. It was rolled back; `report` then showed `DSSA_STATUS none` |
 

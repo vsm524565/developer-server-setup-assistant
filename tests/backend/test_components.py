@@ -39,7 +39,7 @@ MOCKS = {
                       "varnish": ["varnish.service"], "haproxy": ["haproxy.service"],
                       "postfix": ["postfix.service"], "clamav-freshclam": ["clamav-freshclam.service"],
                       "caddy": ["caddy.service"], "elasticsearch": ["elasticsearch.service"],
-                      "mongodb-org": ["mongod.service"], "openlitespeed": ["lshttpd.service"],
+                      "mongodb-org": ["mongod.service"], "openlitespeed": ["lsws.service"],
                       "opensearch": ["opensearch.service"], "php8.2-fpm": ["php8.2-fpm.service"],
                       "php8.3-fpm": ["php8.3-fpm.service"], "php8.4-fpm": ["php8.4-fpm.service"]},
         "autostart": {"php-fpm": ["php8.3-fpm.service"]},
@@ -56,7 +56,7 @@ MOCKS = {
                       "haproxy": ["haproxy.service"], "postfix": ["postfix.service"],
                       "clamav-freshclam": ["clamav-freshclam.service"],
                       "caddy": ["caddy.service"], "elasticsearch": ["elasticsearch.service"],
-                      "mongodb-org": ["mongod.service"], "openlitespeed": ["lshttpd.service"],
+                      "mongodb-org": ["mongod.service"], "openlitespeed": ["lsws.service"],
                       "opensearch": ["opensearch.service"], "php82-php-fpm": ["php82-php-fpm.service"],
                       "php83-php-fpm": ["php83-php-fpm.service"], "php84-php-fpm": ["php84-php-fpm.service"]},
         "autostart": {},
@@ -91,7 +91,7 @@ COMMON = {
                    "postgresql.service": [5432], "redis-server.service": [6379], "valkey.service": [6379],
                    "memcached.service": [11211], "varnish.service": [6081], "postfix.service": [25],
                    "caddy.service": [80, 443], "elasticsearch.service": [9200], "mongod.service": [27017],
-                   "lshttpd.service": [8088, 7080], "opensearch.service": [9200]},
+                   "lsws.service": [8088, 7080], "opensearch.service": [9200]},
 }
 
 
@@ -176,6 +176,10 @@ class PlanTests(ComponentServer):
         self.assertIn("TCP port 80 is in use.", busy["reasons"])
         self.os("debian", "13")
         self.assertEqual(self.plan("mysql", "apt")["decision"], "BLOCKED", "Debian has no mysql-server")
+        # Lab run 4.47: EL 10's parallel PHP 8.4 packages block the OS PHP.
+        self.os("almalinux", "10.0")
+        self.write("packages.json", {"base-files": "1.0", "php8.4-common": "8.4.27"})
+        self.assertIn("Conflicting package requires review: php8.4-common", self.plan("php", "dnf")["reasons"])
 
     def test_swap_and_firewall_are_detected_by_state(self):
         self.assertEqual(self.plan("swap", "apt")["decision"], "INSTALL")

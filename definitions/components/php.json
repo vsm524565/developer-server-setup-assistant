@@ -78,7 +78,11 @@
         ]
       },
       "conflicts": {
-        "panels": "any"
+        "panels": "any",
+        "packages": [
+          "php8.4-common",
+          "php8.5-common"
+        ]
       },
       "steps": [
         {

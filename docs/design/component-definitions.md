@@ -209,7 +209,7 @@ component.
 | `type` | Parameters |
 |---|---|
 | `packages_installed` | `packages` |
-| `executable` | `name`, optional `version_args` (output to stderr), optional `version_pattern` (4.39: a POSIX extended regex, at most 200 characters, that the first output line must match; needs `version_args`) |
+| `executable` | `name`, optional `version_args` (output to stderr), optional `version_pattern` (4.39: a POSIX extended regex, at most 200 characters, that a line of the output must match (any line since the 4.47 lab run: Composer prints warnings first); needs `version_args`) |
 | `service_active` | `unit` |
 | `service_enabled` | `unit` |
 | `tcp_listening` | `port` |

@@ -79,6 +79,7 @@ Notes:
   Reset it after install with `elasticsearch-reset-password -u elastic`.
   Elasticsearch and OpenSearch conflict on port 9200 and with each other's
   packages.
+- **OpenLiteSpeed's** service is `lsws.service` everywhere: on Debian its installer sets up a SysV script (`/etc/init.d/lsws`) instead of `lshttpd.service` (lab run 4.47).
 - **OpenLiteSpeed's** admin console listens on 7080 on all interfaces. The
   `firewall` component allows only SSH, 80 and 443, so it stays closed
   from outside until you open it.

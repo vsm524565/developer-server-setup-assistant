@@ -736,11 +736,19 @@ tx_run_check() {
                 printf '%s\n' "$output" >&2
                 # 4.39: exit 0 is not enough when the definition names the
                 # expected output (a binary may print its usage and exit 0).
+                # Any line may match: some tools print warnings first
+                # (Composer run as root, lab run 4.47).
                 pattern="$(jq -r '.version_pattern // empty' <<< "$check")"
                 first="${output%%$'\n'*}"
-                if [[ -n "$pattern" ]] && ! [[ "$first" =~ $pattern ]]; then
-                    echo "Version output of $name does not match \"$pattern\": $first" >&2
-                    return 1
+                if [[ -n "$pattern" ]]; then
+                    local line matched=false
+                    while IFS= read -r line; do
+                        [[ "$line" =~ $pattern ]] && { matched=true; break; }
+                    done <<< "$output"
+                    if [[ "$matched" != true ]]; then
+                        echo "Version output of $name does not match \"$pattern\": $first" >&2
+                        return 1
+                    fi
                 fi
             fi
             ;;
