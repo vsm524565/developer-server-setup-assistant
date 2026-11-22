@@ -673,15 +673,24 @@ _tx_service_settle() {
     restarts="$(_prop NRestarts)"
     [[ "$restarts" =~ ^[0-9]+$ ]] || restarts=0
 
+    # A unit generated from a SysV init script (Type=forking, no PIDFile)
+    # has no main process systemd can track (lab run 4.47: OpenLiteSpeed's
+    # lsws on Debian). Like a oneshot, it only has to stay active and not
+    # restart.
+    local no_pid=false
     if [[ "$type" != oneshot && ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
-        reason="no main process after start"
+        if [[ "$type" == forking ]]; then
+            no_pid=true
+        else
+            reason="no main process after start"
+        fi
     fi
     while [[ -z "$reason" ]]; do
         state="$(_prop ActiveState)/$(_prop SubState)"
         now_pid="$(_prop MainPID)"
         now_restarts="$(_prop NRestarts)"
         [[ "$now_restarts" =~ ^[0-9]+$ ]] || now_restarts=0
-        if [[ "$type" == oneshot ]]; then
+        if [[ "$type" == oneshot || "$no_pid" == true ]]; then
             [[ "$state" == active/* ]] || reason="state $state"
         elif [[ "$state" != active/running ]]; then
             reason="state $state"
@@ -1498,10 +1507,15 @@ rollback_component() {
     if systemctl daemon-reload >&2 2>/dev/null; then _record daemon_reload systemd ok
     else _issue "systemctl daemon-reload failed." daemon_reload systemd; fi
 
-    # 7. Only after a clean undo: restore units that existed before.
+    # 7. Only after a clean undo: restore units that existed before. The
+    #    snapshot decides "before": a package may enable its own unit
+    #    during install, so the step's pre-state can be the package's work
+    #    (lab run 4.47: OpenLiteSpeed's lsws on Debian).
+    _existed_before() { jq -e --arg u "$1" '(.units // {}) | has($u)' "$snapshot" >/dev/null 2>&1; }
     if [[ "$ok" == true ]]; then
         while IFS=$'\t' read -r unit pre; do
             [[ -n "$unit" ]] || continue
+            _existed_before "$unit" || continue
             case "$pre" in
                 enabled) systemctl enable -- "$unit" >&2 && _record restore_enabled "$unit" ok ||
                              _issue "Could not re-enable $unit." restore_enabled "$unit" ;;
@@ -1509,6 +1523,7 @@ rollback_component() {
         done < <(jq -r '[.[] | select(.type == "service_enable" and .phase == "intent")] | .[] | [.pre.unit, .pre.state] | @tsv' <<< "$entries")
         while IFS=$'\t' read -r unit pre; do
             [[ -n "$unit" && "$pre" == active ]] || continue
+            _existed_before "$unit" || continue
             [[ "$(tx_unit_file_state "$unit")" != not-found ]] || continue
             systemctl start -- "$unit" >&2 && _record restore_active "$unit" ok ||
                 _issue "Could not restart $unit." restore_active "$unit"

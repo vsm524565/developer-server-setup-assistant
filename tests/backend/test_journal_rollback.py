@@ -981,6 +981,25 @@ class ServiceStabilityTests(FakeServer):
         self.assertEqual(detail, {"stable": True, "unit": self.UNIT, "seconds": 2,
                                   "main_pid": "4242", "restarts": 0})
 
+    def test_sysv_unit_without_main_process_is_stable_when_active(self):
+        # Lab run 4.47: a unit generated from an init script (Type=forking,
+        # no PIDFile) has MainPID 0 but is healthy while active.
+        self.write("unit_props.json", {self.UNIT: {"type": "forking", "sub": "exited"}})
+        self.write("fail.json", {"no_pid": [self.UNIT]})
+        rc, result, run = self.run_it()
+        self.assertEqual(rc, 0, run.stderr)
+        self.assertEqual(result["outcome"], "installed")
+
+    def test_unit_the_package_enabled_itself_is_not_restored_after_undo(self):
+        # Lab run 4.47: the package enables its unit during install, so the
+        # enable step sees "enabled" although the unit did not exist before.
+        self.write("autostart.json", {"vendorapp": [self.UNIT]})
+        self.write("fail.json", {"start": [self.UNIT]})
+        rc, result, run = self.run_it()
+        self.assertEqual(rc, 3, run.stderr)
+        self.assertEqual(result["outcome"], "failed_rolled_back", result)
+        self.assertNotIn("Could not re-enable", json.dumps(result))
+
     def test_crash_loop_fails_the_step_and_rolls_back(self):
         # Restart= brings the unit back each time: active, but NRestarts grows.
         self.write("fail.json", {"unstable": [self.UNIT]})
