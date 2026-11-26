@@ -316,6 +316,15 @@ class ConsumeTests(ApprovalTestCase):
             self.consume(current_host_keys={OTHER_KEY})
         self.assertFalse((self.record_dir() / "consumed").exists())
 
+    def test_only_the_expected_operator_claims_the_approval(self):
+        """Codex review 2026-11-26: the web UI's approver check ran before
+        login, so an approval written in between could be claimed by another
+        operator. The operator is now checked right before the marker."""
+        with self.assertRaisesRegex(ApprovalError, "tester approved this plan, so only tester can apply"):
+            self.consume(expected_operator="mallory")
+        self.assertFalse((self.record_dir() / "consumed").exists(), "the approval stays unused")
+        self.assertEqual(self.consume(expected_operator="tester")["runnable"], ["alpha", "beta"])
+
     def test_concurrent_claim_loses_to_existing_marker(self):
         # Simulate another apply creating the marker after our check passed.
         real_check = approval_module.check_approval

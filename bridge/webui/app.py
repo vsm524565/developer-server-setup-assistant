@@ -91,8 +91,11 @@ class App:
         self.batches = {}   # batch id -> {"plans": [...], "user", "jobs": [], "state"}
         self.records = {}   # target -> (read at, record) for the catalog page
         self.temporary = {}  # target -> meta of a temporary server (item 2), from <home>/temporary
-        self.plan_owners = {}  # plan ID -> user, for plans on a temporary server
+        # plan ID -> {"owner", "connection", "target"} for plans made on a
+        # temporary server, kept on disk so a reused name never inherits them.
+        self.plan_owners = {}
         self.load_temporary()
+        self.load_plan_owners()
         self.lock = threading.Lock()
 
     # --- helpers --------------------------------------------------------------
@@ -163,17 +166,67 @@ class App:
         if meta is not None and meta["owner"] != user:
             raise ApprovalError(f"{target} is another user's temporary server.")
 
+    def plans_dir(self):
+        return self.config.home / "temporary-plans"
+
+    def load_plan_owners(self):
+        root = self.plans_dir()
+        if not root.is_dir():
+            return
+        for path in root.glob("*.json"):
+            try:
+                owner = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if PLAN_ID_RE.fullmatch(path.stem) and isinstance(owner, dict):
+                self.plan_owners[path.stem] = owner
+
+    def bind_plan(self, user, plan_id, target):
+        """Bind a plan made on a temporary server to its owner and to that
+        connection's unique tag (Codex review, 2026-11-26)."""
+
+        owner = {"owner": user, "connection": self.temporary[target]["tag"], "target": target}
+        root = self.plans_dir()
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(root / f"{plan_id}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump(owner, handle)
+        with self.lock:
+            self.plan_owners[plan_id] = owner
+
+    def require_plan_owner(self, user, plan_id, target):
+        """Approval, apply, report and resume: a plan made on a temporary
+        server stays its owner's, and acts only through the same connection.
+        A plan for a saved server never acts through a temporary one."""
+
+        owner = self.plan_owners.get(plan_id)
+        meta = self.temporary.get(target)
+        if owner is not None:
+            if owner["owner"] != user:
+                raise ApprovalError("This plan was made on another user's temporary server.")
+            if meta is None or meta.get("tag") != owner["connection"]:
+                raise ApprovalError(f"This plan was made for an earlier connection to {target}, "
+                                    "which has ended. Connect again and make a new plan.")
+            return
+        if meta is not None:
+            raise ApprovalError(f"This plan was not made on the temporary server {target}. "
+                                "Make a new plan.")
+
     def may_see(self, user, target, plan_id=None, run_by=None):
         """Plans and runs on saved servers are shared with every signed-in
-        user. A temporary server's are its owner's only, also after its access
-        has ended (lab finding, items 2–3 step 10)."""
+        user. A temporary server's plans and runs are their owner's only,
+        decided by the plan's recorded owner first, never by whichever server
+        has that name now (Codex review, 2026-11-26)."""
 
+        owner = self.plan_owners.get(plan_id)
+        if owner is not None:
+            return owner["owner"] == user
         meta = self.temporary.get(target)
         if meta is not None:
             return meta["owner"] == user
         if any(entry["target_id"] == target for entry in self.targets()):
             return True
-        return user is not None and (self.plan_owners.get(plan_id) == user or run_by == user)
+        return user is not None and run_by == user
 
     def running_on(self, target):
         return any(j.target == target and j.finished is None for j in self.jobs.recent(1000))
@@ -313,8 +366,7 @@ class App:
             run.save_plan(plan_bytes)
             plan_ids.append(plan["plan_id"])
             if target in self.temporary:
-                with self.lock:
-                    self.plan_owners[plan["plan_id"]] = user
+                self.bind_plan(user, plan["plan_id"], target)
             self.audit(user, "plan", target=target, plan_id=plan["plan_id"], operation=operation,
                        components=components)
         return plan_ids
@@ -348,6 +400,7 @@ class App:
 
         plan_bytes, plan, _, keys, check = self.check(plan_id)
         self.require_owner(user, plan["target"]["target_id"])
+        self.require_plan_owner(user, plan_id, plan["target"]["target_id"])
         if check["verification_only"]:
             return None
         for name, _what, _warnings in risky_steps(plan, include_drafts=True):
@@ -364,6 +417,7 @@ class App:
         plan_bytes, plan, path, keys, check = self.check(plan_id)
         target = plan["target"]["target_id"]
         self.require_owner(user, target)
+        self.require_plan_owner(user, plan_id, target)
         if not check["passed"] and not check["requires_approval"]:
             raise ApprovalError("Apply refused: the plan failed its checks.", check["issues"])
         if not check["verification_only"]:
@@ -376,7 +430,8 @@ class App:
             if run.check_login(target, plan["target"]["host_key_sha256"], self.inventory(target),
                                **self.access(target)) != 0:
                 raise ApprovalError("Apply refused: cannot log in to the server. The approval was not used.")
-            consume_approval(plan_id, keys, definitions_dir=self.config.definitions_dir)
+            consume_approval(plan_id, keys, definitions_dir=self.config.definitions_dir,
+                             expected_operator=user)
             path = default_state_dir() / "approvals" / plan_id / "plan.json"
             plan_bytes = path.read_bytes()
         digest = "sha256:" + hashlib.sha256(plan_bytes).hexdigest()
@@ -400,6 +455,7 @@ class App:
         _, plan, _ = run.load_plan(plan_id)
         target, key = plan["target"]["target_id"], plan["target"]["host_key_sha256"]
         self.require_owner(user, target)
+        self.require_plan_owner(user, plan_id, target)
         command = "report" if kind == "report" else "resume-rollback"
         job = Job(kind, ["bash", str(run.RUN_SCRIPT), command, target, plan_id, key],
                   self.env(target), plan_id, target, user)

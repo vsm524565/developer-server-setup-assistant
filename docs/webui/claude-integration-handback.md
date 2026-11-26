@@ -141,3 +141,47 @@ requirement, all passed 2026-11-26:
   fixes (pushed).
 - The commit that adds this file: the selection list, plan-page fixes, the selection guide and
   this handback.
+
+## Review round 1 (Codex, 2026-11-26): both findings fixed
+
+1. **Apply could race with approval.**
+   - `consume_approval` takes `expected_operator`. It reads the record's
+     `approved_by` right before writing the single-use marker, and refuses
+     without writing it when the operator differs.
+   - Records are written once (exclusive `mkdir` and creates) and never
+     rewritten, so nothing changes between that check and the marker.
+   - The web UI passes the signed-in user. The CLI is unchanged (`None`).
+   - Tests:
+     - `ConsumeTests.test_only_the_expected_operator_claims_the_approval`:
+       wrong operator refused, marker absent, right operator claims it;
+     - `TemporaryServerTests.test_a_successful_run_ends_access_and_a_failed_one_keeps_it`:
+       asserts `expected_operator`.
+2. **Visibility followed the current server name.**
+   - A plan made on a temporary server is recorded in
+     `<home>/temporary-plans/<plan_id>.json` (0600, exclusive create).
+     The record holds `{owner, connection, target}`, where `connection` is
+     that connection's unique tag (`dssa-temp-<16 hex>`). These records are
+     reloaded at start.
+   - `may_see` checks this record first, before the current name; a run is
+     judged by its plan.
+   - `require_plan_owner` guards approve, apply, report and resume. A plan
+     acts only through the same connection, and a saved server's plan never
+     acts through a temporary connection that has the same name.
+   - Tests:
+     - `test_a_reused_name_never_inherits_plans_runs_or_approvals`: Bob
+       reuses Alice's name; Bob is refused the plan page, run page, Runs
+       list, approve, apply and report, and no login is attempted. After a
+       restart Alice still owns the plan but can't act on it through
+       another connection.
+     - `test_a_saved_server_plan_never_acts_through_a_temporary_connection`.
+
+Focused run after the fixes:
+
+```bash
+.venv/bin/python -m unittest tests.backend.test_webui tests.backend.test_unified_apply.WebFlowTests tests.backend.test_approval_records < /dev/null
+```
+
+Result: Ran 96 tests, OK.
+
+Not run by Claude this round: the full suite and the lab guides. The owner
+has moved that testing to Codex/ChatGPT (2026-11-26).

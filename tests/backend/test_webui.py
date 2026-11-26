@@ -741,7 +741,7 @@ class TemporaryServerTests(HttpBase):
         folder.mkdir(parents=True, mode=0o700)
         entry = {"target_id": name, "host": host, "ssh_user": user, "ssh_port": port,
                  "ssh_key": str(folder / "key"), "platform": "linux", "enabled": True, "lab": lab}
-        meta = {"target_id": name, "owner": owner, "tag": "dssa-temp-" + "0" * 16, "created": int(time.time()),
+        meta = {"target_id": name, "owner": owner, "tag": "dssa-temp-" + os.urandom(8).hex(), "created": int(time.time()),
                 "expires": int(time.time()) + window, "host": host, "entry": entry}
         (folder / "meta.json").write_text(json.dumps(meta))
         return meta
@@ -892,17 +892,20 @@ class TemporaryServerTests(HttpBase):
         cookie = self.login()
         self.connect(cookie)
         self.app.jobs = FakeJobs()
+        self.app.bind_plan("alice", "11111111-2222-4333-8444-555555555555", "tmp1")
         plan = {"target": {"target_id": "tmp1", "host_key_sha256": "SHA256:x"}}
         check = {"passed": True, "requires_approval": True, "verification_only": False, "issues": []}
         with mock.patch.object(App, "check", return_value=(b"{}", plan, Path("/x"), set(), check)), \
              mock.patch("bridge.components.run.check_login", return_value=0) as login, \
-             mock.patch("bridge.webui.app.consume_approval"), \
+             mock.patch("bridge.webui.app.consume_approval") as consume, \
              mock.patch("bridge.webui.app.approver", return_value="alice"), \
              mock.patch("pathlib.Path.read_bytes", return_value=b"{}"):
             job = self.app.start_apply("alice", "11111111-2222-4333-8444-555555555555")
             with self.assertRaisesRegex(Exception, "another user's temporary server"):
                 self.app.start_apply("bob", "11111111-2222-4333-8444-555555555555")
         self.assertEqual(login.call_args.kwargs, {"known_hosts": str(self.config.home / "temporary/tmp1/known_hosts")})
+        self.assertEqual(consume.call_args.kwargs["expected_operator"], "alice",
+                         "the approver is checked again when the approval is claimed")
         job.on_finish(mock.Mock(code=4))
         time.sleep(0.2)
         self.assertIn("tmp1", self.app.temporary, "kept for Report and Resume rollback")
@@ -938,7 +941,60 @@ class TemporaryServerTests(HttpBase):
         self.assertFalse(self.app.may_see("bob", "tmp1", plan_id))
         self.assertFalse(self.app.may_see("bob", "tmp1", None, "alice"))
         with mock.patch.object(App, "targets", return_value=[{"target_id": "web1"}]):
-            self.assertTrue(self.app.may_see("bob", "web1", plan_id), "saved servers stay shared")
+            self.assertTrue(self.app.may_see("bob", "web1", "99999999-2222-4333-8444-555555555555"),
+                            "saved servers stay shared")
+
+    def test_a_reused_name_never_inherits_plans_runs_or_approvals(self):
+        """Codex review 2026-11-26: visibility followed the current server
+        name. Plans now stay bound to their owner and the connection's tag,
+        also across a restart."""
+        plan_id = "11111111-2222-4333-8444-555555555555"
+        alice = self.login()
+        self.connect(alice)
+        with mock.patch("bridge.components.run.make_plan", return_value=(b"{}", {"plan_id": plan_id})), \
+             mock.patch("bridge.components.run.save_plan"):
+            self.app.make_plans("alice", ["tmp1"], ["git"], "install", False)
+        self.assertTrue(self.app.end_temporary("alice", "tmp1", "ended by the user"))
+        # Bob connects a server with the same name.
+        bob = self.login_as("bob", "another long password")
+        self.connect(bob)
+        self.assertEqual(self.app.temporary["tmp1"]["owner"], "bob")
+        run = mock.Mock(id="0123456789abcdef", target="tmp1", plan_id=plan_id, user="alice", finished=0)
+        self.app.jobs = mock.Mock(get=lambda job_id: run, recent=lambda limit=20: [run])
+        self.assertFalse(self.app.may_see("bob", "tmp1", plan_id))
+        self.assertFalse(self.app.may_see("bob", "tmp1", plan_id, "alice"))
+        response, _ = self.request("GET", "/jobs/0123456789abcdef", cookie=bob)
+        self.assertEqual(response.status, 404)
+        self.assertNotIn("0123456789abcdef", self.request("GET", "/jobs", cookie=bob)[1])
+        plan = {"target": {"target_id": "tmp1", "host_key_sha256": "SHA256:x"}, "steps": [], "operation": "install"}
+        check = {"passed": True, "requires_approval": True, "verification_only": False, "issues": []}
+        with mock.patch.object(App, "check", return_value=(b"{}", plan, Path("/x"), set(), check)), \
+             mock.patch("bridge.components.run.load_plan", return_value=(b"{}", plan, Path("/x"))), \
+             mock.patch("bridge.components.run.check_login") as login:
+            response, _ = self.request("GET", f"/plans/{plan_id}", cookie=bob)
+            self.assertEqual(response.status, 404)
+            for action in (lambda u: self.app.approve(u, plan_id, {"_confirm": "APPROVE"}),
+                           lambda u: self.app.start_apply(u, plan_id),
+                           lambda u: self.app.start_remote(u, "report", plan_id)):
+                with self.assertRaisesRegex(Exception, "another user's temporary server"):
+                    action("bob")
+        login.assert_not_called()
+        # Alice still owns it, even after a restart, but not through Bob's connection.
+        restarted = App(self.config)
+        self.assertEqual(restarted.plan_owners[plan_id]["owner"], "alice")
+        self.assertTrue(restarted.may_see("alice", "tmp1", plan_id))
+        self.assertFalse(restarted.may_see("bob", "tmp1", plan_id))
+        restarted.temporary["tmp1"]["owner"] = "alice"  # as if Alice had reconnected
+        with self.assertRaisesRegex(Exception, "earlier connection to tmp1"):
+            restarted.require_plan_owner("alice", plan_id, "tmp1")
+        self.assertEqual(
+            (self.config.home / "temporary-plans" / f"{plan_id}.json").stat().st_mode & 0o777, 0o600)
+
+    def test_a_saved_server_plan_never_acts_through_a_temporary_connection(self):
+        cookie = self.login()
+        self.connect(cookie)
+        with self.assertRaisesRegex(Exception, "not made on the temporary server tmp1"):
+            self.app.require_plan_owner("alice", "99999999-2222-4333-8444-555555555555", "tmp1")
 
     def test_only_the_user_who_started_a_run_types_into_it(self):
         """Lab finding (items 2–3): anyone signed in could answer another run's sudo prompt."""

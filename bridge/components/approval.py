@@ -433,8 +433,14 @@ def check_approval(plan_id, current_host_keys, now=None, root=None,
 
 
 def consume_approval(plan_id, current_host_keys, now=None, root=None,
-                     definitions_dir=None):
-    """Claim an approval exactly once. Returns the approved plan."""
+                     definitions_dir=None, expected_operator=None):
+    """Claim an approval exactly once. Returns the approved plan.
+
+    expected_operator: when given (the web UI, decision 3b), only an approval
+    made by that operator is claimed. It is checked here, right before the
+    marker, so an approval written after the caller's own check cannot be
+    claimed by someone else (Codex review, 2026-11-26). Records are written
+    once (exclusive mkdir and creates) and never rewritten."""
 
     now = _now(now)
     result = check_approval(plan_id, current_host_keys, now, root, definitions_dir)
@@ -442,6 +448,12 @@ def consume_approval(plan_id, current_host_keys, now=None, root=None,
         raise ApprovalError("Approval is not valid for apply.", result["issues"])
 
     directory = _approvals_root(root) / plan_id
+    if expected_operator is not None:
+        record = _load_json(_read_private(directory / "approval.json", "approval.json"), "approval.json")
+        by = record.get("approved_by")
+        if by != expected_operator:
+            raise ApprovalError(f"Apply refused: {by} approved this plan, so only {by} can apply it. "
+                                "The approval was not used.")
     try:
         _write_new(directory / "consumed", (_format(now) + "\n").encode("utf-8"))
     except FileExistsError:
