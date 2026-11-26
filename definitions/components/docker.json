@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "docker",
   "display_name": "Docker Engine",
+  "description": "Docker Engine container runtime from Docker's own repository.",
   "category": "container",
   "depends_on": [],
   "variants": [

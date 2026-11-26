@@ -62,6 +62,7 @@ sent to the target.
 | `schema_version` | `"1.0"` | Definition format version |
 | `id` | string | Stable component ID; must match the file name and the catalog |
 | `display_name` | string | Human name for reports |
+| `description` | string, optional | One plain sentence for the web UI catalog, at most 160 characters |
 | `category` | string | Same categories as `bridge/applications/definitions/` |
 | `depends_on` | list | Other component IDs that must be ready first (see §8) |
 | `variants` | list | One entry per supported install method/platform; the first match wins |

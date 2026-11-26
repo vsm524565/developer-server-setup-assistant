@@ -62,7 +62,7 @@ class AuthTests(unittest.TestCase):
         self.assertTrue(sessions.login("alice", "correct horse battery"))
 
 
-class HttpTests(unittest.TestCase):
+class HttpBase(unittest.TestCase):
     """The real handler on 127.0.0.1, plain HTTP (as behind a reverse proxy)."""
 
     def setUp(self):
@@ -95,6 +95,9 @@ class HttpTests(unittest.TestCase):
         self.assertIn("HttpOnly", cookie)
         self.assertIn("SameSite=Strict", cookie)
         return cookie.split(";")[0]
+
+
+class HttpTests(HttpBase):
 
     def test_everything_needs_login(self):
         for path in ("/", "/jobs", "/servers/add", "/plans/x"):
@@ -185,6 +188,266 @@ class HttpTests(unittest.TestCase):
             serve(self.app, "0.0.0.0", 0)
 
 
+class WorkspaceCatalogTests(HttpBase):
+    """Web UI integration pass 1: workspace, saved servers, catalog and one
+    operation reaching the planner (docs/webui/claude-integration-handoff.md)."""
+
+    TARGETS = [{"target_id": "ubuntu24", "host": "192.0.2.24", "lab": True},
+               {"target_id": "prod1", "host": "192.0.2.80", "lab": False}]
+    RECORD = {"schema_version": "1.0", "components": {"git": {
+        "how": "adopted", "recorded_at": "2026-11-20T00:00:00Z", "packages": []}}}
+    PLAN_ID = "11111111-2222-4333-8444-555555555555"
+
+    def setUp(self):
+        super().setUp()
+        self.config.home.mkdir(parents=True, exist_ok=True)
+        self.config.inventory.write_text("{}")
+        state = tempfile.TemporaryDirectory()
+        self.addCleanup(state.cleanup)
+        patcher = mock.patch.dict(os.environ, {"XDG_STATE_HOME": state.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name, value in (("list_targets", self.TARGETS), ("read_record", self.RECORD)):
+            patcher = mock.patch(f"bridge.components.run.{name}", return_value=value)
+            setattr(self, name, patcher.start())
+            self.addCleanup(patcher.stop)
+
+    def csrf(self, cookie):
+        return re.search(r'name="csrf" value="([^"]+)"', self.request("GET", "/servers/add", cookie=cookie)[1]).group(1)
+
+    def plan(self, components, runnable, action="INSTALL", reasons=("Not installed.",)):
+        return {"plan_id": self.PLAN_ID, "operation": "install", "package_manager": "apt",
+                "created_at": "2026-11-25T00:00:00Z", "runnable": runnable,
+                "target": {"target_id": "ubuntu24", "host_key_sha256": "SHA256:x"},
+                "steps": [{"component": c, "action": action, "variant_id": "apt", "reasons": list(reasons)}
+                          for c in components]}
+
+    def test_sign_in_lands_on_the_workspace(self):
+        cookie = self.login()
+        response, body = self.request("GET", "/", cookie=cookie)
+        self.assertEqual(response.status, 200)
+        self.assertIn('href="/servers"', body)
+        self.assertIn('href="/servers/add"', body)
+        self.assertIn("Saved servers", body)
+        self.assertIn("Add server", body)
+        response, body = self.request("GET", "/servers/add", cookie=cookie)
+        self.assertIn('action="/servers/scan"', body, "enrolment is unchanged")
+        response, body = self.request("GET", "/batch", cookie=cookie)
+        self.assertEqual(response.status, 200)
+        self.assertIn('action="/plan"', body, "the batch form stays available")
+
+    def test_saved_servers_populated_and_empty(self):
+        cookie = self.login()
+        response, body = self.request("GET", "/servers", cookie=cookie)
+        self.assertEqual(response.status, 200)
+        self.assertIn('href="/servers/ubuntu24/apps"', body)
+        self.assertIn('href="/servers/prod1/apps"', body)
+        self.assertIn("192.0.2.24", body)
+        self.list_targets.return_value = []
+        response, body = self.request("GET", "/servers", cookie=cookie)
+        self.assertEqual(response.status, 200)
+        self.assertIn("No saved servers yet", body)
+        self.assertIn('href="/servers/add"', body)
+        self.config.inventory.unlink()
+        self.list_targets.reset_mock()
+        response, body = self.request("GET", "/servers", cookie=cookie)
+        self.assertIn("No saved servers yet", body)
+        self.list_targets.assert_not_called()
+
+    def test_catalog_search_category_and_installed_state(self):
+        cookie = self.login()
+        response, body = self.request("GET", "/servers/ubuntu24/apps", cookie=cookie)
+        self.assertEqual(response.status, 200)
+        for app in ("Nginx", "MariaDB", "Git", "aaPanel"):
+            self.assertIn(app, body)
+        self.assertRegex(body, r'href="/servers/ubuntu24/apps\?app=git"[^>]*>.*?Installed \(adopted\)')
+        response, body = self.request("GET", "/servers/ubuntu24/apps?q=maria", cookie=cookie)
+        self.assertIn("MariaDB", body)
+        self.assertNotIn("Nginx", body)
+        response, body = self.request("GET", "/servers/ubuntu24/apps?category=control_panel", cookie=cookie)
+        self.assertIn("aaPanel", body)
+        self.assertNotIn("MariaDB", body)
+        response, body = self.request("GET", "/servers/ubuntu24/apps?q=zzzz", cookie=cookie)
+        self.assertIn("No matching applications", body)
+        self.assertEqual(self.read_record.call_count, 1, "the record is read once, then reused briefly")
+
+    def test_keyboard_selection_of_one_app_and_its_actions(self):
+        cookie = self.login()
+        response, body = self.request("GET", "/servers/ubuntu24/apps?app=git&q=gi", cookie=cookie)
+        # Rows are links (Tab + Enter); the chosen one is marked for assistive tech.
+        self.assertRegex(body, r'<a class="app-row" href="/servers/ubuntu24/apps\?app=git&amp;q=gi"[^>]*aria-current="true"')
+        self.assertEqual(body.count('aria-current="true"'), 1)
+        form = re.search(r'<form method="post" action="/servers/ubuntu24/plan">.*?</form>', body, re.S).group(0)
+        self.assertIn('name="component" value="git"', form)
+        self.assertEqual(re.findall(r'name="operation" value="(\w+)"', form), ["update", "remove"])
+        self.assertNotIn('name="components"', form, "one application only")
+        response, body = self.request("GET", "/servers/ubuntu24/apps?app=nginx", cookie=cookie)
+        form = re.search(r'<form method="post" action="/servers/ubuntu24/plan">.*?</form>', body, re.S).group(0)
+        self.assertEqual(re.findall(r'name="operation" value="(\w+)"', form), ["install", "adopt"])
+        self.assertIn('name="allow_draft"', form, "draft on a lab server")
+
+    def test_record_unavailable_offers_every_action(self):
+        cookie = self.login()
+        self.read_record.side_effect = __import__("bridge.components.run", fromlist=["RunError"]).RunError(
+            "Reading the install record failed (exit 255).")
+        response, body = self.request("GET", "/servers/prod1/apps?app=nginx", cookie=cookie)
+        self.assertEqual(response.status, 200)
+        self.assertIn("Installed state unavailable: Reading the install record failed (exit 255). Every action", body)
+        self.assertEqual(re.findall(r'name="operation" value="(\w+)"', body), ["install", "update", "remove", "adopt"])
+        self.assertNotIn('name="allow_draft"', body, "not a lab server")
+
+    def test_descriptions_are_shown_and_searchable(self):
+        cookie = self.login()
+        response, body = self.request("GET", "/servers/ubuntu24/apps?q=virus", cookie=cookie)
+        self.assertIn("ClamAV", body)
+        self.assertIn("virus scanner", body)
+        self.assertNotIn("MariaDB", body)
+        response, body = self.request("GET", "/servers/ubuntu24/apps?app=mariadb", cookie=cookie)
+        self.assertIn("listening on localhost only", body)
+
+    def test_a_recorded_panel_marks_what_it_owns(self):
+        cookie = self.login()
+        self.read_record.return_value = {"schema_version": "1.0", "components": {
+            "hestia": {"how": "installed", "recorded_at": "2026-11-25T00:00:00Z", "packages": []}}}
+        response, body = self.request("GET", "/servers/ubuntu24/apps?app=nginx", cookie=cookie)
+        self.assertRegex(body, r'apps\?app=nginx"[^>]*>.*?Managed by HestiaCP')
+        self.assertIn("Managed by HestiaCP: use the panel", body)
+        self.assertNotRegex(body, r'apps\?app=git"[^>]*>(?:(?!</li>).)*Managed by', "git is not panel-owned")
+        self.assertNotRegex(body, r'apps\?app=swap"[^>]*>(?:(?!</li>).)*Managed by', "swap is allowed next to a panel")
+        self.assertRegex(body, r'apps\?app=hestia"[^>]*>.*?Installed</span>')
+        self.assertNotIn("Installed (installed)", body)
+
+    def test_without_a_recorded_panel_nothing_is_marked(self):
+        cookie = self.login()
+        response, body = self.request("GET", "/servers/ubuntu24/apps", cookie=cookie)
+        self.assertNotIn("Managed by", body)
+        self.assertIn("A control panel installed without DSSA is found when you plan", body)
+
+    def test_unknown_server_and_bad_names(self):
+        cookie = self.login()
+        response, _ = self.request("GET", "/servers/nope/apps", cookie=cookie)
+        self.assertEqual(response.status, 404)
+        response, _ = self.request("GET", "/servers/Bad%20Name/apps", cookie=cookie)
+        self.assertEqual(response.status, 400)
+
+    def test_one_operation_reaches_the_planner(self):
+        cookie = self.login()
+        token = self.csrf(cookie)
+        plan = self.plan(["nginx"], ["nginx"])
+        with mock.patch("bridge.components.run.make_plan", return_value=(b"{}", plan)) as make, \
+             mock.patch("bridge.components.run.save_plan") as save:
+            response, _ = self.request("POST", "/servers/ubuntu24/plan",
+                                       f"csrf={token}&component=nginx&operation=install&allow_draft=1", cookie)
+        self.assertEqual((response.status, response.getheader("Location")), (303, f"/plans/{self.PLAN_ID}"))
+        make.assert_called_once_with("ubuntu24", ["nginx"], True, str(self.config.inventory), "install", False)
+        save.assert_called_once_with(b"{}")
+        audit = [json.loads(line) for line in self.config.audit.read_text().splitlines()]
+        self.assertEqual(audit[-1]["components"], ["nginx"])
+        self.assertEqual(audit[-1]["target"], "ubuntu24")
+
+    def test_drafts_are_never_allowed_off_lab_or_for_other_operations(self):
+        cookie = self.login()
+        token = self.csrf(cookie)
+        with mock.patch("bridge.components.run.make_plan", return_value=(b"{}", self.plan(["nginx"], []))) as make, \
+             mock.patch("bridge.components.run.save_plan"):
+            self.request("POST", "/servers/prod1/plan", f"csrf={token}&component=nginx&operation=install&allow_draft=1", cookie)
+            self.request("POST", "/servers/ubuntu24/plan", f"csrf={token}&component=nginx&operation=remove&allow_draft=1", cookie)
+        self.assertEqual([c.args[2] for c in make.call_args_list], [False, False])
+
+    def test_more_than_one_selection_is_refused_before_planning(self):
+        cookie = self.login()
+        token = self.csrf(cookie)
+        bodies = (f"csrf={token}&component=nginx&component=git&operation=install",
+                  f"csrf={token}&component=nginx&operation=install&operation=remove",
+                  f"csrf={token}&operation=install",
+                  f"csrf={token}&component=nosuchapp&operation=install",
+                  f"csrf={token}&component=nginx&operation=format")
+        with mock.patch("bridge.components.run.make_plan") as make:
+            for body in bodies:
+                with self.subTest(body=body):
+                    response, page_body = self.request("POST", "/servers/ubuntu24/plan", body, cookie)
+                    self.assertEqual(response.status, 400)
+                    self.assertIn('href="/servers/ubuntu24/apps"', page_body)
+            response, _ = self.request("POST", "/servers/nope/plan", bodies[0].replace("&component=git", ""), cookie)
+            self.assertEqual(response.status, 400)
+        make.assert_not_called()
+
+    def test_planning_error_keeps_the_backend_reason(self):
+        cookie = self.login()
+        token = self.csrf(cookie)
+        error = __import__("bridge.components.run", fromlist=["RunError"]).RunError(
+            "Planning failed (exit 3).", ["The clock on ubuntu24 is 456 s behind this computer (limit 300 s)."])
+        with mock.patch("bridge.components.run.make_plan", side_effect=error):
+            response, body = self.request("POST", "/servers/ubuntu24/plan",
+                                          f"csrf={token}&component=git&operation=install", cookie)
+        self.assertEqual(response.status, 400)
+        self.assertIn("456 s behind this computer", body)
+        self.assertIn('href="/servers/ubuntu24/apps"', body)
+
+    def test_blocked_plan_shows_reasons_and_offers_no_approval(self):
+        cookie = self.login()
+        plan = self.plan(["hestia"], [], action="BLOCKED",
+                         reasons=["Not a fresh server: nginx is installed.", "Removal is not offered for panels."])
+        check = {"issues": ["Nothing in the plan is runnable."], "passed": False,
+                 "verification_only": False, "requires_approval": False}
+        with mock.patch.object(App, "check", return_value=(b"{}", plan, None, [], check)):
+            response, body = self.request("GET", f"/plans/{self.PLAN_ID}", cookie=cookie)
+        self.assertEqual(response.status, 200)
+        self.assertIn("Not a fresh server: nginx is installed.", body)
+        self.assertIn("Removal is not offered for panels.", body)
+        self.assertIn("Nothing in this plan can run on <b>ubuntu24</b>", body)
+        self.assertIn("Nothing in the plan is runnable.", body)
+        self.assertNotIn("/approve", body)
+        self.assertNotIn(f"/plans/{self.PLAN_ID}/apply", body)
+        self.assertIn('href="/servers/ubuntu24/apps"', body)
+
+    def test_runnable_plan_still_needs_approval_then_a_separate_apply(self):
+        cookie = self.login()
+        plan = self.plan(["git"], ["git"])
+        check = {"issues": [], "passed": True, "verification_only": False, "requires_approval": True}
+        with mock.patch.object(App, "check", return_value=(b"{}", plan, None, [], check)):
+            response, body = self.request("GET", f"/plans/{self.PLAN_ID}", cookie=cookie)
+        self.assertIn(f'action="/plans/{self.PLAN_ID}/approve"', body)
+        self.assertIn('name="reviewed" value="1" required', body, "decision 3a: tick to approve")
+        self.assertNotIn('name="confirm"', body, "no typed APPROVE in the web UI")
+        self.assertIn("<dt>Server</dt><dd>ubuntu24</dd>", body)
+        self.assertIn("<dt>Runs</dt><dd>git</dd>", body)
+        self.assertNotIn(f'action="/plans/{self.PLAN_ID}/apply"', body, "Apply only after approval")
+
+    def test_approve_needs_the_ticked_box(self):
+        cookie = self.login()
+        token = self.csrf(cookie)
+        with mock.patch.object(App, "approve", return_value={}) as approve:
+            self.request("POST", f"/plans/{self.PLAN_ID}/approve", f"csrf={token}&reviewed=1&name_git=git", cookie)
+            self.request("POST", f"/plans/{self.PLAN_ID}/approve", f"csrf={token}&confirm=APPROVE", cookie)
+        typed = [c.args[2] for c in approve.call_args_list]
+        self.assertEqual(typed[0], {"git": "git", "_confirm": "APPROVE"})
+        self.assertEqual(typed[1]["_confirm"], "", "typing APPROVE without the box confirms nothing")
+
+    def test_another_users_approval_is_shown_but_not_offered(self):
+        cookie = self.login()
+        plan = self.plan(["git"], ["git"])
+        check = {"issues": [], "passed": True, "verification_only": False, "requires_approval": True}
+        folder = Path(os.environ["XDG_STATE_HOME"]) / "developer-server-setup-assistant/approvals" / self.PLAN_ID
+        folder.mkdir(parents=True)
+        (folder / "approval.json").write_text(json.dumps({"approved_by": "bob"}))
+        with mock.patch.object(App, "check", return_value=(b"{}", plan, None, [], check)):
+            response, body = self.request("GET", f"/plans/{self.PLAN_ID}", cookie=cookie)
+        self.assertIn("Approved by <b>bob</b>; only bob can apply it.", body)
+        self.assertNotIn(f'action="/plans/{self.PLAN_ID}/apply"', body)
+        (folder / "approval.json").write_text(json.dumps({"approved_by": "alice"}))
+        with mock.patch.object(App, "check", return_value=(b"{}", plan, None, [], check)):
+            response, body = self.request("GET", f"/plans/{self.PLAN_ID}", cookie=cookie)
+        self.assertIn(f'action="/plans/{self.PLAN_ID}/apply"', body)
+
+    def test_catalog_pages_need_login(self):
+        for path in ("/servers", "/servers/ubuntu24/apps", "/batch"):
+            response, _ = self.request("GET", path)
+            self.assertEqual((response.status, response.getheader("Location")), (303, "/login"))
+        response, _ = self.request("POST", "/servers/ubuntu24/plan", "component=git&operation=install")
+        self.assertEqual(response.getheader("Location"), "/login")
+
+
 class JobTests(unittest.TestCase):
 
     def test_typed_input_reaches_the_terminal_and_markers_are_hidden(self):
@@ -269,6 +532,363 @@ class EnrolTests(unittest.TestCase):
             with self.subTest(host=host, port=port, user=user), self.assertRaises(enrol.EnrolError):
                 enrol.enrol("web1", host, port, user, "pw", "x", [], self.key, self.base / "k",
                             self.base / "i.json", runner=self.runner)
+
+
+class TemporaryAccessTests(unittest.TestCase):
+    """Requirements item 2: a key for this setup only (decided 2026-11-25).
+    The server side runs in a local shell with a throwaway HOME."""
+
+    FP = "SHA256:" + "A" * 43
+    KEYS = [{"fingerprint": FP, "line": "203.0.113.5 ssh-ed25519 AAAAhostkey", "type": "ssh-ed25519"}]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.home = self.base / "server-home"
+        (self.home / ".ssh").mkdir(parents=True, mode=0o700)
+        self.keys_file = self.home / ".ssh/authorized_keys"
+        self.keys_file.write_text("ssh-ed25519 AAAAexisting someone@laptop\n")
+        self.calls, self.client, self.fail_key_login = [], "192.0.2.7 51234 22", False
+
+    def runner(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        if argv[0] != "ssh":
+            return __import__("subprocess").run(argv, **kwargs)
+        if self.fail_key_login and "BatchMode=yes" in argv:
+            return mock.Mock(returncode=255, stdout="", stderr="Permission denied")
+        env = dict(os.environ, HOME=str(self.home), SSH_CLIENT=self.client)
+        return __import__("subprocess").run(["bash", "-c", argv[-1]], env=env, capture_output=True, text=True)
+
+    def connect(self, folder="t/tmp1"):
+        return enrol.temporary_access("tmp1", "203.0.113.5", 22, "deploy", "the-password", self.FP, self.KEYS,
+                                      self.base / folder, "alice", runner=self.runner, now=lambda: 1_800_000_000)
+
+    def test_key_line_expires_is_limited_and_is_removed_again(self):
+        meta = self.connect()
+        folder = self.base / "t/tmp1"
+        line = self.keys_file.read_text().splitlines()[-1]
+        expected = time.strftime("%Y%m%d%H%M", time.localtime(1_800_000_000 + 3600))
+        self.assertTrue(line.startswith(f'expiry-time="{expected}",from="192.0.2.7",no-port-forwarding,'
+                                        'no-agent-forwarding,no-X11-forwarding ssh-ed25519 '), line)
+        self.assertTrue(line.endswith(" " + meta["tag"]))
+        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
+        self.assertEqual(sorted(p.name for p in folder.iterdir()),
+                         ["inventory.json", "key", "key.pub", "known_hosts", "meta.json"])
+        entry = json.loads((folder / "inventory.json").read_text())["servers"][0]
+        self.assertEqual((entry["target_id"], entry["ssh_key"]), ("tmp1", str(folder / "key")))
+        self.assertIn("203.0.113.5 ssh-ed25519 AAAAhostkey", (folder / "known_hosts").read_text())
+        for argv, kwargs in self.calls:
+            self.assertNotIn("the-password", " ".join(argv), "never on a command line")
+        for path in folder.rglob("*"):
+            self.assertNotIn("the-password", path.read_text(errors="replace"))
+        self.assertTrue(enrol.end_temporary_access(folder, runner=self.runner))
+        self.assertEqual(self.keys_file.read_text(), "ssh-ed25519 AAAAexisting someone@laptop\n")
+        self.assertFalse(folder.exists())
+
+    def test_no_client_address_installs_nothing(self):
+        self.client = ""
+        with self.assertRaises(enrol.EnrolError):
+            self.connect()
+        self.assertEqual(self.keys_file.read_text(), "ssh-ed25519 AAAAexisting someone@laptop\n")
+        self.assertFalse((self.base / "t/tmp1").exists())
+
+    def test_key_login_failure_removes_the_line(self):
+        self.fail_key_login = True
+        with self.assertRaisesRegex(enrol.EnrolError, "key login does not work"):
+            self.connect()
+        self.assertEqual(self.keys_file.read_text(), "ssh-ed25519 AAAAexisting someone@laptop\n",
+                         "removed through the password session")
+        self.assertFalse((self.base / "t/tmp1").exists())
+
+    def test_failed_removal_keeps_the_folder_for_a_retry(self):
+        self.connect()
+        folder = self.base / "t/tmp1"
+        self.fail_key_login = True
+        self.assertFalse(enrol.end_temporary_access(folder, runner=self.runner))
+        self.assertTrue((folder / "meta.json").exists())
+        enrol.discard_temporary_access(folder)
+        self.assertFalse(folder.exists())
+
+    def test_unconfirmed_fingerprint_and_bad_names_are_refused(self):
+        with self.assertRaises(enrol.EnrolError):
+            enrol.temporary_access("tmp1", "203.0.113.5", 22, "deploy", "pw", "SHA256:" + "B" * 43, self.KEYS,
+                                   self.base / "t/x", "alice", runner=self.runner)
+        with self.assertRaises(enrol.EnrolError):
+            enrol.temporary_access("Bad Name", "203.0.113.5", 22, "deploy", "pw", self.FP, self.KEYS,
+                                   self.base / "t/y", "alice", runner=self.runner)
+        self.assertEqual(self.calls, [])
+
+
+class FakeJobs:
+    def __init__(self):
+        self.started = []
+
+    def start(self, job):
+        self.started.append(job)
+        return job
+
+    def recent(self, limit=20):
+        return []
+
+    def get(self, job_id):
+        return None
+
+
+class TemporaryServerTests(HttpBase):
+    """The web UI side of item 2: pages, ownership, cleanup."""
+
+    def setUp(self):
+        super().setUp()
+        self.app.users.add("bob", "another long password")
+        state = tempfile.TemporaryDirectory()
+        self.addCleanup(state.cleanup)
+        patcher = mock.patch.dict(os.environ, {"XDG_STATE_HOME": state.name, "DSSA_SSH_KEY": "/operator/key"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name, value in (("list_targets", []),):
+            patcher = mock.patch(f"bridge.components.run.{name}", return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.removed = []
+        patcher = mock.patch("bridge.webui.enrol.end_temporary_access", side_effect=self.fake_end)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.end_result = True
+
+    def fake_end(self, folder, runner=None):
+        self.removed.append(Path(folder).name)
+        if self.end_result:
+            __import__("shutil").rmtree(folder, ignore_errors=True)
+        return self.end_result
+
+    @staticmethod
+    def fake_access(name, host, port, user, password, fingerprint, keys, folder, owner, lab, window):
+        folder = Path(folder)
+        folder.mkdir(parents=True, mode=0o700)
+        entry = {"target_id": name, "host": host, "ssh_user": user, "ssh_port": port,
+                 "ssh_key": str(folder / "key"), "platform": "linux", "enabled": True, "lab": lab}
+        meta = {"target_id": name, "owner": owner, "tag": "dssa-temp-" + "0" * 16, "created": int(time.time()),
+                "expires": int(time.time()) + window, "host": host, "entry": entry}
+        (folder / "meta.json").write_text(json.dumps(meta))
+        return meta
+
+    def login_as(self, user, password):
+        response, _ = self.request("POST", "/login", f"user={user}&password={password.replace(' ', '+')}")
+        return response.getheader("Set-Cookie").split(";")[0]
+
+    def token(self, cookie):
+        return re.search(r'name="csrf" value="([^"]+)"', self.request("GET", "/servers/add", cookie=cookie)[1]).group(1)
+
+    def connect(self, cookie, save=False):
+        token = self.token(cookie)
+        keys = [{"fingerprint": "SHA256:" + "A" * 43, "line": "203.0.113.5 ssh-ed25519 AAAA", "type": "ssh-ed25519"}]
+        with mock.patch("bridge.webui.enrol.scan", return_value=keys):
+            _, body = self.request("POST", "/servers/scan", f"csrf={token}&name=tmp1&host=203.0.113.5&port=22&user=deploy"
+                                   + ("&save=1" if save else "") + "&lab=1", cookie)
+        pending = re.search(r'name="pending" value="([^"]+)"', body).group(1)
+        with mock.patch("bridge.webui.enrol.temporary_access", side_effect=self.fake_access) as temp, \
+             mock.patch("bridge.webui.enrol.enrol", return_value={"target_id": "tmp1", "host": "203.0.113.5"}) as saved:
+            response, _ = self.request("POST", "/servers/enrol",
+                                       f"csrf={token}&pending={pending}&fingerprint=SHA256%3A{'A' * 43}&password=pw", cookie)
+        return response, body, temp, saved
+
+    def wait_until(self, predicate):
+        deadline = time.time() + 5
+        while not predicate() and time.time() < deadline:
+            time.sleep(0.02)
+        return predicate()
+
+    def test_add_server_offers_saving_unticked(self):
+        cookie = self.login()
+        _, body = self.request("GET", "/servers/add", cookie=cookie)
+        self.assertIn('name="save" value="1"> Save this server for future use', body)
+        self.assertNotIn('name="save" value="1" checked', body)
+
+    def test_not_saving_connects_for_this_setup_only(self):
+        cookie = self.login()
+        response, body, temp, saved = self.connect(cookie)
+        self.assertIn("used once to install a key for this setup only", body)
+        self.assertEqual(response.getheader("Location"), "/servers/tmp1/apps")
+        temp.assert_called_once()
+        saved.assert_not_called()
+        self.assertEqual(temp.call_args.args[-1], 3600, "60-minute window")
+        self.assertFalse(self.config.inventory.exists(), "no inventory entry")
+        self.assertIn('"action": "temp_access_created"', self.config.audit.read_text())
+        self.assertNotIn("pw", [json.loads(l).get("password") for l in self.config.audit.read_text().splitlines()])
+        _, body = self.request("GET", "/", cookie=cookie)
+        self.assertIn("This setup only", body)
+        self.assertIn('action="/servers/tmp1/end"', body)
+        _, body = self.request("GET", "/servers", cookie=cookie)
+        self.assertNotIn("tmp1", body, "not a saved server")
+
+    def test_ticking_save_keeps_todays_enrolment(self):
+        cookie = self.login()
+        response, body, temp, saved = self.connect(cookie, save=True)
+        self.assertIn("used once to install the master", body)
+        saved.assert_called_once()
+        temp.assert_not_called()
+        self.assertEqual(response.getheader("Location"), "/servers/tmp1")
+
+    def test_only_the_owner_sees_and_uses_it(self):
+        cookie = self.login()
+        self.connect(cookie)
+        other = self.login_as("bob", "another long password")
+        _, body = self.request("GET", "/", cookie=other)
+        self.assertNotIn("tmp1", body)
+        response, _ = self.request("GET", "/servers/tmp1/apps", cookie=other)
+        self.assertEqual(response.status, 404)
+        with mock.patch("bridge.components.run.make_plan") as make:
+            response, _ = self.request("POST", "/servers/tmp1/plan",
+                                       f"csrf={self.token(other)}&component=git&operation=install", other)
+            self.assertEqual(response.status, 400)
+            with self.assertRaisesRegex(Exception, "another user's temporary server"):
+                self.app.make_plans("bob", ["tmp1"], ["git"], "install", False)
+        make.assert_not_called()
+        response, _ = self.request("POST", "/servers/tmp1/end", f"csrf={self.token(other)}", other)
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.removed, [])
+
+    def test_planning_uses_its_own_inventory_known_hosts_and_key(self):
+        cookie = self.login()
+        self.connect(cookie)
+        folder = self.config.home / "temporary/tmp1"
+        plan = {"plan_id": "11111111-2222-4333-8444-555555555555"}
+        with mock.patch("bridge.components.run.make_plan", return_value=(b"{}", plan)) as make, \
+             mock.patch("bridge.components.run.save_plan"):
+            response, _ = self.request("POST", "/servers/tmp1/plan",
+                                       f"csrf={self.token(cookie)}&component=git&operation=install", cookie)
+        self.assertEqual(response.status, 303)
+        make.assert_called_once_with("tmp1", ["git"], False, str(folder / "inventory.json"), "install", False,
+                                     known_hosts=str(folder / "known_hosts"))
+        env = self.app.env("tmp1")
+        self.assertEqual(env["DSSA_INVENTORY_FILE"], str(folder / "inventory.json"))
+        self.assertEqual(env["DSSA_KNOWN_HOSTS"], str(folder / "known_hosts"))
+        self.assertNotIn("DSSA_SSH_KEY", env, "the operator's key would override the temporary one")
+        from bridge.components import run as run_module
+        self.assertNotIn("DSSA_SSH_KEY", run_module._env("inv", "kh"))
+        self.assertEqual(run_module._env("inv")["DSSA_SSH_KEY"], "/operator/key", "saved servers unchanged")
+
+    def test_end_access_and_sign_out_remove_the_key(self):
+        cookie = self.login()
+        self.connect(cookie)
+        response, _ = self.request("POST", "/servers/tmp1/end", f"csrf={self.token(cookie)}", cookie)
+        self.assertEqual(response.getheader("Location"), "/")
+        self.assertEqual(self.removed, ["tmp1"])
+        self.assertNotIn("tmp1", self.app.temporary)
+        self.connect(cookie)
+        self.request("POST", "/logout", f"csrf={self.token(cookie)}", cookie)
+        self.assertTrue(self.wait_until(lambda: "tmp1" not in self.app.temporary))
+        self.assertEqual(self.removed, ["tmp1", "tmp1"])
+        self.assertIn('"reason": "signed out"', self.config.audit.read_text())
+
+    def test_sweeper_ends_access_near_expiry_or_without_a_session(self):
+        cookie = self.login()
+        self.connect(cookie)
+        self.app.sweep_temporary({"alice"})
+        self.assertIn("tmp1", self.app.temporary, "fresh and signed in: kept")
+        self.app.temporary["tmp1"]["expires"] = time.time() + 60
+        self.app.sweep_temporary({"alice"})
+        self.assertNotIn("tmp1", self.app.temporary, "within 5 minutes of expiry: ended")
+        self.connect(cookie)
+        self.app.sweep_temporary(set())
+        self.assertNotIn("tmp1", self.app.temporary, "owner signed out: ended")
+
+    def test_failed_removal_is_kept_until_expiry_then_discarded(self):
+        cookie = self.login()
+        self.connect(cookie)
+        self.end_result = False
+        self.assertFalse(self.app.end_temporary("alice", "tmp1", "test"))
+        self.assertIn("tmp1", self.app.temporary)
+        self.assertIn('"action": "temp_access_remove_failed"', self.config.audit.read_text())
+        self.app.temporary["tmp1"]["expires"] = time.time() - 1
+        self.assertTrue(self.app.end_temporary("alice", "tmp1", "test"))
+        self.assertFalse((self.config.home / "temporary/tmp1").exists())
+        self.assertIn('"action": "temp_access_expired"', self.config.audit.read_text())
+
+    def test_a_restart_finds_leftover_access_and_the_sweep_ends_it(self):
+        cookie = self.login()
+        self.connect(cookie)
+        restarted = App(self.config)
+        self.assertIn("tmp1", restarted.temporary)
+        restarted.sweep_temporary(restarted.sessions.active_users())
+        self.assertNotIn("tmp1", restarted.temporary)
+        self.assertEqual(self.removed, ["tmp1"])
+
+    def test_a_successful_run_ends_access_and_a_failed_one_keeps_it(self):
+        cookie = self.login()
+        self.connect(cookie)
+        self.app.jobs = FakeJobs()
+        plan = {"target": {"target_id": "tmp1", "host_key_sha256": "SHA256:x"}}
+        check = {"passed": True, "requires_approval": True, "verification_only": False, "issues": []}
+        with mock.patch.object(App, "check", return_value=(b"{}", plan, Path("/x"), set(), check)), \
+             mock.patch("bridge.components.run.check_login", return_value=0) as login, \
+             mock.patch("bridge.webui.app.consume_approval"), \
+             mock.patch("bridge.webui.app.approver", return_value="alice"), \
+             mock.patch("pathlib.Path.read_bytes", return_value=b"{}"):
+            job = self.app.start_apply("alice", "11111111-2222-4333-8444-555555555555")
+            with self.assertRaisesRegex(Exception, "another user's temporary server"):
+                self.app.start_apply("bob", "11111111-2222-4333-8444-555555555555")
+        self.assertEqual(login.call_args.kwargs, {"known_hosts": str(self.config.home / "temporary/tmp1/known_hosts")})
+        job.on_finish(mock.Mock(code=4))
+        time.sleep(0.2)
+        self.assertIn("tmp1", self.app.temporary, "kept for Report and Resume rollback")
+        job.on_finish(mock.Mock(code=0))
+        self.assertTrue(self.wait_until(lambda: "tmp1" not in self.app.temporary))
+
+    def test_only_the_owner_sees_its_plans_and_runs(self):
+        """Lab finding (items 2–3, step 10): another user could open the plan page."""
+        plan_id = "11111111-2222-4333-8444-555555555555"
+        cookie = self.login()
+        self.connect(cookie)
+        with mock.patch("bridge.components.run.make_plan", return_value=(b"{}", {"plan_id": plan_id})), \
+             mock.patch("bridge.components.run.save_plan"):
+            self.app.make_plans("alice", ["tmp1"], ["git"], "install", False)
+        other = self.login_as("bob", "another long password")
+        plan = {"target": {"target_id": "tmp1", "host_key_sha256": "SHA256:x"}, "steps": [], "operation": "install"}
+        check = {"passed": True, "requires_approval": True, "verification_only": False, "issues": []}
+        with mock.patch.object(App, "check", return_value=(b"{}", plan, Path("/x"), set(), check)):
+            response, body = self.request("GET", f"/plans/{plan_id}", cookie=other)
+        self.assertEqual(response.status, 404)
+        self.assertNotIn("tmp1", body)
+        run = mock.Mock(id="0123456789abcdef", target="tmp1", plan_id=plan_id, user="alice", finished=None)
+        self.app.jobs = mock.Mock(get=lambda job_id: run, recent=lambda limit=20: [run])
+        response, _ = self.request("GET", "/jobs/0123456789abcdef", cookie=other)
+        self.assertEqual(response.status, 404)
+        response, _ = self.request("GET", "/jobs/0123456789abcdef/poll?offset=0", cookie=other)
+        self.assertEqual(response.status, 404)
+        self.assertNotIn("0123456789abcdef", self.request("GET", "/jobs", cookie=other)[1])
+        self.assertTrue(self.app.may_see("alice", "tmp1", plan_id))
+        # After access ends the plan stays its owner's.
+        self.app.temporary.pop("tmp1")
+        self.assertTrue(self.app.may_see("alice", "tmp1", plan_id))
+        self.assertFalse(self.app.may_see("bob", "tmp1", plan_id))
+        self.assertFalse(self.app.may_see("bob", "tmp1", None, "alice"))
+        with mock.patch.object(App, "targets", return_value=[{"target_id": "web1"}]):
+            self.assertTrue(self.app.may_see("bob", "web1", plan_id), "saved servers stay shared")
+
+    def test_only_the_user_who_started_a_run_types_into_it(self):
+        """Lab finding (items 2–3): anyone signed in could answer another run's sudo prompt."""
+        run = mock.Mock(id="0123456789abcdef", target="web1", plan_id="p", user="alice", finished=None)
+        self.app.jobs = mock.Mock(get=lambda job_id: run, recent=lambda limit=20: [run])
+        with mock.patch.object(App, "targets", return_value=[{"target_id": "web1"}]):
+            other = self.login_as("bob", "another long password")
+            response, body = self.request("POST", "/jobs/0123456789abcdef/input",
+                                          f"csrf={self.token(other)}&line=secret", other)
+            self.assertEqual(response.status, 400)
+            self.assertIn("Only alice, who started this run, can type into it.", body)
+            run.send.assert_not_called()
+            cookie = self.login()
+            response, _ = self.request("POST", "/jobs/0123456789abcdef/input",
+                                       f"csrf={self.token(cookie)}&line=pw", cookie)
+            self.assertEqual(response.status, 200)
+            run.send.assert_called_once_with("pw")
+
+    def test_logout_is_audited(self):
+        cookie = self.login()
+        self.request("POST", "/logout", f"csrf={self.token(cookie)}", cookie)
+        self.assertIn('"action": "logout"', self.config.audit.read_text())
+
 
 
 if __name__ == "__main__":

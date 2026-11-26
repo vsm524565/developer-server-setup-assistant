@@ -195,11 +195,12 @@ def valid_variant:
        | all(.steps[]; (.type != "apt_vendor_repository" or $m == "apt")
                        and (.type != "dnf_vendor_repository" or $m == "dnf")));
 
-only(["schema_version","id","display_name","category","depends_on","variants"])
+only(["schema_version","id","display_name","description","category","depends_on","variants"])
 and has_all(["schema_version","id","display_name","category","depends_on","variants"])
 and .schema_version == "1.0"
 and (.id | str(id_re))
 and (.display_name | type == "string" and length > 0)
+and ((has("description") | not) or (.description | type == "string" and length > 0 and length <= 160))
 and (.category | type == "string" and length > 0)
 and (.depends_on | type == "array"
      and all(.[]; only(["id","required"]) and (.id | str(id_re))

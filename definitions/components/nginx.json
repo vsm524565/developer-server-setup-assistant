@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "nginx",
   "display_name": "Nginx",
+  "description": "Nginx web server and reverse proxy. Needs ports 80 and 443 free.",
   "category": "webserver",
   "depends_on": [],
   "variants": [

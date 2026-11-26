@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "haproxy",
   "display_name": "HAProxy",
+  "description": "HAProxy load balancer and proxy, with the packaged default config.",
   "category": "proxy_ssl",
   "depends_on": [],
   "variants": [

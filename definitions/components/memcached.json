@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "memcached",
   "display_name": "Memcached",
+  "description": "Memcached in-memory cache, listening on localhost only.",
   "category": "cache",
   "depends_on": [],
   "variants": [

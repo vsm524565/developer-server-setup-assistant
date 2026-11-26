@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "cloudpanel",
   "display_name": "CloudPanel",
+  "description": "Free control panel for PHP, Node.js and Python sites. Takes over the whole server.",
   "category": "control_panel",
   "depends_on": [],
   "variants": [

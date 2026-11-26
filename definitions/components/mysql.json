@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "mysql",
   "display_name": "MySQL",
+  "description": "MySQL database server. Conflicts with MariaDB.",
   "category": "database",
   "depends_on": [],
   "variants": [

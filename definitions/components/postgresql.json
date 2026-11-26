@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "postgresql",
   "display_name": "PostgreSQL",
+  "description": "PostgreSQL database server, listening on localhost only.",
   "category": "database",
   "depends_on": [],
   "variants": [

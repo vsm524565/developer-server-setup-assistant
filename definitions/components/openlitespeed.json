@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "openlitespeed",
   "display_name": "OpenLiteSpeed",
+  "description": "OpenLiteSpeed web server with its admin console on port 7080.",
   "category": "webserver",
   "depends_on": [],
   "variants": [

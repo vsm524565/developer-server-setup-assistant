@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "python",
   "display_name": "Python 3 tooling",
+  "description": "Python 3 with venv and pip.",
   "category": "runtime",
   "depends_on": [],
   "variants": [

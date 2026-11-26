@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "redis",
   "display_name": "Redis (Valkey on EL 10)",
+  "description": "Redis in-memory data store (Valkey on EL 10), listening on localhost only.",
   "category": "database",
   "depends_on": [],
   "variants": [

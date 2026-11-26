@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "git",
   "display_name": "Git",
+  "description": "Git version control.",
   "category": "tool",
   "depends_on": [],
   "variants": [

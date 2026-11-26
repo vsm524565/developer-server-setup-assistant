@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "directadmin",
   "display_name": "DirectAdmin",
+  "description": "Licensed hosting control panel; the licence key is entered in its own web page.",
   "category": "control_panel",
   "depends_on": [],
   "variants": [

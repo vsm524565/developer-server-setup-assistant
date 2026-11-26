@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "apache",
   "display_name": "Apache HTTP Server",
+  "description": "The Apache web server. Needs ports 80 and 443 free.",
   "category": "webserver",
   "depends_on": [],
   "variants": [

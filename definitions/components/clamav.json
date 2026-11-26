@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "clamav",
   "display_name": "ClamAV (with signature updates)",
+  "description": "ClamAV virus scanner with automatic signature updates (no scanning daemon).",
   "category": "system",
   "depends_on": [],
   "variants": [

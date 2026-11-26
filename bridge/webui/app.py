@@ -49,6 +49,18 @@ TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 COMPONENT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 OPERATIONS = ("install", "update", "remove", "adopt")
 STATIC = Path(__file__).with_name("static")
+RECORD_TTL = 60  # seconds an install record read is reused for the catalog page
+TEMP_WINDOW = 3600  # requirements item 2, decision 2b: temporary access lasts 60 minutes
+TEMP_MARGIN = 300   # end temporary access this long before its key expires
+CATEGORY_LABELS = {
+    "webserver": "Web servers", "database": "Databases", "cache": "Caches",
+    "runtime": "Runtimes", "proxy_ssl": "Proxies and TLS", "container": "Containers",
+    "control_panel": "Control panels", "system": "System", "tool": "Tools",
+}
+# What the catalog offers for one application (the planner still decides).
+RECORDED_OPERATIONS = ("update", "remove")
+UNRECORDED_OPERATIONS = ("install", "adopt")
+OPERATION_LABELS = {"install": "Install", "update": "Update", "remove": "Remove", "adopt": "Adopt (let DSSA manage it)"}
 
 
 def esc(value):
@@ -76,6 +88,10 @@ class App:
         self.jobs = jobs or Jobs()
         self.pending = {}   # host-key scans awaiting confirmation, by token
         self.batches = {}   # batch id -> {"plans": [...], "user", "jobs": [], "state"}
+        self.records = {}   # target -> (read at, record) for the catalog page
+        self.temporary = {}  # target -> meta of a temporary server (item 2), from <home>/temporary
+        self.plan_owners = {}  # plan ID -> user, for plans on a temporary server
+        self.load_temporary()
         self.lock = threading.Lock()
 
     # --- helpers --------------------------------------------------------------
@@ -88,29 +104,192 @@ class App:
         with os.fdopen(fd, "a") as handle:
             handle.write(line + "\n")
 
-    def inventory(self):
+    def inventory(self, target=None):
+        temp = self.temporary.get(target)
+        if temp:
+            return str(self.temp_dir(target) / "inventory.json")
         return str(self.config.inventory)
 
+    def access(self, target):
+        """Extra arguments for the run helpers: a temporary server's own known_hosts."""
+
+        if target in self.temporary:
+            return {"known_hosts": str(self.temp_dir(target) / "known_hosts")}
+        return {}
+
+    # --- temporary servers (requirements item 2) ----------------------------------
+
+    def temp_dir(self, target):
+        return self.config.home / "temporary" / target
+
+    def load_temporary(self):
+        root = self.config.home / "temporary"
+        if not root.is_dir():
+            return
+        for folder in sorted(root.iterdir()):
+            try:
+                meta = json.loads((folder / "meta.json").read_text())
+            except (OSError, ValueError):
+                continue
+            if meta.get("target_id") == folder.name:
+                self.temporary[folder.name] = meta
+
+    def temporary_of(self, user):
+        return sorted((m for m in self.temporary.values() if m["owner"] == user), key=lambda m: m["target_id"])
+
+    def add_temporary(self, user, pending, password, fingerprint):
+        name = pending["name"]
+        if not TARGET_RE.fullmatch(name or ""):
+            raise ValueError("Invalid server name (lower case letters, digits, _ and -).")
+        with self.lock:
+            taken = name in self.temporary or any(t["target_id"] == name for t in self.targets())
+        if taken:
+            raise ValueError(f"A server named {name} already exists.")
+        meta = enrolment.temporary_access(name, pending["host"], pending["port"], pending["user"], password,
+                                          fingerprint, pending["keys"], self.temp_dir(name), user,
+                                          pending["lab"], TEMP_WINDOW)
+        with self.lock:
+            self.temporary[name] = meta
+        self.audit(user, "temp_access_created", target=name, host=meta["host"], fingerprint=fingerprint,
+                   expires=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(meta["expires"])))
+        return meta
+
+    def require_owner(self, user, target):
+        """A temporary server is its owner's only: planning, approval, apply,
+        report and resume all refuse anyone else."""
+
+        meta = self.temporary.get(target)
+        if meta is not None and meta["owner"] != user:
+            raise ApprovalError(f"{target} is another user's temporary server.")
+
+    def may_see(self, user, target, plan_id=None, run_by=None):
+        """Plans and runs on saved servers are shared with every signed-in
+        user. A temporary server's are its owner's only, also after its access
+        has ended (lab finding, items 2–3 step 10)."""
+
+        meta = self.temporary.get(target)
+        if meta is not None:
+            return meta["owner"] == user
+        if any(entry["target_id"] == target for entry in self.targets()):
+            return True
+        return user is not None and (self.plan_owners.get(plan_id) == user or run_by == user)
+
+    def running_on(self, target):
+        return any(j.target == target and j.finished is None for j in self.jobs.recent(1000))
+
+    def end_temporary(self, user, target, reason):
+        """Remove the key line and the private folder. Returns True when done.
+        A run still going keeps its access until it ends."""
+
+        with self.lock:
+            meta = self.temporary.get(target)
+        if meta is None:
+            return True
+        if self.running_on(target):
+            return False
+        # Audit first, then forget it: whoever sees it gone also finds the audit line.
+        if enrolment.end_temporary_access(self.temp_dir(target)):
+            self.audit(user, "temp_access_removed", target=target, reason=reason)
+            with self.lock:
+                self.temporary.pop(target, None)
+                self.records.pop(target, None)
+            return True
+        if time.time() >= meta["expires"]:
+            # The key stopped working at its expiry-time: nothing left to log in with.
+            enrolment.discard_temporary_access(self.temp_dir(target))
+            self.audit(user, "temp_access_expired", target=target, reason=reason)
+            with self.lock:
+                self.temporary.pop(target, None)
+            return True
+        self.audit(user, "temp_access_remove_failed", target=target, reason=reason)
+        return False
+
+    def sweep_temporary(self, active_users=None):
+        """End temporary access near its expiry, or when its owner has no
+        session left (decision 2b: never past the user's session)."""
+
+        now = time.time()
+        for target, meta in list(self.temporary.items()):
+            ending = now >= meta["expires"] - TEMP_MARGIN
+            orphaned = active_users is not None and meta["owner"] not in active_users
+            if ending or orphaned:
+                self.end_temporary(meta["owner"], target, "expiry" if ending else "session ended")
+
     def targets(self):
+        """Saved servers only; temporary ones are never in the inventory."""
         if not self.config.inventory.exists():
             return []
         return run.list_targets(self.inventory())
 
     def host_of(self, target):
+        if target in self.temporary:
+            return self.temporary[target]["host"]
         for entry in self.targets():
             if entry["target_id"] == target:
                 return entry["host"]
         raise run.RunError(f"Unknown server: {target}")
 
-    def env(self):
-        env = dict(os.environ, DSSA_INVENTORY_FILE=self.inventory())
+    def target_entry(self, target, user=None):
+        """A saved server, or the user's own temporary server (with "temporary": meta)."""
+
+        if not TARGET_RE.fullmatch(target or ""):
+            raise ValueError("Invalid server.")
+        meta = self.temporary.get(target)
+        if meta is not None:
+            if user is None or meta["owner"] != user:
+                raise KeyError(f"No saved server named {target}.")
+            return dict(meta["entry"], temporary=meta)
+        for entry in self.targets():
+            if entry["target_id"] == target:
+                return entry
+        raise KeyError(f"No saved server named {target}.")
+
+    def catalog(self):
+        """[{id, name, description, category, label, draft, panels}] sorted by
+        category label, then name. panels: "any" or the panel IDs that own the
+        component (its variants' conflicts.panels, as the planner reads them)."""
+
+        out = []
+        for cid, definition in load_component_definitions(self.config.definitions_dir).items():
+            owners = [v.conflicts.panels for v in definition.variants]
+            panels = "any" if "any" in owners else sorted({p for o in owners for p in o})
+            out.append({"id": cid, "name": definition.display_name, "description": definition.description,
+                        "category": definition.category,
+                        "label": CATEGORY_LABELS.get(definition.category, definition.category),
+                        "draft": all(v.support == "draft" for v in definition.variants),
+                        "panels": panels})
+        return sorted(out, key=lambda a: (a["label"], a["name"].lower()))
+
+    def installed(self, target):
+        """(record or None, reason it is unavailable). Cached briefly: each
+        read is an SSH login to the server."""
+
+        now = time.monotonic()
+        with self.lock:
+            cached = self.records.get(target)
+        if cached and now - cached[0] < RECORD_TTL:
+            return cached[1], None
+        try:
+            record = run.read_record(target, self.inventory(target), **self.access(target))
+        except (run.RunError, OSError, ValueError) as error:
+            return None, str(error)
+        with self.lock:
+            self.records[target] = (now, record)
+        return record, None
+
+    def env(self, target=None):
+        env = dict(os.environ, DSSA_INVENTORY_FILE=self.inventory(target))
+        if target in self.temporary:
+            env["DSSA_KNOWN_HOSTS"] = self.access(target)["known_hosts"]
+            env.pop("DSSA_SSH_KEY", None)
         if self.config.definitions_dir:
             env["DSSA_DEFINITIONS_DIR"] = str(self.config.definitions_dir)
         return env
 
     def check(self, plan_id):
         plan_bytes, plan, path = run.load_plan(plan_id)
-        keys = known_host_fingerprints(self.host_of(plan["target"]["target_id"]))
+        target = plan["target"]["target_id"]
+        keys = known_host_fingerprints(self.host_of(target), **self.access(target))
         return plan_bytes, plan, path, keys, preflight_plan(plan_bytes, keys, definitions_dir=self.config.definitions_dir)
 
     # --- operations -------------------------------------------------------------
@@ -122,21 +301,43 @@ class App:
             raise ValueError("Choose at least one server.")
         if not components or not all(COMPONENT_RE.fullmatch(c) for c in components):
             raise ValueError("Choose at least one component.")
+        for target in targets:
+            self.require_owner(user, target)
         plan_ids = []
         for target in targets:
             # Drafts: lab servers only; dssa-run.sh refuses them elsewhere.
             plan_bytes, plan = run.make_plan(target, components, allow_draft and operation == "install",
-                                             self.inventory(), operation, all_or_nothing)
+                                             self.inventory(target), operation, all_or_nothing,
+                                             **self.access(target))
             run.save_plan(plan_bytes)
             plan_ids.append(plan["plan_id"])
+            if target in self.temporary:
+                with self.lock:
+                    self.plan_owners[plan["plan_id"]] = user
             self.audit(user, "plan", target=target, plan_id=plan["plan_id"], operation=operation,
                        components=components)
         return plan_ids
+
+    def make_single_plan(self, user, target, component, operation, allow_draft=False):
+        """Web UI integration pass 1: exactly one server, one component and
+        one operation, through the same planner as everything else."""
+
+        entry = self.target_entry(target, user)
+        if operation not in OPERATIONS:
+            raise ValueError("Unknown operation.")
+        if component not in {a["id"] for a in self.catalog()}:
+            raise ValueError("Unknown application.")
+        allow_draft = allow_draft and bool(entry.get("lab")) and operation == "install"
+        plan_id = self.make_plans(user, [target], [component], operation, False, allow_draft)[0]
+        with self.lock:
+            self.records.pop(target, None)
+        return plan_id
 
     def approve(self, user, plan_id, typed):
         """typed: {component: name typed, "_confirm": APPROVE}."""
 
         plan_bytes, plan, _, keys, check = self.check(plan_id)
+        self.require_owner(user, plan["target"]["target_id"])
         if check["verification_only"]:
             return None
         for name, _what, _warnings in risky_steps(plan, include_drafts=True):
@@ -152,26 +353,46 @@ class App:
 
         plan_bytes, plan, path, keys, check = self.check(plan_id)
         target = plan["target"]["target_id"]
+        self.require_owner(user, target)
         if not check["passed"] and not check["requires_approval"]:
             raise ApprovalError("Apply refused: the plan failed its checks.", check["issues"])
         if not check["verification_only"]:
-            if run.check_login(target, plan["target"]["host_key_sha256"], self.inventory()) != 0:
+            # Decision 3b (2026-11-25): only the user who approved may apply.
+            # Checked before logging in, so a refusal leaves the approval unused.
+            by = approver(plan_id)
+            if by is not None and by != user:
+                raise ApprovalError(f"Apply refused: {by} approved this plan, so only {by} can apply it. "
+                                    "The approval was not used.")
+            if run.check_login(target, plan["target"]["host_key_sha256"], self.inventory(target),
+                               **self.access(target)) != 0:
                 raise ApprovalError("Apply refused: cannot log in to the server. The approval was not used.")
             consume_approval(plan_id, keys, definitions_dir=self.config.definitions_dir)
             path = default_state_dir() / "approvals" / plan_id / "plan.json"
             plan_bytes = path.read_bytes()
         digest = "sha256:" + hashlib.sha256(plan_bytes).hexdigest()
+        if target in self.temporary:
+            # Item 2: a successful run ends temporary access; after a failure it
+            # stays (until the window ends) so Report and Resume rollback still work.
+            then = on_finish
+
+            def on_finish(job, then=then):
+                if then:
+                    then(job)
+                if job.code == 0:
+                    threading.Thread(target=self.end_temporary, args=(user, target, "run finished"),
+                                     daemon=True).start()
         job = Job("apply", ["bash", str(run.RUN_SCRIPT), "apply", target, str(path), digest],
-                  self.env(), plan_id, target, user, on_finish)
+                  self.env(target), plan_id, target, user, on_finish)
         self.audit(user, "apply", plan_id=plan_id, target=target, job=job.id)
         return self.jobs.start(job)
 
     def start_remote(self, user, kind, plan_id):
         _, plan, _ = run.load_plan(plan_id)
         target, key = plan["target"]["target_id"], plan["target"]["host_key_sha256"]
+        self.require_owner(user, target)
         command = "report" if kind == "report" else "resume-rollback"
         job = Job(kind, ["bash", str(run.RUN_SCRIPT), command, target, plan_id, key],
-                  self.env(), plan_id, target, user)
+                  self.env(target), plan_id, target, user)
         self.audit(user, kind, plan_id=plan_id, target=target, job=job.id)
         return self.jobs.start(job)
 
@@ -220,8 +441,8 @@ class App:
 def page(title, body, session=None):
     nav = ""
     if session:
-        nav = (f'<nav><a href="/">Servers</a> <a href="/servers/add">Add server</a> '
-               f'<a href="/jobs">Runs</a> <span class="user">{esc(session["user"])}</span>'
+        nav = (f'<nav aria-label="Workspace"><a href="/">Workspace</a> <a href="/servers">Saved servers</a> '
+               f'<a href="/servers/add">Add server</a> <a href="/jobs">Runs</a> <span class="user">{esc(session["user"])}</span>'
                f'<form method="post" action="/logout" class="inline">{csrf(session)}'
                f'<button>Log out</button></form></nav>')
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -229,6 +450,41 @@ def page(title, body, session=None):
             f'<title>{esc(title)} · DSSA</title><link rel="stylesheet" href="/static/style.css">'
             f'<script src="/static/app.js" defer></script></head>'
             f'<body>{nav}<main><h1>{esc(title)}</h1>{body}</main></body></html>')
+
+
+def search_text(app):
+    return " ".join((app["id"], app["name"], app["label"], app["description"])).lower()
+
+
+def managed_by(catalog, recorded):
+    """{component: panel names} for components a recorded control panel owns.
+    Only panels in DSSA's install record are known here; the planner also
+    detects panels installed some other way."""
+
+    names = {a["id"]: a["name"] for a in catalog}
+    panels = [a["id"] for a in catalog if a["category"] == "control_panel" and a["id"] in recorded]
+    out = {}
+    for app in catalog:
+        if app["category"] == "control_panel" or not panels:
+            continue
+        owners = panels if app["panels"] == "any" else [p for p in panels if p in app["panels"]]
+        if owners:
+            out[app["id"]] = ", ".join(names[p] for p in owners)
+    return out
+
+
+REVIEWED_BOX = ('<label class="choice"><input type="checkbox" name="reviewed" value="1" required> '
+                'I reviewed the target, operation and warnings.</label>')
+
+
+def approver(plan_id):
+    """Who approved the plan in the web UI, or None (decision 3b)."""
+
+    try:
+        record = json.loads((default_state_dir() / "approvals" / plan_id / "approval.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return record.get("approved_by")
 
 
 def csrf(session):
@@ -311,11 +567,11 @@ class Handler(BaseHTTPRequestHandler):
         self.fields = urllib.parse.parse_qs(self.rfile.read(length).decode(), keep_blank_values=True)
         return {k: v[-1] for k, v in self.fields.items()}
 
-    def fail(self, session, error, back="/"):
+    def fail(self, session, error, back="/", status=HTTPStatus.BAD_REQUEST):
         issues = "".join(f"<li>{esc(i)}</li>" for i in getattr(error, "issues", []) if str(i) != str(error))
-        self.send_html(page("Not done", f'<p class="error">{esc(error)}</p><ul>{issues}</ul>'
+        self.send_html(page("Not done", f'<p class="error" role="alert">{esc(error)}</p><ul>{issues}</ul>'
                                         f'<p><a href="{esc(back)}">Back</a></p>', session),
-                       HTTPStatus.BAD_REQUEST)
+                       status)
 
     # --- GET --------------------------------------------------------------------
 
@@ -352,11 +608,19 @@ class Handler(BaseHTTPRequestHandler):
             return self.redirect("/login")
         try:
             if path == "/":
+                return self.workspace(session)
+            if path == "/batch":
                 return self.home(session)
+            if path == "/servers":
+                return self.saved_servers(session)
             if path == "/servers/add":
                 return self.send_html(page("Add a server", ADD_FORM.format(csrf=csrf(session)), session))
             if path.startswith("/servers/"):
-                return self.server_page(session, path.split("/")[2])
+                parts = path.split("/")
+                if len(parts) == 4 and parts[3] == "apps":
+                    return self.apps_page(session, parts[2], urllib.parse.parse_qs(url.query))
+                if len(parts) == 3:
+                    return self.server_page(session, parts[2])
             if path.startswith("/plans/"):
                 return self.plan_page(session, path.split("/")[2])
             if path.startswith("/batches/"):
@@ -366,9 +630,11 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/jobs/"):
                 parts = path.split("/")
                 if len(parts) == 4 and parts[3] == "poll":
-                    return self.poll(parts[2], urllib.parse.parse_qs(url.query).get("offset", ["0"])[0])
+                    return self.poll(session, parts[2], urllib.parse.parse_qs(url.query).get("offset", ["0"])[0])
                 return self.job_page(session, parts[2])
-        except (run.RunError, ApprovalError, ValueError, KeyError, OSError) as error:
+        except KeyError as error:
+            return self.fail(session, error.args[0] if error.args else error, status=HTTPStatus.NOT_FOUND)
+        except (run.RunError, ApprovalError, ValueError, OSError) as error:
             return self.fail(session, error)
         self.send_html(page("Not found", "", session), HTTPStatus.NOT_FOUND)
 
@@ -379,7 +645,149 @@ class Handler(BaseHTTPRequestHandler):
         self._headers(HTTPStatus.OK, files[name])
         self.wfile.write((STATIC / name).read_bytes())
 
+    def workspace(self, session):
+        body = ('<p class="hint">Resume with a saved server or connect a new one.</p>'
+                '<div class="options">'
+                '<a class="card option" href="/servers"><strong>Saved servers</strong>'
+                '<span class="hint">Choose from your inventory and open its applications.</span></a>'
+                '<a class="card option" href="/servers/add"><strong>Add server</strong>'
+                '<span class="hint">Check a new server\'s host key, then save it or use it for this '
+                'setup only.</span></a>'
+                '</div>')
+        temps = self.app.temporary_of(session["user"])
+        if temps:
+            rows = "".join(
+                f'<tr><td>{esc(m["target_id"])}</td><td><code>{esc(m["host"])}</code></td>'
+                f'<td>{esc(time.strftime("%H:%M UTC", time.gmtime(m["expires"])))}</td>'
+                f'<td><a href="/servers/{esc(m["target_id"])}/apps">Applications &rarr;</a></td>'
+                f'<td><form method="post" action="/servers/{esc(m["target_id"])}/end" class="inline">'
+                f'{csrf(session)}<button>End access</button></form></td></tr>' for m in temps)
+            body += ('<h2>This setup only</h2><p class="hint">Servers you connected without saving. '
+                     'Only you see them.</p><table><tr><th scope="col">Server</th><th scope="col">Host</th>'
+                     f'<th scope="col">Access ends</th><th scope="col">Open</th><th scope="col"></th></tr>{rows}</table>')
+        self.send_html(page("Workspace", body, session))
+
+    def saved_servers(self, session):
+        targets = self.app.targets()
+        if not targets:
+            body = ('<p>No saved servers yet.</p>'
+                    '<p><a class="button" href="/servers/add">Add server</a></p>')
+            return self.send_html(page("Saved servers", body, session))
+        rows = "".join(
+            f'<tr><td><a href="/servers/{esc(t["target_id"])}">{esc(t["target_id"])}</a></td>'
+            f'<td><code>{esc(t["host"])}</code></td><td>{"lab" if t.get("lab") else ""}</td>'
+            f'<td><a href="/servers/{esc(t["target_id"])}/apps" '
+            f'aria-label="Applications on {esc(t["target_id"])}">Applications &rarr;</a></td></tr>'
+            for t in targets)
+        body = ('<p class="hint">Choose a server to browse its applications.</p>'
+                '<table><caption class="visually-hidden">Saved servers</caption>'
+                '<tr><th scope="col">Server</th><th scope="col">Host</th><th scope="col">Kind</th>'
+                f'<th scope="col">Open</th></tr>{rows}</table>'
+                '<p class="hint"><a href="/batch">Batch plan</a> (several servers or applications) '
+                'stays available from the earlier screen.</p>')
+        self.send_html(page("Saved servers", body, session))
+
+    def apps_page(self, session, target, query):
+        entry = self.app.target_entry(target, session["user"])
+        search = (query.get("q") or [""])[-1].strip()[:64]
+        category = (query.get("category") or [""])[-1]
+        chosen = (query.get("app") or [""])[-1]
+        catalog = self.app.catalog()
+        if category not in CATEGORY_LABELS:
+            category = ""
+        record, unavailable = self.app.installed(target)
+        recorded = (record or {}).get("components", {})
+        managed = managed_by(catalog, recorded)
+        needle = search.lower()
+        shown = [a for a in catalog
+                 if (not category or a["category"] == category)
+                 and (not needle or needle in search_text(a))]
+
+        def link(app_id):
+            params = {"app": app_id}
+            if search:
+                params["q"] = search
+            if category:
+                params["category"] = category
+            return f"/servers/{target}/apps?" + urllib.parse.urlencode(params)
+
+        def tags(app):
+            out = ""
+            if app["id"] in recorded:
+                how = recorded[app["id"]].get("how")
+                out += ('<span class="chip ok">Installed (adopted)</span>' if how == "adopted"
+                        else '<span class="chip ok">Installed</span>')
+            if app["id"] in managed:
+                out += f'<span class="chip warn">Managed by {esc(managed[app["id"]])}</span>'
+            if app["draft"]:
+                out += '<span class="chip warn">Draft</span>'
+            return out
+
+        CURRENT = ' aria-current="true"'
+        rows = "".join(
+            f'<li><a class="app-row" href="{esc(link(a["id"]))}" data-search="{esc(search_text(a))}" '
+            f'data-category="{esc(a["category"])}"{CURRENT if a["id"] == chosen else ""}>'
+            f'<span><strong>{esc(a["name"])}</strong> <span class="hint">· {esc(a["label"])}</span>'
+            f'{"<span class=\"desc\">" + esc(a["description"]) + "</span>" if a["description"] else ""}</span>'
+            f'<span class="tags">{tags(a)}</span></a></li>'
+            for a in shown)
+        options = "".join(f'<option value="{esc(k)}"{" selected" if k == category else ""}>{esc(v)}</option>'
+                          for k, v in sorted(CATEGORY_LABELS.items(), key=lambda kv: kv[1]))
+        state = ('<p class="hint">Installed state: from DSSA\'s install record on the server. A control panel '
+                 'installed without DSSA is found when you plan.</p>' if record is not None
+                 else f'<p class="warn" role="status">Installed state unavailable: {esc(unavailable.rstrip("."))}. '
+                      'Every action is offered; the planner checks the server.</p>')
+        filters = (f'<form method="get" action="/servers/{esc(target)}/apps" class="filters" role="search">'
+                   f'<label>Search <input type="search" name="q" value="{esc(search)}" id="app-search" '
+                   f'autocomplete="off"></label>'
+                   f'<label>Category <select name="category" id="app-category"><option value="">All categories</option>'
+                   f'{options}</select></label>'
+                   + (f'<input type="hidden" name="app" value="{esc(chosen)}">' if chosen else "")
+                   + '<button>Filter</button></form>')
+        listing = (f'<ul class="catalog" id="app-list" aria-label="Applications">{rows}</ul>' if rows
+                   else '<p class="hint" id="app-empty">No matching applications.</p>')
+        temp = entry.get("temporary")
+        where = (f' · This setup only, access ends {esc(time.strftime("%H:%M UTC", time.gmtime(temp["expires"])))}'
+                 if temp else " · Saved server")
+        body = (f'<p><a href="{"/" if temp else "/servers"}">&larr; {"Workspace" if temp else "Saved servers"}</a></p>'
+                f'<p>{esc(target)} · <code>{esc(entry["host"])}</code>{" · lab" if entry.get("lab") else ""}{where}</p>'
+                f'{state}<div class="grid"><section class="card">{filters}{listing}</section>'
+                f'<section class="card" aria-live="polite">{self.selection(session, entry, catalog, recorded, record is not None, chosen, managed)}</section></div>')
+        self.send_html(page("Applications", body, session))
+
+    def selection(self, session, entry, catalog, recorded, known, chosen, managed=None):
+        app = next((a for a in catalog if a["id"] == chosen), None)
+        if app is None:
+            return '<h2>Selected application</h2><p class="hint">Choose one application to see its actions.</p>'
+        if not known:
+            operations = OPERATIONS
+        else:
+            operations = RECORDED_OPERATIONS if app["id"] in recorded else UNRECORDED_OPERATIONS
+        radios = "".join(
+            f'<label><input type="radio" name="operation" value="{op}" required{" checked" if i == 0 else ""}> '
+            f'{esc(OPERATION_LABELS[op])}</label>' for i, op in enumerate(operations))
+        notes = ""
+        if app["id"] in (managed or {}):
+            notes = (f'<p class="notice">Managed by {esc(managed[app["id"]])}: use the panel\'s own tools. '
+                     'The planner holds this for review on a panel server.</p>')
+        draft = ""
+        if app["draft"]:
+            draft = ('<p class="warn">Draft component: lab servers only.</p>' + (
+                '<label><input type="checkbox" name="allow_draft" value="1"> allow this draft '
+                '(you type its name again at approval)</label>' if entry.get("lab") else
+                '<p class="hint">This server is not a lab server, so the planner will hold it.</p>'))
+        return (f'<h2>Selected application</h2><h3 id="selected-app" tabindex="-1">{esc(app["name"])}</h3>'
+                f'<p class="hint">{esc(app["label"])} · <code>{esc(app["id"])}</code></p>'
+                f'{"<p>" + esc(app["description"]) + "</p>" if app["description"] else ""}{notes}'
+                f'<form method="post" action="/servers/{esc(entry["target_id"])}/plan">{csrf(session)}'
+                f'<input type="hidden" name="component" value="{esc(app["id"])}">'
+                f'<fieldset><legend>Action (one at a time)</legend>{radios}</fieldset>{draft}'
+                f'<button>Review plan</button>'
+                f'<p class="hint">Planning reads the server and changes nothing. Approval and Apply '
+                f'are separate steps.</p></form>')
+
     def home(self, session):
+        """The earlier multi-server, multi-component form (batches, decision 7), now at /batch."""
         rows = "".join(
             f'<tr><td><a href="/servers/{esc(t["target_id"])}">{esc(t["target_id"])}</a></td>'
             f'<td>{esc(t["host"])}</td><td>{"lab" if t["lab"] else ""}</td>'
@@ -397,18 +805,23 @@ class Handler(BaseHTTPRequestHandler):
                 '<label><input type="checkbox" name="allow_draft" value="1"> allow drafts (lab servers only)</label> '
                 '<button>Make plan</button><p class="hint">Several servers make a batch: one approval, '
                 'applied server by server, stopping at the first failure.</p></form>')
-        self.send_html(page("Servers", body, session))
+        self.send_html(page("Batch plan", body, session))
 
     # Not "server": BaseHTTPRequestHandler.server is the HTTP server itself.
     def server_page(self, session, target):
         if not TARGET_RE.fullmatch(target):
             raise ValueError("Invalid server.")
-        record = run.read_record(target, self.app.inventory())
+        if target in self.app.temporary:
+            self.app.target_entry(target, session["user"])  # the owner only
+            record = run.read_record(target, self.app.inventory(target), **self.app.access(target))
+        else:
+            record = run.read_record(target, self.app.inventory())
         rows = "".join(
             f'<tr><td>{esc(c)}</td><td>{esc(e.get("how"))}</td><td>{esc(e.get("recorded_at"))}</td>'
             f'<td>{esc(", ".join(p["package"] + " " + p["version"] for p in e.get("packages", [])))}</td></tr>'
             for c, e in sorted(record["components"].items()))
-        body = (f'<h2>Installed by DSSA</h2><table><tr><th>Component</th><th>How</th><th>When</th>'
+        body = (f'<p><a href="/servers/{esc(target)}/apps">Applications on {esc(target)} &rarr;</a></p>'
+                f'<h2>Installed by DSSA</h2><table><tr><th>Component</th><th>How</th><th>When</th>'
                 f'<th>Packages</th></tr>{rows or "<tr><td colspan=4>Nothing recorded yet.</td></tr>"}</table>')
         self.send_html(page(target, body, session))
 
@@ -416,10 +829,19 @@ class Handler(BaseHTTPRequestHandler):
         if not PLAN_ID_RE.fullmatch(plan_id):
             raise ValueError("Invalid plan ID.")
         _, plan, _, _, check = self.app.check(plan_id)
+        if not self.app.may_see(session["user"], plan["target"]["target_id"], plan_id=plan_id):
+            raise KeyError("No such plan.")
         approvals = default_state_dir() / "approvals" / plan_id
         approved = (approvals / "approval.json").exists()
         used = (approvals / "consumed").exists()
-        body = plan_table(plan)
+        by = approver(plan_id) if approved else None
+        target = plan["target"]["target_id"]
+        held = [s["component"] for s in plan["steps"] if s["component"] not in plan.get("runnable", [])]
+        body = (f'<dl class="meta"><div><dt>Server</dt><dd>{esc(target)}</dd></div>'
+                f'<div><dt>Operation</dt><dd>{esc(plan["operation"])}</dd></div>'
+                f'<div><dt>Runs</dt><dd>{esc(", ".join(plan.get("runnable", [])) or "nothing")}</dd></div>'
+                f'<div><dt>Held or blocked</dt><dd>{esc(", ".join(held) or "none")}</dd></div></dl>'
+                + plan_table(plan))
         # A plan runs once; after that only its result (Report) makes sense
         # (lab finding, combined test step 12).
         saved = run.runs_dir() / plan_id / "summary.json"
@@ -435,6 +857,9 @@ class Handler(BaseHTTPRequestHandler):
             body += (f'<form method="post" action="/plans/{plan_id}/report" class="inline">{csrf(session)}'
                      f'<button>Report</button></form>')
             return self.send_html(page("Plan", body, session))
+        if not plan.get("runnable"):
+            body += (f'<p class="notice" role="status">Nothing in this plan can run on <b>{esc(target)}</b>: '
+                     f'the planner held or blocked every step. Its reasons are in the table above.</p>')
         if check["issues"]:
             body += "<ul class='error'>" + "".join(f"<li>{esc(i)}</li>" for i in check["issues"]) + "</ul>"
         if check["verification_only"] and check["passed"]:
@@ -443,16 +868,19 @@ class Handler(BaseHTTPRequestHandler):
         elif check["passed"] and not approved:
             body += (f'<form method="post" action="/plans/{plan_id}/approve">{csrf(session)}'
                      f'<p>Approving runs exactly: <b>{esc(", ".join(plan["runnable"]))}</b> (single use, '
-                     f'30 minutes from planning).</p>{confirm_fields(plan)}'
-                     f'<label>Type <b>{CONFIRMATION}</b> to approve: <input name="confirm" autocomplete="off" required></label>'
-                     f'<button>Approve</button></form>')
+                     f'30 minutes from planning). Only you can apply it.</p>{confirm_fields(plan)}'
+                     f'{REVIEWED_BOX}<button>Approve plan</button></form>')
+        elif approved and not used and by not in (None, session["user"]):
+            body += (f'<p class="notice">Approved by <b>{esc(by)}</b>; only {esc(by)} can apply it.</p>')
         elif approved and not used:
             body += (f'<form method="post" action="/plans/{plan_id}/apply">{csrf(session)}'
-                     f'<p>Approved. Apply logs in first; sudo will ask on the server, in the run page.</p>'
+                     f'<p>Approved by {esc(by or "you")}. Apply is a separate step: it logs in first; '
+                     f'sudo will ask on the server, in the run page.</p>'
                      f'<button>Apply</button></form>')
         for kind in ("report", "resume"):
             body += (f'<form method="post" action="/plans/{plan_id}/{kind}" class="inline">{csrf(session)}'
                      f'<button>{"Report" if kind == "report" else "Resume rollback"}</button></form>')
+        body += f'<p><a href="/servers/{esc(target)}/apps">&larr; Applications on {esc(target)}</a></p>'
         self.send_html(page("Plan", body, session))
 
     def batch_page(self, session, batch_id):
@@ -474,7 +902,7 @@ class Handler(BaseHTTPRequestHandler):
                                       f'<input name="name_{esc(name)}" autocomplete="off" required></label>')
             body += (f'<form method="post" action="/batches/{batch_id}/approve">{csrf(session)}'
                      f'<p>One approval for all {len(plans)} plans above (each bound to its hash).</p>'
-                     f'{"".join(fields)}<label>Type <b>{CONFIRMATION}</b>: <input name="confirm" autocomplete="off" required></label>'
+                     f'{"".join(fields)}{REVIEWED_BOX}'
                      f'<button>Approve batch</button></form>')
         elif batch["state"] == "approved":
             body += (f'<form method="post" action="/batches/{batch_id}/apply">{csrf(session)}'
@@ -486,12 +914,12 @@ class Handler(BaseHTTPRequestHandler):
         rows = "".join(
             f'<tr><td><a href="/jobs/{j.id}">{esc(j.id)}</a></td><td>{esc(j.kind)}</td><td>{esc(j.target)}</td>'
             f'<td>{esc(j.user)}</td><td>{"running" if j.finished is None else esc(j.code)}</td></tr>'
-            for j in self.app.jobs.recent())
+            for j in self.app.jobs.recent() if self.app.may_see(session["user"], j.target, j.plan_id, j.user))
         self.send_html(page("Runs", f'<table><tr><th>Run</th><th>Kind</th><th>Server</th><th>By</th>'
                                     f'<th>Exit</th></tr>{rows}</table>', session))
 
     def job_page(self, session, job_id):
-        job = self.app.jobs.get(job_id) if JOB_ID_RE.fullmatch(job_id) else None
+        job = self.visible_job(session, job_id)
         if job is None:
             raise KeyError("No such run.")
         body = (f'<p>{esc(job.kind)} of plan <a href="/plans/{esc(job.plan_id)}">{esc(job.plan_id)}</a> '
@@ -502,8 +930,14 @@ class Handler(BaseHTTPRequestHandler):
                 f'<p id="status"></p>')
         self.send_html(page("Run", body, session))
 
-    def poll(self, job_id, offset):
+    def visible_job(self, session, job_id):
         job = self.app.jobs.get(job_id) if JOB_ID_RE.fullmatch(job_id) else None
+        if job is None or not self.app.may_see(session["user"], job.target, job.plan_id, job.user):
+            return None
+        return job
+
+    def poll(self, session, job_id, offset):
+        job = self.visible_job(session, job_id)
         if job is None or not offset.isdigit():
             return self.send_json({"error": "No such run."}, HTTPStatus.NOT_FOUND)
         self.send_json(job.view(int(offset)))
@@ -528,9 +962,23 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/logout":
                 self.app.sessions.logout(token)
+                self.app.audit(user, "logout")
+                if user not in self.app.sessions.active_users():
+                    for meta in self.app.temporary_of(user):
+                        threading.Thread(target=self.app.end_temporary,
+                                         args=(user, meta["target_id"], "signed out"), daemon=True).start()
                 return self.redirect("/login", [("Set-Cookie", self.cookie("", expire=True))])
             if path == "/plan":
                 return self.post_plan(user, form)
+            parts = path.split("/")
+            if len(parts) == 4 and parts[1] == "servers" and parts[3] == "plan":
+                return self.post_single_plan(user, parts[2], form)
+            if len(parts) == 4 and parts[1] == "servers" and parts[3] == "end":
+                self.app.target_entry(parts[2], user)  # the owner only
+                if not self.app.end_temporary(user, parts[2], "ended by the user"):
+                    raise ValueError("Access could not be removed yet (a run is still going, or the server "
+                                     "did not answer). It stops working at its expiry time anyway.")
+                return self.redirect("/")
             if path == "/servers/scan":
                 return self.post_scan(session, form)
             if path == "/servers/enrol":
@@ -552,18 +1000,30 @@ class Handler(BaseHTTPRequestHandler):
                     self.app.apply_batch(user, parts[2])
                 return self.redirect(f"/batches/{parts[2]}")
             if len(parts) == 4 and parts[1] == "jobs" and parts[3] == "input":
-                job = self.app.jobs.get(parts[2]) if JOB_ID_RE.fullmatch(parts[2]) else None
+                job = self.visible_job(session, parts[2])
                 if job is None:
                     raise KeyError("No such run.")
+                # Only the user who started the run types into it: its prompts
+                # are sudo and confirmations (lab finding, items 2–3).
+                if job.user != user:
+                    raise ApprovalError(f"Only {job.user}, who started this run, can type into it.")
                 job.send(form.get("line", ""))
                 return self.send_json({"sent": True})
         except (run.RunError, ApprovalError, enrolment.EnrolError, ValueError, KeyError, OSError) as error:
-            return self.fail(session, error)
+            back = "/"
+            if path.startswith("/servers/") and path.endswith("/plan") and TARGET_RE.fullmatch(path.split("/")[2]):
+                back = f"/servers/{path.split('/')[2]}/apps"
+            if isinstance(error, KeyError) and error.args:
+                error = error.args[0]
+            return self.fail(session, error, back)
         self.send_html(page("Not found", "", session), HTTPStatus.NOT_FOUND)
 
     def typed(self, form):
         typed = {k[len("name_"):]: v for k, v in form.items() if k.startswith("name_")}
-        typed["_confirm"] = form.get("confirm", "")
+        # Decision 3a (2026-11-25): in the web UI the ticked review box is the
+        # confirmation; typed names stay for risky actions. approve_plan gets the
+        # same confirmation as the command line, so every check is unchanged.
+        typed["_confirm"] = CONFIRMATION if form.get("reviewed") == "1" else ""
         return typed
 
     def cookie(self, value, expire=False):
@@ -593,6 +1053,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.redirect(f"/plans/{plan_ids[0]}")
         return self.redirect(f"/batches/{self.app.new_batch(user, plan_ids)}")
 
+    def post_single_plan(self, user, target, form):
+        # Exactly one component and one operation; a repeated field is refused,
+        # not silently reduced to its last value.
+        for name in ("component", "operation"):
+            if len(self.fields.get(name, [])) != 1:
+                raise ValueError(f"Choose exactly one {'application' if name == 'component' else 'action'}.")
+        plan_id = self.app.make_single_plan(user, target, form["component"], form["operation"],
+                                            form.get("allow_draft") == "1")
+        return self.redirect(f"/plans/{plan_id}")
+
     def post_scan(self, session, form):
         host, user = form.get("host", "").strip(), form.get("user", "").strip()
         port = int(form.get("port") or 22)
@@ -602,16 +1072,20 @@ class Handler(BaseHTTPRequestHandler):
         with self.app.lock:
             self.app.pending[pending] = {"host": host, "port": port, "user": user, "name": name,
                                          "lab": form.get("lab") == "1", "keys": keys,
+                                         "save": form.get("save") == "1",
                                          "by": session["user"], "at": time.time()}
+        save = form.get("save") == "1"
+        use = ("used once to install the master\'s key, then dropped" if save else
+               "used once to install a key for this setup only, then dropped")
         choices = "".join(f'<label><input type="radio" name="fingerprint" value="{esc(k["fingerprint"])}" required> '
                           f'{esc(k["type"])} <code>{esc(k["fingerprint"])}</code></label>' for k in keys)
         body = (f'<p>{esc(host)}:{port} offers these host keys. Compare one with the server\'s own '
                 f'(for example <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code> on its console) '
                 f'before you confirm it.</p><form method="post" action="/servers/enrol">{csrf(session)}'
                 f'<input type="hidden" name="pending" value="{pending}">{choices}'
-                f'<label>Password of <b>{esc(user)}</b> (used once to install the master\'s key, then dropped): '
+                f'<label>Password of <b>{esc(user)}</b> ({use}): '
                 f'<input type="password" name="password" autocomplete="off" required></label>'
-                f'<button>Confirm key and add server</button></form>')
+                f'<button>{"Confirm key and save server" if save else "Confirm key and connect for this setup"}</button></form>')
         self.send_html(page(f"Add {name}", body, session))
 
     def post_enrol(self, user, form):
@@ -619,6 +1093,9 @@ class Handler(BaseHTTPRequestHandler):
             pending = self.app.pending.pop(form.get("pending", ""), None)
         if pending is None or pending["by"] != user or time.time() - pending["at"] > 600:
             raise ValueError("The host key check expired; start again.")
+        if not pending.get("save"):
+            meta = self.app.add_temporary(user, pending, form.get("password", ""), form.get("fingerprint", ""))
+            return self.redirect(f"/servers/{meta['target_id']}/apps")
         entry = enrolment.enrol(pending["name"], pending["host"], pending["port"], pending["user"],
                                 form.get("password", ""), form.get("fingerprint", ""), pending["keys"],
                                 self.app.config.master_key, self.app.config.known_hosts,
@@ -637,6 +1114,10 @@ ADD_FORM = ('<form method="post" action="/servers/scan">{csrf}'
             '<label>Port <input name="port" type="number" value="22" min="1" max="65535"></label>'
             '<label>SSH user <input name="user" required></label>'
             '<label><input type="checkbox" name="lab" value="1"> lab server</label>'
+            '<label><input type="checkbox" name="save" value="1"> Save this server for future use</label>'
+            '<p class="hint">Not saved: DSSA installs a key for this setup only. It stops working after '
+            '60 minutes, and DSSA removes it after a successful run, when you sign out or end access. '
+            'Nothing is added to Saved servers.</p>'
             '<button>Read its host key</button></form>')
 
 
@@ -646,6 +1127,19 @@ def serve(app, host, port, certfile=None, keyfile=None):
     if not certfile and host != "127.0.0.1":
         raise SystemExit("Refusing plain HTTP on a non-loopback address; pass --cert and --key.")
     handler = type("BoundHandler", (Handler,), {"app": app, "secure": bool(certfile)})
+
+    def sweep():
+        # Item 2: sessions live in memory, so after a restart every temporary
+        # server's owner is signed out and its access ends now.
+        while True:
+            try:
+                app.sweep_temporary(app.sessions.active_users())
+            except Exception:  # keep sweeping; details go to the terminal
+                import traceback
+                traceback.print_exc()
+            time.sleep(60)
+
+    threading.Thread(target=sweep, daemon=True, name="dssa-temp-sweeper").start()
     httpd = ThreadingHTTPServer((host, port), handler)
     if certfile:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

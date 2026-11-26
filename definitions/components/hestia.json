@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "hestia",
   "display_name": "HestiaCP",
+  "description": "Free hosting control panel (web, mail, DNS). Takes over the whole server.",
   "category": "control_panel",
   "depends_on": [],
   "variants": [

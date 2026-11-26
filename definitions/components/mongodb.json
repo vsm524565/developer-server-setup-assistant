@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "mongodb",
   "display_name": "MongoDB 8.0",
+  "description": "MongoDB 8.0 document database from MongoDB's own repository.",
   "category": "database",
   "depends_on": [],
   "variants": [

@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "php82",
   "display_name": "PHP 8.2 (side by side)",
+  "description": "PHP 8.2 installed next to the OS PHP, from a third-party repository.",
   "category": "runtime",
   "depends_on": [],
   "variants": [

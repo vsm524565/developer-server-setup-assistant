@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "elasticsearch",
   "display_name": "Elasticsearch 9",
+  "description": "Elasticsearch 9 search engine from Elastic's repository. Conflicts with OpenSearch.",
   "category": "database",
   "depends_on": [],
   "variants": [

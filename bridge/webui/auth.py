@@ -139,6 +139,16 @@ class Sessions:
         with self._lock:
             self._sessions.pop(token, None)
 
+    def active_users(self):
+        """Users with at least one live session (expired ones are dropped)."""
+
+        now = self.clock()
+        with self._lock:
+            for token, session in list(self._sessions.items()):
+                if now - session["created"] > SESSION_LIFETIME or now - session["seen"] > SESSION_IDLE:
+                    del self._sessions[token]
+            return {s["user"] for s in self._sessions.values()}
+
     @staticmethod
     def csrf_ok(session, value):
         return bool(session and value) and hmac.compare_digest(session["csrf"], value)

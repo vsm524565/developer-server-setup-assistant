@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "varnish",
   "display_name": "Varnish Cache",
+  "description": "Varnish HTTP cache, to put in front of a web server by hand.",
   "category": "proxy_ssl",
   "depends_on": [],
   "variants": [

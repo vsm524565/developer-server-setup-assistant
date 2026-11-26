@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "fail2ban",
   "display_name": "Fail2ban",
+  "description": "Bans addresses after repeated failed SSH logins.",
   "category": "system",
   "depends_on": [],
   "variants": [

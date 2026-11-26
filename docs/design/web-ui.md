@@ -72,7 +72,60 @@ approval code with `approved_by` = the UI user. Passwords never appear.
 
 ## 5. Flow in the UI
 
-- **Servers page:** pick servers, components, the operation (install,
+Integration pass 1 (2026-11-25, `docs/REQUIREMENTS.md`, "Web UI Integration
+Requirements", item 1):
+
+- **Workspace** (after sign-in): **Saved servers** and **Add server**.
+  Add server is the enrolment described in section 2, unchanged.
+- **Saved servers:** the inventory; each server opens its applications.
+  An empty inventory points to Add server.
+- **Applications:** the shared catalog (every definition), with search
+  (name, ID, category, description) and a category filter. Both work
+  without JavaScript; with it, rows filter as you type. Rows are links,
+  so Tab and Enter choose one; the chosen row has `aria-current`, and
+  focus moves to its actions.
+- **Installed state** comes from DSSA's install record (one SSH read,
+  reused for 60 s). Recorded apps offer update or remove; others offer
+  install or adopt. If the record cannot be read, the page says why and
+  offers all four: the planner decides. A control panel in the record
+  marks the apps it owns "Managed by <panel>" (the same ownership the
+  planner uses); a panel installed some other way is found at planning.
+- **Review plan** sends exactly one server, one component and one
+  operation to the planner. A repeated or unknown field is refused before
+  planning. Drafts are allowed only on lab servers and only for install.
+- A plan where nothing can run says so and keeps every held or blocked
+  reason; it offers no Approve or Apply.
+
+Items 2 and 3 (2026-11-25, `docs/design/webui-temporary-access-and-approval.md`):
+
+- **Add server** has "Save this server for future use", unticked. Unticked,
+  the password installs a key for this setup only: its line has
+  `expiry-time` (60 minutes, in the server's own time zone), `from=` the
+  master's address and no forwarding. The entry, host key and private key
+  stay in `<home>/temporary/<name>/` (0700), never in the inventory or the
+  master's known_hosts. Only its owner sees or uses it (Workspace, "This
+  setup only"). Access ends, line removed, after a successful run, on
+  **End access**, on sign-out, near expiry, and after a web UI restart
+  (sessions are in memory). After a failed run it stays until then, so
+  Report and Resume rollback still work. If removal fails, the line stops
+  working at its expiry time anyway.
+- **Approve plan:** tick "I reviewed the target, operation and warnings";
+  typed names stay for risky actions. Only the approver can apply.
+
+The earlier form below is kept at **/batch** (linked from Saved servers)
+until the single-approval change (requirements item 3) decides how
+several servers or applications are handled. Multi-app actions are
+deferred in the new flow.
+
+**Decision (2026-11-26): A, a selection list.** Each catalog row gets a
+checkbox. The panel shows "Selected (n)" with one action for all of them,
+then **Review plan**. That gives one plan, one approval and one apply,
+using the planner's existing multi-component plans. Risky items still need
+their names typed at approval. Mixed operations in one plan are out of
+scope. The goal: a developer never logs in to the server, so the web UI
+has to be both easy and safe.
+
+- **Batch plan page (/batch):** pick servers, components, the operation (install,
   update, remove, adopt) and optionally "all or nothing", then **Make plan**.
 - **One server:** the plan page. Approve on that page: typed names for
   risky actions (shared rules: `bridge/components/risk.py`), then
@@ -105,6 +158,8 @@ audit). Plans, approvals and run copies use the same folders as the
 command line (`~/.local/state/developer-server-setup-assistant/`).
 
 ## Not built yet
+
+- Panel access (`docs/design/panels.md`).
 
 - Live terminal over WebSocket (the page polls every 0.7 s).
 - Unattended runs (needs the alternative privilege model in section 1).

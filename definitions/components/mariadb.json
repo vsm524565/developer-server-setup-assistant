@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "mariadb",
   "display_name": "MariaDB",
+  "description": "MariaDB database server, listening on localhost only. The default database.",
   "category": "database",
   "depends_on": [],
   "variants": [

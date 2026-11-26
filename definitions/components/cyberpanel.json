@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "cyberpanel",
   "display_name": "CyberPanel (OpenLiteSpeed)",
+  "description": "Free control panel built on OpenLiteSpeed. Takes over the whole server.",
   "category": "control_panel",
   "depends_on": [],
   "variants": [

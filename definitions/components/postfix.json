@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "postfix",
   "display_name": "Postfix (outgoing mail, local only)",
+  "description": "Mail server for outgoing mail only, delivering from this server.",
   "category": "system",
   "depends_on": [],
   "variants": [

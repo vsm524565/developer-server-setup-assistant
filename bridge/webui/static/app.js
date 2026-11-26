@@ -1,5 +1,34 @@
-// DSSA web UI: live run terminal (4.46). No inline scripts (CSP).
+// DSSA web UI: live run terminal (4.46) and catalog filter. No inline scripts (CSP).
 "use strict";
+(function () {
+  // Catalog (integration pass 1): filter rows as you type. Without
+  // JavaScript the same search runs on the server through the form.
+  const list = document.getElementById("app-list");
+  const search = document.getElementById("app-search");
+  const category = document.getElementById("app-category");
+  if (!list || !search || !category) return;
+  function filter() {
+    const needle = search.value.trim().toLowerCase();
+    for (const row of list.querySelectorAll("[data-search]")) {
+      const match = (!category.value || row.dataset.category === category.value)
+        && (!needle || row.dataset.search.includes(needle));
+      row.parentElement.hidden = !match;
+      // Keep the filter when a row is chosen.
+      const url = new URL(row.href);
+      url.searchParams.delete("q");
+      url.searchParams.delete("category");
+      if (search.value.trim()) url.searchParams.set("q", search.value.trim());
+      if (category.value) url.searchParams.set("category", category.value);
+      row.href = url.pathname + url.search;
+    }
+  }
+  search.addEventListener("input", filter);
+  category.addEventListener("change", filter);
+  // After choosing a row, keyboard focus moves to its actions.
+  const chosen = document.getElementById("selected-app");
+  if (chosen) chosen.focus();
+})();
+
 (function () {
   const terminal = document.getElementById("terminal");
   if (!terminal) return;

@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "plesk",
   "display_name": "Plesk Obsidian",
+  "description": "Licensed hosting control panel. Takes over the whole server.",
   "category": "control_panel",
   "depends_on": [],
   "variants": [

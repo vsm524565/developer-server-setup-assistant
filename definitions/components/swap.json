@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "swap",
   "display_name": "Swap file",
+  "description": "Adds a swap file sized to the server's memory.",
   "category": "system",
   "depends_on": [],
   "variants": [

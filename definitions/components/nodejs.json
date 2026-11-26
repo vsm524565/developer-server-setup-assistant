@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "nodejs",
   "display_name": "Node.js",
+  "description": "Node.js and npm from the OS repositories.",
   "category": "runtime",
   "depends_on": [],
   "variants": [

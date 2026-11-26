@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "docker_compose",
   "display_name": "Docker Compose",
+  "description": "The docker compose plugin for multi-container apps. Adds Docker if it is missing.",
   "category": "container",
   "depends_on": [
     {

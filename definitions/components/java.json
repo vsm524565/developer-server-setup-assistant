@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "java",
   "display_name": "Java (OpenJDK 21, headless)",
+  "description": "OpenJDK 21 LTS runtime and tools, without a desktop.",
   "category": "runtime",
   "depends_on": [],
   "variants": [

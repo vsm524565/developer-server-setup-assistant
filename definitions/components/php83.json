@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "php83",
   "display_name": "PHP 8.3 (side by side)",
+  "description": "PHP 8.3 installed next to the OS PHP, from a third-party repository.",
   "category": "runtime",
   "depends_on": [],
   "variants": [

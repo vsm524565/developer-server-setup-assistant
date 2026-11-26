@@ -437,3 +437,29 @@ class VersionPatternContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DescriptionContractTests(unittest.TestCase):
+    """The optional one-sentence description (web UI catalog), in Python and bash."""
+
+    def test_every_repository_definition_has_a_short_description(self):
+        for path in sorted(DEFAULT_DEFINITIONS_DIR.glob("*.json")):
+            with self.subTest(component=path.stem):
+                definition = parse_component_definition(json.loads(path.read_text()), expected_id=path.stem)
+                self.assertTrue(definition.description)
+                self.assertLessEqual(len(definition.description), 160)
+
+    def test_description_is_optional(self):
+        definition = load_repo_definition("git")
+        definition.pop("description", None)
+        self.assertEqual(parse_component_definition(definition).description, "")
+        self.assertTrue(jq_accepts(definition))
+
+    def test_bad_descriptions_are_refused_by_both_validators(self):
+        for name, value in {"empty": "", "too long": "a" * 161, "not text": 5, "list": ["x"]}.items():
+            with self.subTest(case=name):
+                definition = load_repo_definition("git")
+                definition["description"] = value
+                with self.assertRaises(DefinitionError):
+                    parse_component_definition(definition)
+                self.assertFalse(jq_accepts(definition))

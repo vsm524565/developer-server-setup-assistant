@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "cpanel",
   "display_name": "cPanel & WHM",
+  "description": "Licensed hosting control panel (cPanel and WHM). Takes over the whole server.",
   "category": "control_panel",
   "depends_on": [],
   "variants": [

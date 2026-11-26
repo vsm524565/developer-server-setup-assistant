@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "opensearch",
   "display_name": "OpenSearch 3",
+  "description": "OpenSearch 3 search engine. DSSA generates its admin password. Conflicts with Elasticsearch.",
   "category": "database",
   "depends_on": [],
   "variants": [

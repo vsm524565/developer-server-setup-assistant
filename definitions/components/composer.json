@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "composer",
   "display_name": "Composer (PHP)",
+  "description": "Dependency manager for PHP projects. Adds PHP if it is missing.",
   "category": "tool",
   "depends_on": [
     {

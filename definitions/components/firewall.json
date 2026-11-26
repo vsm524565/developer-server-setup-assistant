@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "firewall",
   "display_name": "Firewall (ufw / firewalld)",
+  "description": "Turns on ufw or firewalld, allowing SSH, 80 and 443 first.",
   "category": "system",
   "depends_on": [],
   "variants": [

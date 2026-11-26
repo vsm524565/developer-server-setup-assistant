@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "aapanel",
   "display_name": "aaPanel",
+  "description": "Free web hosting control panel with a browser dashboard. Takes over the whole server.",
   "category": "control_panel",
   "depends_on": [],
   "variants": [

@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "chrony",
   "display_name": "Chrony (time sync)",
+  "description": "Keeps the server clock in sync. Held where another time service already runs.",
   "category": "system",
   "depends_on": [],
   "variants": [

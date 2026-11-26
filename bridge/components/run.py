@@ -187,10 +187,18 @@ class MarkerFilter:
 
 # --- backend calls ------------------------------------------------------------
 
-def _env(inventory=None):
+def _env(inventory=None, known_hosts=None):
+    """known_hosts: a temporary web UI server's own file (requirements item 2);
+    saved servers use the default."""
+
     env = dict(os.environ)
     if inventory:
         env["DSSA_INVENTORY_FILE"] = str(inventory)
+    if known_hosts:
+        # A temporary server logs in with its own key (in its inventory
+        # entry); an operator's DSSA_SSH_KEY would override it.
+        env["DSSA_KNOWN_HOSTS"] = str(known_hosts)
+        env.pop("DSSA_SSH_KEY", None)
     return env
 
 
@@ -205,7 +213,7 @@ def list_targets(inventory=None):
 
 
 def make_plan(target, components, allow_draft=False, inventory=None, operation="install",
-              all_or_nothing=False):
+              all_or_nothing=False, known_hosts=None):
     """Build a read-only plan on the target. Returns (plan_bytes, plan).
     operation: install (default), remove or adopt (4.42)."""
 
@@ -221,7 +229,7 @@ def make_plan(target, components, allow_draft=False, inventory=None, operation="
     argv += [target, *components]
     result = subprocess.run(
         argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600, check=False,
-        env=_env(inventory), stdin=subprocess.DEVNULL,
+        env=_env(inventory, known_hosts), stdin=subprocess.DEVNULL,
     )
     # Show the backend's messages as before, and keep its errors for the
     # web UI, which has no terminal (lab run 4.47).
@@ -235,12 +243,12 @@ def make_plan(target, components, allow_draft=False, inventory=None, operation="
     return plan_bytes, validate_plan_document(json.loads(plan_bytes))
 
 
-def read_record(target, inventory=None):
+def read_record(target, inventory=None, known_hosts=None):
     """The target's install record (4.41), read without sudo."""
 
     result = subprocess.run(
         ["bash", str(RUN_SCRIPT), "record", target], stdout=subprocess.PIPE,
-        timeout=120, check=False, env=_env(inventory), stdin=subprocess.DEVNULL,
+        timeout=120, check=False, env=_env(inventory, known_hosts), stdin=subprocess.DEVNULL,
     )
     if result.returncode != 0:
         raise RunError(f"Reading the install record failed (exit {result.returncode}).")
@@ -251,13 +259,13 @@ def read_record(target, inventory=None):
     return record
 
 
-def check_login(target, host_key, inventory=None):
+def check_login(target, host_key, inventory=None, known_hosts=None):
     """Log in once with the pinned host key (no sudo). Returns the exit code;
     the backend's explanation goes to the terminal."""
 
     result = subprocess.run(
         ["bash", str(RUN_SCRIPT), "check", target, host_key],
-        timeout=60, check=False, env=_env(inventory), stdin=subprocess.DEVNULL,
+        timeout=60, check=False, env=_env(inventory, known_hosts), stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,  # stdout stays clean for main.py --json
     )
     return result.returncode

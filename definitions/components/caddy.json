@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "caddy",
   "display_name": "Caddy",
+  "description": "Web server and reverse proxy that gets HTTPS certificates by itself.",
   "category": "proxy_ssl",
   "depends_on": [],
   "variants": [

@@ -243,6 +243,8 @@ class ComponentDefinition:
     variants: Tuple[Variant, ...]
     planning_only: bool = True
     execution_allowed: bool = False
+    # Web UI catalog (integration pass 1): one plain sentence, optional.
+    description: str = ""
 
 
 # --- allowlisted step and check parameters --------------------------------
@@ -561,7 +563,7 @@ def parse_component_definition(data, expected_id=None):
     _object(data, where, required=(
         "schema_version", "id", "display_name", "category",
         "depends_on", "variants",
-    ))
+    ), optional=("description",))
 
     if data["schema_version"] != SCHEMA_VERSION:
         _fail(f"{where}.schema_version", f"must be {SCHEMA_VERSION!r}")
@@ -585,6 +587,12 @@ def parse_component_definition(data, expected_id=None):
     if len({dep.component_id for dep in depends_on}) != len(depends_on):
         _fail(f"{where}.depends_on", "contains duplicate component IDs")
 
+    description = ""
+    if "description" in data:
+        description = _text(data["description"], f"{where}.description")
+        if len(description) > 160:
+            _fail(f"{where}.description", "must be at most 160 characters")
+
     variants = _list(
         data["variants"], f"{where}.variants", _variant,
         allow_empty=False, unique=False,
@@ -601,4 +609,5 @@ def parse_component_definition(data, expected_id=None):
         ),
         depends_on=depends_on,
         variants=variants,
+        description=description,
     )

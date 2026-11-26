@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "id": "php",
   "display_name": "PHP-FPM",
+  "description": "The OS PHP with PHP-FPM and common extensions.",
   "category": "runtime",
   "depends_on": [],
   "variants": [

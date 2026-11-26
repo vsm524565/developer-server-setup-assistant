@@ -1403,6 +1403,59 @@ class WebFlowTests(Lab):
         with self.assertRaises(run.RunError):
             self.app.make_plans("alice", ["prod1"], ["drafttool"], "install", False, allow_draft=True)
 
+    # --- Item 3 (2026-11-25): approver-only apply; stale, modified and replayed approvals ---
+
+    def approved_plan(self, user="alice"):
+        (plan_id,) = self.app.make_plans(user, ["lab1"], ["testtool"], "install", False)
+        self.app.approve(user, plan_id, {"_confirm": "APPROVE"})
+        return plan_id
+
+    def approval_dir(self, plan_id):
+        from bridge.components.approval import default_state_dir
+        return default_state_dir() / "approvals" / plan_id
+
+    def test_only_the_approver_can_apply(self):
+        plan_id = self.approved_plan("alice")
+        with mock.patch.object(run, "check_login") as login, \
+                self.assertRaisesRegex(ApprovalError, "alice approved this plan, so only alice can apply it"):
+            self.app.start_apply("bob", plan_id)
+        login.assert_not_called()
+        self.assertFalse((self.approval_dir(plan_id) / "consumed").exists(), "the approval was not used")
+        view = self.wait(self.app.start_apply("alice", plan_id))
+        self.assertEqual(view["exit_code"], 0, view["text"])
+
+    def test_a_replayed_approval_is_refused(self):
+        plan_id = self.approved_plan()
+        self.wait(self.app.start_apply("alice", plan_id))
+        with self.assertRaisesRegex(ApprovalError, "already been used|not valid"):
+            self.app.start_apply("alice", plan_id)
+        with self.assertRaises(ApprovalError):
+            self.app.approve("alice", plan_id, {"_confirm": "APPROVE"})
+
+    def test_a_modified_approved_plan_is_refused(self):
+        plan_id = self.approved_plan()
+        copy = self.approval_dir(plan_id) / "plan.json"
+        copy.chmod(0o600)
+        copy.write_bytes(copy.read_bytes().replace(b"testtool", b"testtoo1", 1))
+        with self.assertRaises(ApprovalError):
+            self.app.start_apply("alice", plan_id)
+        installed = self.read_mock("packages.json") if (self.state / "packages.json").exists() else {}
+        self.assertNotIn("testtool", installed, "nothing ran")
+
+    def test_a_stale_approval_is_refused(self):
+        from datetime import datetime, timedelta, timezone
+        plan_id = self.approved_plan()
+        later = datetime.now(timezone.utc) + timedelta(minutes=31)
+        with mock.patch("bridge.components.approval._now", side_effect=lambda now=None: now or later), \
+                self.assertRaises(ApprovalError):
+            self.app.start_apply("alice", plan_id)
+
+    def test_web_approval_without_confirmation_writes_nothing(self):
+        (plan_id,) = self.app.make_plans("alice", ["lab1"], ["testtool"], "install", False)
+        with self.assertRaises(ApprovalError):
+            self.app.approve("alice", plan_id, {"_confirm": ""})
+        self.assertFalse(self.approval_dir(plan_id).exists())
+
     def test_batch_stops_at_the_first_failed_server(self):
         plans = self.app.make_plans("alice", ["lab1", "prod1"], ["testtool"], "install", False)
         batch = self.app.new_batch("alice", plans)
