@@ -48,6 +48,7 @@ JOB_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 COMPONENT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 OPERATIONS = ("install", "update", "remove", "adopt")
+MAX_SELECTED = 25  # applications in one plan from the catalog (decision A)
 STATIC = Path(__file__).with_name("static")
 RECORD_TTL = 60  # seconds an install record read is reused for the catalog page
 TEMP_WINDOW = 3600  # requirements item 2, decision 2b: temporary access lasts 60 minutes
@@ -319,16 +320,25 @@ class App:
         return plan_ids
 
     def make_single_plan(self, user, target, component, operation, allow_draft=False):
-        """Web UI integration pass 1: exactly one server, one component and
-        one operation, through the same planner as everything else."""
+        return self.make_app_plan(user, target, [component], operation, allow_draft)
+
+    def make_app_plan(self, user, target, components, operation, allow_draft=False):
+        """The catalog's selection (decision A, 2026-11-26): one server, one
+        operation and one or more applications, in one plan through the same
+        planner as everything else. One approval and one apply cover it."""
 
         entry = self.target_entry(target, user)
         if operation not in OPERATIONS:
             raise ValueError("Unknown operation.")
-        if component not in {a["id"] for a in self.catalog()}:
+        if not components:
+            raise ValueError("Choose at least one application.")
+        if len(components) > MAX_SELECTED:
+            raise ValueError(f"Choose at most {MAX_SELECTED} applications for one plan.")
+        known = {a["id"] for a in self.catalog()}
+        if any(c not in known for c in components):
             raise ValueError("Unknown application.")
         allow_draft = allow_draft and bool(entry.get("lab")) and operation == "install"
-        plan_id = self.make_plans(user, [target], [component], operation, False, allow_draft)[0]
+        plan_id = self.make_plans(user, [target], list(components), operation, False, allow_draft)[0]
         with self.lock:
             self.records.pop(target, None)
         return plan_id
@@ -693,6 +703,10 @@ class Handler(BaseHTTPRequestHandler):
         category = (query.get("category") or [""])[-1]
         chosen = (query.get("app") or [""])[-1]
         catalog = self.app.catalog()
+        by_id = {a["id"]: a for a in catalog}
+        # The selection lives in the URL (sel=…), so it survives choosing a
+        # row or filtering, with or without JavaScript.
+        selected = [c for c in dict.fromkeys(query.get("sel") or []) if c in by_id][:MAX_SELECTED]
         if category not in CATEGORY_LABELS:
             category = ""
         record, unavailable = self.app.installed(target)
@@ -704,11 +718,12 @@ class Handler(BaseHTTPRequestHandler):
                  and (not needle or needle in search_text(a))]
 
         def link(app_id):
-            params = {"app": app_id}
+            params = [("app", app_id)]
             if search:
-                params["q"] = search
+                params.append(("q", search))
             if category:
-                params["category"] = category
+                params.append(("category", category))
+            params += [("sel", c) for c in selected]
             return f"/servers/{target}/apps?" + urllib.parse.urlencode(params)
 
         def tags(app):
@@ -723,9 +738,16 @@ class Handler(BaseHTTPRequestHandler):
                 out += '<span class="chip warn">Draft</span>'
             return out
 
+        def state_attrs(app):
+            installed = "" if record is None else ("1" if app["id"] in recorded else "0")
+            return (f'data-id="{esc(app["id"])}" data-name="{esc(app["name"])}" '
+                    f'data-installed="{installed}" data-draft="{"1" if app["draft"] else "0"}"')
+
         CURRENT = ' aria-current="true"'
         rows = "".join(
-            f'<li><a class="app-row" href="{esc(link(a["id"]))}" data-search="{esc(search_text(a))}" '
+            f'<li><input type="checkbox" class="pick" form="plan-form" name="component" value="{esc(a["id"])}" '
+            f'{state_attrs(a)} aria-label="Select {esc(a["name"])}"{" checked" if a["id"] in selected else ""}>'
+            f'<a class="app-row" href="{esc(link(a["id"]))}" data-search="{esc(search_text(a))}" '
             f'data-category="{esc(a["category"])}"{CURRENT if a["id"] == chosen else ""}>'
             f'<span><strong>{esc(a["name"])}</strong> <span class="hint">· {esc(a["label"])}</span>'
             f'{"<span class=\"desc\">" + esc(a["description"]) + "</span>" if a["description"] else ""}</span>'
@@ -737,52 +759,85 @@ class Handler(BaseHTTPRequestHandler):
                  'installed without DSSA is found when you plan.</p>' if record is not None
                  else f'<p class="warn" role="status">Installed state unavailable: {esc(unavailable.rstrip("."))}. '
                       'Every action is offered; the planner checks the server.</p>')
-        filters = (f'<form method="get" action="/servers/{esc(target)}/apps" class="filters" role="search">'
+        filters = (f'<form method="get" action="/servers/{esc(target)}/apps" class="filters" role="search" id="filters">'
                    f'<label>Search <input type="search" name="q" value="{esc(search)}" id="app-search" '
                    f'autocomplete="off"></label>'
                    f'<label>Category <select name="category" id="app-category"><option value="">All categories</option>'
                    f'{options}</select></label>'
                    + (f'<input type="hidden" name="app" value="{esc(chosen)}">' if chosen else "")
+                   + "".join(f'<input type="hidden" name="sel" value="{esc(c)}" class="keep-sel">' for c in selected)
                    + '<button>Filter</button></form>')
         listing = (f'<ul class="catalog" id="app-list" aria-label="Applications">{rows}</ul>' if rows
                    else '<p class="hint" id="app-empty">No matching applications.</p>')
+        # Selected applications the filter hides still belong to the plan.
+        shown_ids = {a["id"] for a in shown}
+        kept = "".join(f'<input type="hidden" class="pick" name="component" value="{esc(c)}" {state_attrs(by_id[c])}>'
+                       for c in selected if c not in shown_ids)
         temp = entry.get("temporary")
         where = (f' · This setup only, access ends {esc(time.strftime("%H:%M UTC", time.gmtime(temp["expires"])))}'
                  if temp else " · Saved server")
+        side = (self.details(by_id.get(chosen), selected, managed)
+                + self.selection(session, entry, by_id, recorded, record is not None, selected, kept, target))
         body = (f'<p><a href="{"/" if temp else "/servers"}">&larr; {"Workspace" if temp else "Saved servers"}</a></p>'
                 f'<p>{esc(target)} · <code>{esc(entry["host"])}</code>{" · lab" if entry.get("lab") else ""}{where}</p>'
                 f'{state}<div class="grid"><section class="card">{filters}{listing}</section>'
-                f'<section class="card" aria-live="polite">{self.selection(session, entry, catalog, recorded, record is not None, chosen, managed)}</section></div>')
+                f'<section class="card" aria-live="polite">{side}</section></div>')
         self.send_html(page("Applications", body, session))
 
-    def selection(self, session, entry, catalog, recorded, known, chosen, managed=None):
-        app = next((a for a in catalog if a["id"] == chosen), None)
+    @staticmethod
+    def details(app, selected, managed):
+        """The chosen row's description (its link), next to the selection."""
+
         if app is None:
-            return '<h2>Selected application</h2><p class="hint">Choose one application to see its actions.</p>'
-        if not known:
-            operations = OPERATIONS
-        else:
-            operations = RECORDED_OPERATIONS if app["id"] in recorded else UNRECORDED_OPERATIONS
-        radios = "".join(
-            f'<label><input type="radio" name="operation" value="{op}" required{" checked" if i == 0 else ""}> '
-            f'{esc(OPERATION_LABELS[op])}</label>' for i, op in enumerate(operations))
+            return ""
         notes = ""
-        if app["id"] in (managed or {}):
+        if app["id"] in managed:
             notes = (f'<p class="notice">Managed by {esc(managed[app["id"]])}: use the panel\'s own tools. '
                      'The planner holds this for review on a panel server.</p>')
-        draft = ""
         if app["draft"]:
-            draft = ('<p class="warn">Draft component: lab servers only.</p>' + (
-                '<label><input type="checkbox" name="allow_draft" value="1"> allow this draft '
-                '(you type its name again at approval)</label>' if entry.get("lab") else
-                '<p class="hint">This server is not a lab server, so the planner will hold it.</p>'))
-        return (f'<h2>Selected application</h2><h3 id="selected-app" tabindex="-1">{esc(app["name"])}</h3>'
+            notes += '<p class="warn">Draft component: lab servers only.</p>'
+        where = ("In your selection." if app["id"] in selected
+                 else "Tick its box in the list to add it to your selection.")
+        return (f'<h2 id="selected-app" tabindex="-1">{esc(app["name"])}</h2>'
                 f'<p class="hint">{esc(app["label"])} · <code>{esc(app["id"])}</code></p>'
                 f'{"<p>" + esc(app["description"]) + "</p>" if app["description"] else ""}{notes}'
-                f'<form method="post" action="/servers/{esc(entry["target_id"])}/plan">{csrf(session)}'
-                f'<input type="hidden" name="component" value="{esc(app["id"])}">'
-                f'<fieldset><legend>Action (one at a time)</legend>{radios}</fieldset>{draft}'
-                f'<button>Review plan</button>'
+                f'<p class="hint" id="chosen-hint" data-id="{esc(app["id"])}">{where}</p><hr>')
+
+    def selection(self, session, entry, by_id, recorded, known, selected, kept, target):
+        """One action for every selected application, then one plan."""
+
+        names = "".join(f'<li>{esc(by_id[c]["name"])}</li>' for c in selected)
+        installed = {c in recorded for c in selected} if known else set()
+        mixed = len(installed) > 1
+        if installed == {True}:
+            default = "update"
+        else:
+            default = "install"
+        hints = {"install": "not installed", "adopt": "installed without DSSA",
+                 "update": "installed", "remove": "installed by DSSA"}
+        needs = {"install": "0", "adopt": "0", "update": "1", "remove": "1"}
+        radios = "".join(
+            f'<label><input type="radio" name="operation" value="{op}" data-needs="{needs[op]}" required'
+            f'{" checked" if op == default else ""}> {esc(OPERATION_LABELS[op])} '
+            f'<span class="hint">({hints[op]})</span></label>'
+            for op in ("install", "adopt", "update", "remove"))
+        drafts = any(by_id[c]["draft"] for c in selected)
+        draft = (f'<div id="draft-choice"{"" if drafts else " hidden"}>' + (
+            '<label><input type="checkbox" name="allow_draft" value="1"> allow the drafts in this selection '
+            '(you type each draft\'s name again at approval)</label>' if entry.get("lab") else
+            '<p class="hint">Drafts run on lab servers only; on this server the planner holds them.</p>')
+            + '</div>')
+        return (f'<form method="post" action="/servers/{esc(target)}/plan" id="plan-form">{csrf(session)}'
+                f'<h2>Selected (<span id="sel-count" tabindex="-1">{len(selected)}</span>)</h2>'
+                f'<ul id="sel-list">{names}</ul>{kept}'
+                f'<p class="hint" id="sel-empty"{" hidden" if selected else ""}>Tick one or more applications '
+                f'in the list. They go into one plan, with one approval.</p>'
+                f'<p><a href="/servers/{esc(target)}/apps" id="sel-clear"{"" if selected else " hidden"}>'
+                f'Clear selection</a></p>'
+                f'<fieldset><legend>Action for all selected</legend>{radios}</fieldset>'
+                f'<p class="warn" id="sel-mixed"{"" if mixed else " hidden"}>Your selection mixes installed and '
+                f'not installed applications. One plan has one action: split them into two plans.</p>'
+                f'{draft}<button id="plan-button">Review plan</button>'
                 f'<p class="hint">Planning reads the server and changes nothing. Approval and Apply '
                 f'are separate steps.</p></form>')
 
@@ -836,11 +891,17 @@ class Handler(BaseHTTPRequestHandler):
         used = (approvals / "consumed").exists()
         by = approver(plan_id) if approved else None
         target = plan["target"]["target_id"]
-        held = [s["component"] for s in plan["steps"] if s["component"] not in plan.get("runnable", [])]
+        runnable = plan.get("runnable", [])
+        held = [s["component"] for s in plan["steps"] if s["component"] not in runnable]
+        # "Changes" lists only what the run changes; SKIP steps are verified
+        # (lab finding, web UI pass 1 step 9).
+        skipped = [s["component"] for s in plan["steps"] if s["component"] in runnable and s["action"] == "SKIP"]
+        changes = [c for c in runnable if c not in skipped]
         body = (f'<dl class="meta"><div><dt>Server</dt><dd>{esc(target)}</dd></div>'
                 f'<div><dt>Operation</dt><dd>{esc(plan["operation"])}</dd></div>'
-                f'<div><dt>Runs</dt><dd>{esc(", ".join(plan.get("runnable", [])) or "nothing")}</dd></div>'
-                f'<div><dt>Held or blocked</dt><dd>{esc(", ".join(held) or "none")}</dd></div></dl>'
+                f'<div><dt>Changes</dt><dd>{esc(", ".join(changes) or "nothing")}</dd></div>'
+                + (f'<div><dt>Verified only</dt><dd>{esc(", ".join(skipped))}</dd></div>' if skipped else "")
+                + f'<div><dt>Held or blocked</dt><dd>{esc(", ".join(held) or "none")}</dd></div></dl>'
                 + plan_table(plan))
         # A plan runs once; after that only its result (Report) makes sense
         # (lab finding, combined test step 12).
@@ -857,11 +918,14 @@ class Handler(BaseHTTPRequestHandler):
             body += (f'<form method="post" action="/plans/{plan_id}/report" class="inline">{csrf(session)}'
                      f'<button>Report</button></form>')
             return self.send_html(page("Plan", body, session))
-        if not plan.get("runnable"):
+        issues = list(check["issues"])
+        if not runnable:
             body += (f'<p class="notice" role="status">Nothing in this plan can run on <b>{esc(target)}</b>: '
                      f'the planner held or blocked every step. Its reasons are in the table above.</p>')
-        if check["issues"]:
-            body += "<ul class='error'>" + "".join(f"<li>{esc(i)}</li>" for i in check["issues"]) + "</ul>"
+            # The notice says it already (lab finding, pass 1 step 10).
+            issues = [i for i in issues if i != "Nothing in the plan is runnable."]
+        if issues:
+            body += "<ul class='error'>" + "".join(f"<li>{esc(i)}</li>" for i in issues) + "</ul>"
         if check["verification_only"] and check["passed"]:
             body += (f'<form method="post" action="/plans/{plan_id}/apply">{csrf(session)}'
                      f'<p>Verification only: no approval needed.</p><button>Run verification</button></form>')
@@ -877,9 +941,14 @@ class Handler(BaseHTTPRequestHandler):
                      f'<p>Approved by {esc(by or "you")}. Apply is a separate step: it logs in first; '
                      f'sudo will ask on the server, in the run page.</p>'
                      f'<button>Apply</button></form>')
-        for kind in ("report", "resume"):
-            body += (f'<form method="post" action="/plans/{plan_id}/{kind}" class="inline">{csrf(session)}'
-                     f'<button>{"Report" if kind == "report" else "Resume rollback"}</button></form>')
+        # Report and Resume rollback only once the plan has been applied
+        # (lab finding, pass 1 step 10): before that there is nothing to read.
+        started = used or (run.runs_dir() / plan_id).exists() or any(
+            j.plan_id == plan_id for j in self.app.jobs.recent(1000))
+        if started:
+            for kind in ("report", "resume"):
+                body += (f'<form method="post" action="/plans/{plan_id}/{kind}" class="inline">{csrf(session)}'
+                         f'<button>{"Report" if kind == "report" else "Resume rollback"}</button></form>')
         body += f'<p><a href="/servers/{esc(target)}/apps">&larr; Applications on {esc(target)}</a></p>'
         self.send_html(page("Plan", body, session))
 
@@ -1054,13 +1123,13 @@ class Handler(BaseHTTPRequestHandler):
         return self.redirect(f"/batches/{self.app.new_batch(user, plan_ids)}")
 
     def post_single_plan(self, user, target, form):
-        # Exactly one component and one operation; a repeated field is refused,
-        # not silently reduced to its last value.
-        for name in ("component", "operation"):
-            if len(self.fields.get(name, [])) != 1:
-                raise ValueError(f"Choose exactly one {'application' if name == 'component' else 'action'}.")
-        plan_id = self.app.make_single_plan(user, target, form["component"], form["operation"],
-                                            form.get("allow_draft") == "1")
+        # One or more applications (decision A) and exactly one action; a
+        # repeated action is refused, not reduced to its last value.
+        if len(self.fields.get("operation", [])) != 1:
+            raise ValueError("Choose exactly one action.")
+        components = list(dict.fromkeys(self.fields.get("component", [])))
+        plan_id = self.app.make_app_plan(user, target, components, form["operation"],
+                                         form.get("allow_draft") == "1")
         return self.redirect(f"/plans/{plan_id}")
 
     def post_scan(self, session, form):

@@ -271,20 +271,49 @@ class WorkspaceCatalogTests(HttpBase):
         self.assertIn("No matching applications", body)
         self.assertEqual(self.read_record.call_count, 1, "the record is read once, then reused briefly")
 
+    def plan_form(self, body):
+        return re.search(r'<form method="post" action="/servers/ubuntu24/plan" id="plan-form">.*?</form>',
+                         body, re.S).group(0)
+
     def test_keyboard_selection_of_one_app_and_its_actions(self):
         cookie = self.login()
         response, body = self.request("GET", "/servers/ubuntu24/apps?app=git&q=gi", cookie=cookie)
         # Rows are links (Tab + Enter); the chosen one is marked for assistive tech.
         self.assertRegex(body, r'<a class="app-row" href="/servers/ubuntu24/apps\?app=git&amp;q=gi"[^>]*aria-current="true"')
         self.assertEqual(body.count('aria-current="true"'), 1)
-        form = re.search(r'<form method="post" action="/servers/ubuntu24/plan">.*?</form>', body, re.S).group(0)
-        self.assertIn('name="component" value="git"', form)
-        self.assertEqual(re.findall(r'name="operation" value="(\w+)"', form), ["update", "remove"])
-        self.assertNotIn('name="components"', form, "one application only")
-        response, body = self.request("GET", "/servers/ubuntu24/apps?app=nginx", cookie=cookie)
-        form = re.search(r'<form method="post" action="/servers/ubuntu24/plan">.*?</form>', body, re.S).group(0)
-        self.assertEqual(re.findall(r'name="operation" value="(\w+)"', form), ["install", "adopt"])
-        self.assertIn('name="allow_draft"', form, "draft on a lab server")
+        self.assertIn('<h2 id="selected-app" tabindex="-1">Git</h2>', body)
+        # Each row has its own checkbox (Tab, Space) that belongs to the plan form.
+        self.assertRegex(body, r'<input type="checkbox" class="pick" form="plan-form" name="component" value="git" '
+                               r'data-id="git" data-name="Git" data-installed="1" data-draft="0" aria-label="Select Git">')
+        form = self.plan_form(body)
+        self.assertIn("Selected (<span id=\"sel-count\" tabindex=\"-1\">0</span>)", form)
+        self.assertEqual(re.findall(r'name="operation" value="(\w+)"', form), ["install", "adopt", "update", "remove"])
+        response, body = self.request("GET", "/servers/ubuntu24/apps?app=nginx&sel=nginx", cookie=cookie)
+        form = self.plan_form(body)
+        self.assertIn('<li>Nginx</li>', form)
+        self.assertIn('id="chosen-hint" data-id="nginx">In your selection.', body,
+                      "the script keeps this in step with the checkbox")
+        self.assertRegex(body, r'value="nginx" [^>]*checked>')
+        self.assertIn('<div id="draft-choice"><label><input type="checkbox" name="allow_draft"', form,
+                      "draft on a lab server")
+        self.assertIn('value="install" data-needs="0" required checked', form)
+
+    def test_selection_survives_filtering_and_choosing_a_row(self):
+        cookie = self.login()
+        response, body = self.request("GET", "/servers/ubuntu24/apps?q=maria&sel=git&sel=nginx&sel=nosuch&sel=git",
+                                      cookie=cookie)
+        form = self.plan_form(body)
+        self.assertIn("Selected (<span id=\"sel-count\" tabindex=\"-1\">2</span>)", form, "unknown and repeated names dropped")
+        self.assertIn("<li>Git</li><li>Nginx</li>", form)
+        # Hidden by the filter, still in the plan.
+        self.assertIn('<input type="hidden" class="pick" name="component" value="git"', form)
+        self.assertIn('<input type="hidden" class="pick" name="component" value="nginx"', form)
+        self.assertIn('href="/servers/ubuntu24/apps?app=mariadb&amp;q=maria&amp;sel=git&amp;sel=nginx"', body)
+        self.assertEqual(body.count('name="sel" value="git" class="keep-sel"'), 1, "the filter form keeps it")
+        self.assertIn('id="sel-mixed">', form, "git installed, nginx not: one plan has one action")
+        response, body = self.request("GET", "/servers/ubuntu24/apps?sel=git", cookie=cookie)
+        self.assertIn('value="update" data-needs="1" required checked', self.plan_form(body))
+        self.assertIn('<div id="draft-choice" hidden>', self.plan_form(body))
 
     def test_record_unavailable_offers_every_action(self):
         cookie = self.login()
@@ -293,7 +322,8 @@ class WorkspaceCatalogTests(HttpBase):
         response, body = self.request("GET", "/servers/prod1/apps?app=nginx", cookie=cookie)
         self.assertEqual(response.status, 200)
         self.assertIn("Installed state unavailable: Reading the install record failed (exit 255). Every action", body)
-        self.assertEqual(re.findall(r'name="operation" value="(\w+)"', body), ["install", "update", "remove", "adopt"])
+        self.assertEqual(re.findall(r'name="operation" value="(\w+)"', body), ["install", "adopt", "update", "remove"])
+        self.assertIn('data-installed=""', body, "unknown state: the script restricts nothing")
         self.assertNotIn('name="allow_draft"', body, "not a lab server")
 
     def test_descriptions_are_shown_and_searchable(self):
@@ -354,11 +384,52 @@ class WorkspaceCatalogTests(HttpBase):
             self.request("POST", "/servers/ubuntu24/plan", f"csrf={token}&component=nginx&operation=remove&allow_draft=1", cookie)
         self.assertEqual([c.args[2] for c in make.call_args_list], [False, False])
 
-    def test_more_than_one_selection_is_refused_before_planning(self):
+    def test_several_applications_make_one_plan(self):
         cookie = self.login()
         token = self.csrf(cookie)
-        bodies = (f"csrf={token}&component=nginx&component=git&operation=install",
-                  f"csrf={token}&component=nginx&operation=install&operation=remove",
+        plan = self.plan(["nginx", "git"], ["nginx", "git"])
+        with mock.patch("bridge.components.run.make_plan", return_value=(b"{}", plan)) as make, \
+             mock.patch("bridge.components.run.save_plan"):
+            response, _ = self.request("POST", "/servers/ubuntu24/plan",
+                                       f"csrf={token}&component=nginx&component=git&component=nginx"
+                                       f"&operation=install&allow_draft=1", cookie)
+        self.assertEqual((response.status, response.getheader("Location")), (303, f"/plans/{self.PLAN_ID}"))
+        make.assert_called_once_with("ubuntu24", ["nginx", "git"], True, str(self.config.inventory), "install", False)
+        audit = [json.loads(line) for line in self.config.audit.read_text().splitlines()]
+        self.assertEqual(audit[-1]["components"], ["nginx", "git"])
+
+    def test_skipped_steps_are_verified_and_report_waits_for_a_run(self):
+        cookie = self.login()
+        plan = self.plan(["git", "nginx"], ["git", "nginx"])
+        plan["steps"][0]["action"] = "SKIP"
+        check = {"issues": [], "passed": True, "verification_only": False, "requires_approval": True}
+        with mock.patch.object(App, "check", return_value=(b"{}", plan, None, [], check)):
+            _, body = self.request("GET", f"/plans/{self.PLAN_ID}", cookie=cookie)
+            self.assertIn("<dt>Changes</dt><dd>nginx</dd>", body)
+            self.assertIn("<dt>Verified only</dt><dd>git</dd>", body)
+            self.assertNotIn(f"/plans/{self.PLAN_ID}/report", body)
+            ran = mock.Mock(plan_id=self.PLAN_ID)
+            self.app.jobs = mock.Mock(recent=lambda limit=20: [ran])
+            _, body = self.request("GET", f"/plans/{self.PLAN_ID}", cookie=cookie)
+            self.assertIn(f"/plans/{self.PLAN_ID}/report", body)
+            self.assertIn(f"/plans/{self.PLAN_ID}/resume", body)
+
+    def test_too_many_applications_for_one_plan(self):
+        ids = [a["id"] for a in self.app.catalog()][:26]
+        with mock.patch("bridge.components.run.make_plan") as make:
+            with self.assertRaisesRegex(ValueError, "at most 25 applications"):
+                self.app.make_app_plan("alice", "ubuntu24", ids, "install")
+        make.assert_not_called()
+
+    def test_bad_selections_are_refused_before_planning(self):
+        cookie = self.login()
+        token = self.csrf(cookie)
+        too_many = "".join(f"&component={a}" for a in [
+            "nginx", "git", "apache", "mariadb", "mysql", "postgresql", "redis", "memcached", "php", "nodejs",
+            "python", "java", "composer", "docker", "docker_compose", "caddy", "haproxy", "varnish", "certbot",
+            "fail2ban", "firewall", "chrony", "swap", "postfix", "clamav", "openlitespeed"])
+        bodies = (f"csrf={token}&component=nginx&component=git&operation=install&operation=remove",
+                  f"csrf={token}{too_many}&operation=install",
                   f"csrf={token}&operation=install",
                   f"csrf={token}&component=nosuchapp&operation=install",
                   f"csrf={token}&component=nginx&operation=format")
@@ -368,7 +439,7 @@ class WorkspaceCatalogTests(HttpBase):
                     response, page_body = self.request("POST", "/servers/ubuntu24/plan", body, cookie)
                     self.assertEqual(response.status, 400)
                     self.assertIn('href="/servers/ubuntu24/apps"', page_body)
-            response, _ = self.request("POST", "/servers/nope/plan", bodies[0].replace("&component=git", ""), cookie)
+            response, _ = self.request("POST", "/servers/nope/plan", f"csrf={token}&component=git&operation=install", cookie)
             self.assertEqual(response.status, 400)
         make.assert_not_called()
 
@@ -396,7 +467,8 @@ class WorkspaceCatalogTests(HttpBase):
         self.assertIn("Not a fresh server: nginx is installed.", body)
         self.assertIn("Removal is not offered for panels.", body)
         self.assertIn("Nothing in this plan can run on <b>ubuntu24</b>", body)
-        self.assertIn("Nothing in the plan is runnable.", body)
+        self.assertNotIn("Nothing in the plan is runnable.", body, "the notice says it once")
+        self.assertNotIn("/report", body, "never ran: no Report or Resume rollback")
         self.assertNotIn("/approve", body)
         self.assertNotIn(f"/plans/{self.PLAN_ID}/apply", body)
         self.assertIn('href="/servers/ubuntu24/apps"', body)
@@ -411,7 +483,8 @@ class WorkspaceCatalogTests(HttpBase):
         self.assertIn('name="reviewed" value="1" required', body, "decision 3a: tick to approve")
         self.assertNotIn('name="confirm"', body, "no typed APPROVE in the web UI")
         self.assertIn("<dt>Server</dt><dd>ubuntu24</dd>", body)
-        self.assertIn("<dt>Runs</dt><dd>git</dd>", body)
+        self.assertIn("<dt>Changes</dt><dd>git</dd>", body)
+        self.assertNotIn("Verified only", body)
         self.assertNotIn(f'action="/plans/{self.PLAN_ID}/apply"', body, "Apply only after approval")
 
     def test_approve_needs_the_ticked_box(self):

@@ -125,6 +125,30 @@ their names typed at approval. Mixed operations in one plan are out of
 scope. The goal: a developer never logs in to the server, so the web UI
 has to be both easy and safe.
 
+Built 2026-11-26 (lab check: `docs/testing/manual-webui-selection.md`):
+- **Selection.** Each row has a checkbox that belongs to the plan form.
+  - The selection is kept in the URL (`sel=`), so it survives filtering
+    and opening a row, also without JavaScript.
+  - Apps the filter hides stay in the plan, and each can be dropped with
+    its **Remove** button.
+  - At most 25 applications go in one plan.
+- **Actions.** One action applies to everything selected. The page offers
+  only the actions that fit:
+  - all selected apps not installed: Install or Adopt;
+  - all installed: Update or Remove;
+  - a mix: a warning, and Review plan is disabled.
+
+  Without JavaScript all four actions are offered, and the planner
+  decides.
+- **Plan.** `POST /servers/<server>/plan` takes repeated `component`
+  fields (duplicates dropped) and exactly one `operation`. It makes one plan
+  through `make_app_plan`; risky and draft names are still typed at
+  approval.
+- **Plan page.** The summary lists **Changes** (no SKIP rows) and
+  **Verified only**. The red "Nothing in the plan is runnable." is not
+  repeated under the notice. Report and Resume rollback appear only once
+  the plan has been applied.
+
 - **Batch plan page (/batch):** pick servers, components, the operation (install,
   update, remove, adopt) and optionally "all or nothing", then **Make plan**.
 - **One server:** the plan page. Approve on that page: typed names for
