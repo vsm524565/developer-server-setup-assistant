@@ -50,6 +50,13 @@ class EnrolError(Exception):
     pass
 
 
+class RemovalUnknown(EnrolError):
+    """The server was asked to remove a temporary key, but its answer never
+    arrived: a timeout, a dropped connection, a refused login (after a
+    removal the key itself no longer logs in). The key may or may not be
+    gone, so the caller keeps the cleanup pending (Codex review, round 10)."""
+
+
 def _check(host, port, user=None):
     if not HOST_RE.fullmatch(host or ""):
         raise EnrolError("Invalid host.")
@@ -235,6 +242,10 @@ def temporary_access(target_id, host, port, user, password, fingerprint, keys, d
             'case "$ip" in ""|*[!0-9a-fA-F.:]*) echo "no client address" >&2; exit 3;; esac; '
             f'when=$(date -d @{expires} +%Y%m%d%H%M) || exit 3; '
             'umask 077 && mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && '
+            # Round 12: a last line without a newline would merge with the new
+            # one, and removing the new line would then remove the user's key.
+            '{ [ ! -s ~/.ssh/authorized_keys ] || [ -z "$(tail -c 1 ~/.ssh/authorized_keys)" ] '
+            '|| echo >> ~/.ssh/authorized_keys; } && '
             'printf \'%s\\n\' "expiry-time=\\"$when\\",from=\\"$ip\\",no-port-forwarding,'
             f'no-agent-forwarding,no-X11-forwarding {public}" >> ~/.ssh/authorized_keys'
         )
@@ -262,16 +273,64 @@ def temporary_access(target_id, host, port, user, password, fingerprint, keys, d
         password = None  # noqa: F841  (dropped; never stored)
 
 
+REMOVED_MARK = "DSSA-KEY-REMOVED"
+PRESENT_MARK = "DSSA-KEY-PRESENT"
+UNKNOWN_MARK = "DSSA-KEY-UNKNOWN"
+
+
 def _remove_command(tag):
-    return ('f=~/.ssh/authorized_keys; [ -f "$f" ] || exit 0; '
-            f'grep -v -F " {tag}" "$f" > "$f.dssa-tmp"; cat "$f.dssa-tmp" > "$f" && rm -f "$f.dssa-tmp"; '
-            f'! grep -q -F " {tag}" "$f"')
+    """POSIX sh (plus mktemp). The last line names the outcome (round 10);
+    REMOVED only follows a check that the line is absent (round 11).
+
+    Round 12: authorized_keys is never written in place. Only a regular file
+    owned by this user is rewritten, and only this way:
+
+    1. mktemp makes a private file next to it, in ~/.ssh (same file system);
+    2. grep -v writes the other lines into it (it is 0600 while written);
+    3. the staged copy must be complete: grep read everything (exit 0 or 1),
+       it has exactly as many lines as the original has other lines, and the
+       tagged line is not in it; then it gets the original's mode (stat -c
+       %a, so a read-only 0400 file stays 0400);
+    4. mv replaces authorized_keys with it in one rename (restorecon restores
+       the SELinux label where there is one).
+
+    Any failure leaves authorized_keys untouched and removes the staged file;
+    the check that follows then reports PRESENT or UNKNOWN."""
+
+    f, s = '"$f"', '"$s"'
+    return "\n".join([
+        f'f=~/.ssh/authorized_keys; t=" {tag}"; s=""',
+        f'if [ -f {f} ] && [ ! -L {f} ] && [ -O {f} ] && grep -q -F "$t" {f} 2>/dev/null; then',
+        f'  s=$(mktemp "$f.dssa.XXXXXX" 2>/dev/null) || s=""',
+        f'  m=$(stat -c %a {f} 2>/dev/null) || m=""',
+        f'  if [ -n {s} ] && [ -n "$m" ]; then',
+        f'    grep -v -F "$t" {f} > {s}; r=$?',
+        f'    want=$(grep -c -v -F "$t" {f}); have=$(wc -l < {s})',
+        f'    if [ "$r" -le 1 ] && [ "$want" -eq "$have" ] 2>/dev/null && ! grep -q -F "$t" {s} \\',
+        f'       && chmod "$m" {s}; then',
+        f'      mv -f {s} {f} && s="" && {{ command -v restorecon >/dev/null 2>&1 && restorecon {f} 2>/dev/null; true; }}',
+        "    fi",
+        "  fi",
+        f'  [ -n {s} ] && rm -f {s}',
+        "fi",
+        f'grep -q -F "$t" {f} 2>/dev/null; r=$?',
+        f'if [ "$r" -eq 0 ]; then echo "{PRESENT_MARK} {tag}"; exit 1; fi',
+        f'if [ "$r" -eq 1 ]; then echo "{REMOVED_MARK} {tag}"; exit 0; fi',
+        f'if [ ! -e {f} ] && [ ! -L {f} ]; then',
+        f'  if [ -d ~/.ssh ] && [ -r ~/.ssh ] && [ -x ~/.ssh ]; then echo "{REMOVED_MARK} {tag}"; exit 0; fi',
+        f'  if [ ! -e ~/.ssh ] && [ ! -L ~/.ssh ] && [ -x ~ ]; then echo "{REMOVED_MARK} {tag}"; exit 0; fi',
+        "fi",
+        f'echo "{UNKNOWN_MARK} {tag}"; exit 2',
+    ])
 
 
 def end_temporary_access(directory, runner=subprocess.run):
     """Remove exactly the line DSSA added, then the private folder.
-    Returns True when the line is gone; on False the folder is kept for a
-    retry (the line stops working at its expiry-time anyway)."""
+
+    Returns True when the server confirmed the line is gone, False when it
+    confirmed the line is still there (the folder is kept for a retry; the
+    line stops working at its expiry-time anyway). Raises RemovalUnknown
+    when no confirmation arrived; the folder is kept."""
 
     directory = Path(directory)
     meta = json.loads((directory / "meta.json").read_text())
@@ -280,12 +339,19 @@ def end_temporary_access(directory, runner=subprocess.run):
         raise EnrolError("Invalid temporary access record.")
     try:
         result = _with_key(runner, meta["entry"], directory, _remove_command(tag))
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RemovalUnknown(f"no answer from the server: {error}") from error
+    lines = (result.stdout or "").splitlines()
+    if f"{REMOVED_MARK} {tag}" in lines:
+        shutil.rmtree(directory, ignore_errors=True)
+        return True
+    if f"{PRESENT_MARK} {tag}" in lines:
         return False
-    if result.returncode != 0:
-        return False
-    shutil.rmtree(directory, ignore_errors=True)
-    return True
+    if f"{UNKNOWN_MARK} {tag}" in lines:
+        raise RemovalUnknown("the server could not check whether the key line is gone "
+                             "(authorized_keys or ~/.ssh is unreadable)")
+    detail = ((result.stderr or "").strip().splitlines() or [f"exit {result.returncode}"])[-1]
+    raise RemovalUnknown(f"the server did not confirm the removal ({detail})")
 
 
 def discard_temporary_access(directory):

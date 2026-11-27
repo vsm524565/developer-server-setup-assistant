@@ -16,12 +16,14 @@ Security (docs/design/web-ui.md):
 - Every action is appended to the web UI's audit log with the user name.
 """
 
+import contextlib
 import hashlib
 import html
 import json
 import os
 import re
 import secrets
+import shutil
 import ssl
 import threading
 import time
@@ -30,6 +32,7 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 from bridge.components import run
 from bridge.components.approval import (
@@ -40,7 +43,7 @@ from bridge.components.loader import load_component_definitions
 from bridge.components.risk import risky_steps
 from bridge.webui import enrol as enrolment
 from bridge.webui.auth import AuthError, Sessions, Users
-from bridge.webui.jobs import Job, Jobs
+from bridge.webui.jobs import Job, Jobs, JobStartError
 
 COOKIE = "dssa_session"
 PLAN_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -94,6 +97,13 @@ class App:
         # plan ID -> {"owner", "connection", "target"} for plans made on a
         # temporary server, kept on disk so a reused name never inherits them.
         self.plan_owners = {}
+        # target -> actions (approve, apply, report, resume) between their
+        # authorization and their job's start; access cannot end meanwhile.
+        self.actions = {}
+        self.connecting = set()  # names being enrolled (saved or temporary), see reserve_name
+        # target -> meta of a connection whose removal a restart interrupted
+        # (round 9): not active, retried by the sweep, its name still taken.
+        self.cleanup_pending = {}
         self.lock = threading.Lock()
         self.load_temporary()
         self.load_plan_owners()
@@ -128,29 +138,199 @@ class App:
     def temp_dir(self, target):
         return self.config.home / "temporary" / target
 
+    @staticmethod
+    def valid_meta(meta, name):
+        """Round 12: a connection record DSSA can act on: an object for this
+        folder, with a valid tag, owner, numeric expiry and inventory entry.
+        Anything else (a list, a string, a record of another folder) is
+        invalid metadata, and the name stays reserved."""
+
+        return (isinstance(meta, dict) and meta.get("target_id") == name
+                and isinstance(meta.get("tag"), str) and bool(enrolment.TAG_RE.fullmatch(meta["tag"]))
+                and isinstance(meta.get("owner"), str)
+                and isinstance(meta.get("expires"), (int, float)) and not isinstance(meta.get("expires"), bool)
+                and isinstance(meta.get("entry"), dict))
+
     def load_temporary(self):
         root = self.config.home / "temporary"
         if not root.is_dir():
             return
+        ended, intents = self.ended_connections(), self.listed_intents()
+        unlisted = intents is None  # the intents exist but cannot be listed
+        intents = intents or set()
+        records = {tag: self.read_cleanup(tag) for tag in intents}
+        by_target = {r["target"]: (tag, r) for tag, r in records.items() if r and r.get("target")}
+        found = set()
         for folder in sorted(root.iterdir()):
+            name = folder.name
+            if not TARGET_RE.fullmatch(name):
+                continue
             try:
                 meta = json.loads((folder / "meta.json").read_text())
-            except (OSError, ValueError):
+                if not self.valid_meta(meta, name):
+                    raise ValueError("invalid connection record")  # round 12
+            except FileNotFoundError:
+                # No meta.json: only a confirmed removal or an expiry deletes it, so
+                # this is a leftover (round 7); a same-name enrolment clears it.
                 continue
-            if meta.get("target_id") == folder.name:
-                self.temporary[folder.name] = meta
+            except (OSError, ValueError):
+                # Round 11: unreadable. It may be an ended connection, a pending
+                # cleanup or a live one: never active, never freed. Reserved as
+                # pending, its intent kept, until meta.json can be read again.
+                tag, record = by_target.get(name, (None, None))
+                self.cleanup_pending[name] = {
+                    "target_id": name, "tag": tag, "unreadable": True,
+                    "owner": (record or {}).get("owner"), "expires": (record or {}).get("expires"),
+                    "retire_only": bool((record or {}).get("removed"))}
+                if tag:
+                    found.add(tag)
+                continue
+            tag = meta["tag"]
+            if tag in intents or unlisted:
+                # Round 9: DSSA stopped during its removal, maybe right after the
+                # server removed the key. Round 10: also a removal with no answer,
+                # or one whose retirement could not be recorded. Not active; the
+                # sweep retries it, and the name stays taken until that succeeds.
+                if (records.get(tag) or {}).get("removed"):
+                    meta["retire_only"] = True  # round 11: confirmed before
+                self.cleanup_pending[name] = meta
+                found.add(tag)
+                continue
+            if tag in ended:
+                # Round 8: its key was removed or expired, but the folder could
+                # not be deleted or moved. Never active again; a same-name
+                # enrolment clears it (add_temporary -> clear_leftover).
+                continue
+            self.temporary[name] = meta
+        for connection in intents - found:
+            if records.get(connection) is not None:
+                self.drop_cleanup(connection)  # its folder is gone: nothing left to do
+            # an intent that cannot be read is never dropped
+
+    def ended_root(self):
+        return self.config.home / "temporary-ended"
+
+    def mark_ended(self, connection):
+        """Record outside the connection's folder that its key is gone
+        (removed or expired), so a folder that cannot be deleted is never
+        loaded as active after a restart (Codex review, round 8). Returns
+        None, or the error when the record could not be written."""
+
+        try:
+            if not enrolment.TAG_RE.fullmatch(connection or ""):
+                raise ValueError(f"invalid connection tag {connection!r}")
+            self.ended_root().mkdir(mode=0o700, exist_ok=True)
+            fd = os.open(self.ended_root() / connection, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            try:
+                os.write(fd, time.strftime("%Y-%m-%dT%H:%M:%SZ\n", time.gmtime()).encode())
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            return None
+        except (OSError, ValueError) as error:
+            return error
+
+    def ended_connections(self):
+        """Tags whose key was removed or expired: the ended records, plus the
+        audit log's removed/expired lines (for a record that failed)."""
+
+        ended = set()
+        try:
+            ended.update(p.name for p in self.ended_root().iterdir() if enrolment.TAG_RE.fullmatch(p.name))
+        except OSError:
+            pass
+        try:
+            with open(self.config.audit, encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if '"temp_access_removed"' in line or '"temp_access_expired"' in line:
+                        try:
+                            entry = json.loads(line)
+                        except ValueError:
+                            continue
+                        if entry.get("action") in ("temp_access_removed", "temp_access_expired"):
+                            ended.add(entry.get("connection"))
+        except OSError:
+            pass
+        ended.discard(None)
+        return ended
+
+    def clear_leftover(self, target):
+        """Get a temporary folder out of the name's way (Codex review, round 7).
+
+        Deletes it; if that leaves anything, moves what is left to
+        <home>/temporary-leftover/ (same file system, one rename), where it
+        is never loaded as a connection. Returns (cleared, note): cleared is
+        False only when the folder still blocks the name; note says what was
+        left and where, for the audit line and the error shown."""
+
+        folder = self.temp_dir(target)
+        try:
+            enrolment.discard_temporary_access(folder)
+        except Exception:
+            pass
+        if not os.path.lexists(folder):
+            return True, None
+        aside = self.config.home / "temporary-leftover" / f"{target}-{secrets.token_hex(8)}"
+        try:
+            aside.parent.mkdir(mode=0o700, exist_ok=True)
+            os.rename(folder, aside)
+        except OSError as error:
+            return False, f"{folder} could not be deleted or moved aside ({error})"
+        shutil.rmtree(aside, ignore_errors=True)
+        if os.path.lexists(aside):
+            return True, f"what could not be deleted was moved to {aside}"
+        return True, None
 
     def temporary_of(self, user):
         return sorted((m for m in self.temporary.values() if m["owner"] == user), key=lambda m: m["target_id"])
 
-    def add_temporary(self, user, pending, password, fingerprint):
-        name = pending["name"]
+    @contextlib.contextmanager
+    def reserve_name(self, name):
+        """Hold a server name while it is being enrolled, saved or temporary
+        (Codex review, round 6): one enrolment per name at a time, and never
+        a name that is saved, connected for a setup, or being enrolled."""
+
         if not TARGET_RE.fullmatch(name or ""):
             raise ValueError("Invalid server name (lower case letters, digits, _ and -).")
         with self.lock:
-            taken = name in self.temporary or any(t["target_id"] == name for t in self.targets())
-        if taken:
-            raise ValueError(f"A server named {name} already exists.")
+            if name in self.cleanup_pending:
+                raise ValueError(f"Access of an earlier connection to {name} is still being removed; "
+                                 "try again in a few minutes.")
+            if name in self.temporary or name in self.connecting:
+                raise ValueError(f"A server named {name} already exists.")
+            self.connecting.add(name)
+        try:
+            # Checked while reserved: a saved enrolment of this name holds the
+            # same reservation, so nobody can add it between here and the end.
+            if any(t["target_id"] == name for t in self.targets()):
+                raise ValueError(f"A server named {name} already exists.")
+            yield name
+        finally:
+            with self.lock:
+                self.connecting.discard(name)
+
+    def add_temporary(self, user, pending, password, fingerprint):
+        with self.reserve_name(pending["name"]) as name:
+            # Not connected (the reservation says so), so a folder with this
+            # name is left from an ended connection whose deletion failed.
+            if os.path.lexists(self.temp_dir(name)):
+                cleared, note = self.clear_leftover(name)
+                self.audit(user, "temp_leftover_cleared" if cleared else "temp_leftover_blocked",
+                           target=name, **({"leftover": note} if note else {}))
+                if not cleared:
+                    raise ValueError(f"A folder left from an earlier connection to {name} could not be "
+                                     f"cleared: {note}. Remove it on the web UI host, then connect again.")
+            return self._add_temporary(user, pending, password, fingerprint, name)
+
+    def add_saved(self, user, pending, password, fingerprint):
+        with self.reserve_name(pending["name"]) as name:
+            entry = enrolment.enrol(name, pending["host"], pending["port"], pending["user"], password,
+                                    fingerprint, pending["keys"], self.config.master_key,
+                                    self.config.known_hosts, self.config.inventory, pending["lab"])
+        self.audit(user, "server_added", target=entry["target_id"], host=entry["host"], fingerprint=fingerprint)
+        return entry
+
+    def _add_temporary(self, user, pending, password, fingerprint, name):
         meta = enrolment.temporary_access(name, pending["host"], pending["port"], pending["user"], password,
                                           fingerprint, pending["keys"], self.temp_dir(name), user,
                                           pending["lab"], TEMP_WINDOW)
@@ -324,6 +504,66 @@ class App:
             raise ApprovalError(f"This plan was not made on the temporary server {target}. "
                                 "Make a new plan.")
 
+    def historical(self, plan_id, target):
+        """True for a plan made on a temporary connection that is not the live
+        one any more: legacy (no connection recorded), ended, or replaced by
+        another connection with the same name. It can be read, never used."""
+
+        owner = self.plan_owners.get(plan_id)
+        if owner is None:
+            return False
+        meta = self.temporary.get(target)
+        return owner["connection"] is None or meta is None or meta.get("tag") != owner["connection"]
+
+    @contextlib.contextmanager
+    def bound_action(self, user, plan_id):
+        """Approve, apply, report and resume act through the connection that
+        was authorized, from preflight to job start (Codex review of round 3).
+
+        The stored plan's owner and connection are checked first (before
+        anything reads the target), the connection is captured, and the
+        action is registered so access cannot end until it finishes. Each
+        step that uses the connection calls still_bound() under the lock."""
+
+        _, plan, _ = run.load_plan(plan_id)
+        target = plan["target"]["target_id"]
+        with self.lock:
+            self.require_plan_owner(user, plan_id, target)
+            self.require_owner(user, target)
+            meta = self.temporary.get(target)
+            action = SimpleNamespace(target=target, plan=plan, tag=meta["tag"] if meta else None,
+                                     host=meta["host"] if meta else None,
+                                     inventory=self.inventory(target), access=self.access(target),
+                                     env=self.env(target))
+            self.still_bound(action)
+            self.actions[target] = self.actions.get(target, 0) + 1
+        try:
+            yield action
+        finally:
+            with self.lock:
+                left = self.actions.get(target, 1) - 1
+                if left:
+                    self.actions[target] = left
+                else:
+                    self.actions.pop(target, None)
+
+    def still_bound(self, action):
+        """Refuse unless the authorized connection is still the live one.
+        Callers hold self.lock."""
+
+        meta = self.temporary.get(action.target)
+        if action.tag is None:
+            if meta is not None:
+                raise ApprovalError(f"{action.target} became a temporary server during this action, so nothing "
+                                    "was used. Make a new plan.")
+            return
+        if meta is None or meta.get("tag") != action.tag or meta.get("ending"):
+            raise ApprovalError(f"Access to {action.target} ended or was replaced during this action, so "
+                                "nothing was used and no approval was consumed. Connect again and make a new plan.")
+        if meta["expires"] - time.time() < TEMP_MARGIN:
+            raise ApprovalError(f"Access to {action.target} ends in under {TEMP_MARGIN // 60} minutes, so nothing "
+                                "was started. Connect again and make a new plan.")
+
     def may_see(self, user, target, plan_id=None, run_by=None):
         """Plans and runs on saved servers are shared with every signed-in
         user. A temporary server's plans and runs are their owner's only,
@@ -347,43 +587,268 @@ class App:
     def running_on(self, target):
         return any(j.target == target and j.finished is None for j in self.jobs.recent(1000))
 
-    def end_temporary(self, user, target, reason):
-        """Remove the key line and the private folder. Returns True when done.
-        A run still going keeps its access until it ends."""
+    def end_temporary(self, user, target, reason, connection):
+        """Remove the key line and the private folder of the connection with
+        this tag. Returns True when that connection is gone (now or before).
+
+        Bound to the caller's connection (Codex review, round 5): a stale
+        caller whose connection has already ended never touches a newer
+        connection with the same name. One removal runs at a time: a second
+        caller backs off while the first is removing. An action in progress
+        or a running job keeps its connection until it ends."""
 
         with self.lock:
             meta = self.temporary.get(target)
-        if meta is None:
-            return True
-        if self.running_on(target):
-            return False
-        # Audit first, then forget it: whoever sees it gone also finds the audit line.
-        if enrolment.end_temporary_access(self.temp_dir(target)):
-            self.audit(user, "temp_access_removed", target=target, reason=reason, connection=meta.get("tag"))
+            if meta is None or meta.get("tag") != connection:
+                return True
+            if meta.get("ending"):
+                return False  # another removal is in progress
+            if self.actions.get(target) or self.running_on(target):
+                return False
+            # From here no action may start on it (still_bound refuses), and no
+            # new connection can take the name while it is still listed.
+            meta["ending"] = True
+        return self._remove_connection(user, target, meta, reason, self.temporary)
+
+    def _remove_connection(self, user, target, meta, reason, table, resumed=False):
+        """The removal itself, for a connection marked "ending" in table
+        (self.temporary, or self.cleanup_pending after a restart).
+
+        Round 9: the cleanup intent is saved before the server is asked to
+        remove the key. If DSSA stops anywhere after that, before its ended
+        record or audit line, the next start finds the intent, keeps the
+        connection out of the active list and retries (the key removal is
+        idempotent: it removes the line if it is still there)."""
+
+        connection = meta["tag"]
+        removed = expired = False
+        outcome = None  # "done", "pending" or "refused"; None: DSSA stopped part-way
+        try:
+            unknown, detail = False, None
+            if resumed and (meta.get("retire_only") or connection in self.ended_connections()):
+                # Recorded as removed (or expired) before: only its retirement
+                # is left. Its key no longer logs in, so do not ask the server.
+                # Round 11: retire_only is kept in the pending state and its
+                # intent, so this holds even when the ended record and the
+                # audit line both failed.
+                removed = True
+            elif failed := self.mark_cleanup(connection, target, meta):
+                # Without the intent a stop right after removing would reload the
+                # connection as active, so nothing is removed this time.
+                detail = f"the cleanup could not be recorded before removing: {failed}"
+            else:
+                try:
+                    removed = enrolment.end_temporary_access(self.temp_dir(target))
+                except enrolment.RemovalUnknown as error:
+                    # Round 10: asked, but no answer (a lost reply, a timeout, a
+                    # refused login). The key may be gone: never active again.
+                    unknown, detail = True, str(error)
+                except Exception as error:  # an unreadable record: the server was not asked
+                    detail = str(error) or type(error).__name__
+            expired = not removed and meta.get("expires") is not None and time.time() >= meta["expires"]
+            extra = {"error": detail} if detail and not (removed or expired) else {}
+            if resumed:
+                extra["resumed"] = True
+            if removed or expired:
+                # Written before anything else can fail: after a restart this
+                # connection is never loaded as active (round 8).
+                failed = self.mark_ended(connection)
+                if failed:
+                    extra["ended_record_error"] = str(failed)
+                # Expired: the key stopped working at its expiry-time, so nothing is
+                # left to log in with. Either way the folder must go, or be moved
+                # out of the name's way (round 7) so the name can connect again.
+                _, note = self.clear_leftover(target)
+                if note:
+                    extra["leftover"] = note
+                # Round 10: unrecorded retirement with the original folder still
+                # there: keep the intent, so a restart neither loads it as active
+                # nor frees its name; the sweep retries the retirement.
+                stuck = failed is not None and os.path.lexists(self.temp_dir(target))
+                outcome = "pending" if stuck else "done"
+                if stuck:
+                    # Round 11: confirmed, so the retry only retires it locally.
+                    meta["retire_only"] = True
+                    failed = self.mark_cleanup(connection, target, meta, removed=True)
+                    if failed:
+                        extra["intent_error"] = str(failed)
+            else:
+                outcome = "pending" if unknown else "refused"
+            if outcome == "pending":
+                extra["pending"] = True
+            what = ("temp_access_removed" if removed else "temp_access_expired" if expired
+                    else "temp_access_remove_unknown" if unknown else "temp_access_remove_failed")
+            # Audit first, then settle: whoever sees it gone also finds the audit line.
+            try:
+                self.audit(user, what, target=target, reason=reason, connection=connection, **extra)
+            except OSError as error:
+                if removed or expired:
+                    raise OSError(f"Access to {target} was removed, but the audit log could not be "
+                                  f"written: {error}") from error
+                raise
+        finally:
+            # Round 10: the intent and the tables are settled under one lock,
+            # before "ending" is cleared, so no retry of this tag can start
+            # (and write its own intent) until they agree.
             with self.lock:
-                self.temporary.pop(target, None)
+                self._settle(target, meta, table, outcome, resumed)
+        return removed or expired
+
+    def _settle(self, target, meta, table, outcome, resumed):
+        """Called with self.lock held. Round 6: never leaves "ending" set."""
+
+        connection = meta["tag"]
+        if outcome == "done":
+            self.drop_cleanup(connection)  # the ended record now speaks for it
+            if table.get(target) is meta:  # forget only this connection
+                table.pop(target)
                 self.records.pop(target, None)
-            return True
-        if time.time() >= meta["expires"]:
-            # The key stopped working at its expiry-time: nothing left to log in with.
-            enrolment.discard_temporary_access(self.temp_dir(target))
-            self.audit(user, "temp_access_expired", target=target, reason=reason)
+        elif outcome == "pending":
+            # Not active; the name stays taken; the sweep retries (resume_cleanup).
+            if table is not self.cleanup_pending and table.get(target) is meta:
+                table.pop(target)
+                self.records.pop(target, None)
+                self.cleanup_pending[target] = meta
+        elif outcome == "refused" and not resumed:
+            # The server confirmed the key is still there (or was not asked):
+            # it stays active until its expiry, after a restart too.
+            self.drop_cleanup(connection)
+        # outcome None: DSSA stopped part-way (SystemExit, KeyboardInterrupt);
+        # the intent stays, so the next start retries instead of guessing.
+        meta.pop("ending", None)
+
+    def cleanup_root(self):
+        return self.config.home / "temporary-cleanup"
+
+    def mark_cleanup(self, connection, target, meta=None, removed=False):
+        """Save the intent to remove this connection's key (round 9).
+
+        Round 11: it also keeps the owner and expiry (a start that cannot read
+        the connection's own meta.json still knows them) and, once the server
+        confirmed the removal or the key expired, removed=True, so a retry
+        only retires it locally and never asks the server again."""
+
+        try:
+            if not enrolment.TAG_RE.fullmatch(connection or ""):
+                raise ValueError(f"invalid connection tag {connection!r}")
+            self.cleanup_root().mkdir(mode=0o700, exist_ok=True)
+            fd = os.open(self.cleanup_root() / connection, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                         0o600)
+            try:
+                record = {"target": target, "connection": connection, "at": int(time.time()),
+                          "owner": (meta or {}).get("owner"), "expires": (meta or {}).get("expires"),
+                          "removed": bool(removed)}
+                os.write(fd, (json.dumps(record) + "\n").encode())
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            return None
+        except (OSError, ValueError) as error:
+            return error
+
+    def drop_cleanup(self, connection):
+        try:
+            os.unlink(self.cleanup_root() / connection)
+        except OSError:
+            pass  # a leftover intent only makes the next start retry a removal
+
+    def cleanup_intents(self):
+        intents = self.listed_intents()
+        return set() if intents is None else intents
+
+    def listed_intents(self):
+        """The intent tags; None when the folder exists but cannot be listed."""
+
+        try:
+            return {p.name for p in self.cleanup_root().iterdir() if enrolment.TAG_RE.fullmatch(p.name)}
+        except FileNotFoundError:
+            return set()
+        except OSError:
+            return None
+
+    def read_cleanup(self, connection):
+        """An intent's record, or None when it cannot be read."""
+
+        try:
+            record = json.loads((self.cleanup_root() / connection).read_text())
+            return record if isinstance(record, dict) and record.get("connection") == connection else None
+        except (OSError, ValueError):
+            return None
+
+    def resume_cleanup(self):
+        """Retry the removals a restart interrupted (round 9). Each stays
+        pending, its name reserved, until its key is removed or has expired."""
+
+        for target, meta in list(self.cleanup_pending.items()):
+            if meta.get("unreadable"):
+                meta = self.reread_pending(target, meta)
+                if meta is None:
+                    continue  # still unreadable: the name stays reserved
+            if not self.intent_allows_retry(meta):
+                continue  # round 12: its intent cannot be read; never overwritten, no SSH
             with self.lock:
-                self.temporary.pop(target, None)
-            return True
-        self.audit(user, "temp_access_remove_failed", target=target, reason=reason)
-        return False
+                if self.cleanup_pending.get(target) is not meta or meta.get("ending"):
+                    continue
+                meta["ending"] = True
+            try:
+                self._remove_connection(meta["owner"], target, meta, "cleanup resumed after a restart",
+                                        self.cleanup_pending, resumed=True)
+            except OSError:
+                pass  # its audit line failed; the state is settled, the sweep goes on
+
+    def intent_allows_retry(self, meta):
+        """Round 12: reread the intent right before a retry. An intent that
+        exists but cannot be read (permissions, broken JSON) is left intact
+        and blocks the retry: it may say the key was already removed, and a
+        retry would overwrite it and ask the server again. A readable one
+        that says removed turns the retry into a local retirement."""
+
+        tag = meta.get("tag")
+        if not enrolment.TAG_RE.fullmatch(tag or ""):
+            return False
+        try:
+            os.lstat(self.cleanup_root() / tag)
+        except FileNotFoundError:
+            return True  # none yet: mark_cleanup writes it before the server is asked
+        except OSError:
+            return False  # cannot even tell whether it exists
+        record = self.read_cleanup(tag)
+        if record is None:
+            return False
+        if record.get("removed"):
+            meta["retire_only"] = True
+        return True
+
+    def reread_pending(self, target, placeholder):
+        """Round 11: a pending entry whose meta.json could not be read at
+        start. Once it can be read (and is the same connection), the real
+        record replaces the placeholder; until then it stays reserved."""
+
+        try:
+            meta = json.loads((self.temp_dir(target) / "meta.json").read_text())
+        except (OSError, ValueError):
+            return None
+        if not self.valid_meta(meta, target) or (placeholder.get("tag") and meta["tag"] != placeholder["tag"]):
+            return None  # still invalid (round 12): stays reserved
+        if placeholder.get("retire_only"):
+            meta["retire_only"] = True
+        with self.lock:
+            if self.cleanup_pending.get(target) is not placeholder or placeholder.get("ending"):
+                return None
+            self.cleanup_pending[target] = meta
+        return meta
 
     def sweep_temporary(self, active_users=None):
         """End temporary access near its expiry, or when its owner has no
         session left (decision 2b: never past the user's session)."""
 
+        self.resume_cleanup()
         now = time.time()
         for target, meta in list(self.temporary.items()):
             ending = now >= meta["expires"] - TEMP_MARGIN
             orphaned = active_users is not None and meta["owner"] not in active_users
             if ending or orphaned:
-                self.end_temporary(meta["owner"], target, "expiry" if ending else "session ended")
+                self.end_temporary(meta["owner"], target, "expiry" if ending else "session ended", meta["tag"])
 
     def targets(self):
         """Saved servers only; temporary ones are never in the inventory."""
@@ -456,10 +921,17 @@ class App:
             env["DSSA_DEFINITIONS_DIR"] = str(self.config.definitions_dir)
         return env
 
-    def check(self, plan_id):
+    def check(self, plan_id, action=None):
+        """Preflight. With an action, through the connection it captured, never
+        whatever has the name now (Codex review, round 5)."""
+
         plan_bytes, plan, path = run.load_plan(plan_id)
         target = plan["target"]["target_id"]
-        keys = known_host_fingerprints(self.host_of(target), **self.access(target))
+        if action is not None:
+            host, access = action.host or self.host_of(target), action.access
+        else:
+            host, access = self.host_of(target), self.access(target)
+        keys = known_host_fingerprints(host, **access)
         return plan_bytes, plan, path, keys, preflight_plan(plan_bytes, keys, definitions_dir=self.config.definitions_dir)
 
     # --- operations -------------------------------------------------------------
@@ -536,69 +1008,192 @@ class App:
     def approve(self, user, plan_id, typed):
         """typed: {component: name typed, "_confirm": APPROVE}."""
 
-        plan_bytes, plan, _, keys, check = self.check(plan_id)
-        self.require_owner(user, plan["target"]["target_id"])
-        self.require_plan_owner(user, plan_id, plan["target"]["target_id"])
-        if check["verification_only"]:
-            return None
-        for name, _what, _warnings in risky_steps(plan, include_drafts=True):
-            if typed.get(name, "").strip() != name:
-                raise ApprovalError(f"{name} not confirmed; nothing was approved.")
-        record = approve_plan(plan_bytes, keys, typed.get("_confirm", "").strip(), operator=user,
-                              definitions_dir=self.config.definitions_dir)
-        self.audit(user, "approve", plan_id=plan_id, target=plan["target"]["target_id"])
+        with self.bound_action(user, plan_id) as action:
+            plan_bytes, plan, _, keys, check = self.check(plan_id, action)
+            if check["verification_only"]:
+                return None
+            for name, _what, _warnings in risky_steps(plan, include_drafts=True):
+                if typed.get(name, "").strip() != name:
+                    raise ApprovalError(f"{name} not confirmed; nothing was approved.")
+            with self.lock:
+                # The host keys above came from this connection's known_hosts.
+                self.still_bound(action)
+                record = approve_plan(plan_bytes, keys, typed.get("_confirm", "").strip(), operator=user,
+                                      definitions_dir=self.config.definitions_dir)
+        try:
+            self.audit(user, "approve", plan_id=plan_id, target=plan["target"]["target_id"])
+        except OSError as error:
+            raise ApprovalError(f"The plan was approved, but the web UI audit log could not be written "
+                                f"({error}). The approval is recorded and has not been used.") from None
         return record
 
     def start_apply(self, user, plan_id, on_finish=None):
         """Like main.step_apply: log in first, then use the approval, then run."""
 
-        plan_bytes, plan, path, keys, check = self.check(plan_id)
-        target = plan["target"]["target_id"]
-        self.require_owner(user, target)
-        self.require_plan_owner(user, plan_id, target)
-        if not check["passed"] and not check["requires_approval"]:
-            raise ApprovalError("Apply refused: the plan failed its checks.", check["issues"])
-        if not check["verification_only"]:
-            # Decision 3b (2026-11-25): only the user who approved may apply.
-            # Checked before logging in, so a refusal leaves the approval unused.
-            by = approver(plan_id)
-            if by is not None and by != user:
-                raise ApprovalError(f"Apply refused: {by} approved this plan, so only {by} can apply it. "
-                                    "The approval was not used.")
-            if run.check_login(target, plan["target"]["host_key_sha256"], self.inventory(target),
-                               **self.access(target)) != 0:
-                raise ApprovalError("Apply refused: cannot log in to the server. The approval was not used.")
+        with self.bound_action(user, plan_id) as action:
+            target = action.target
+            plan_bytes, plan, path, keys, check = self.check(plan_id, action)
+            if not check["passed"] and not check["requires_approval"]:
+                raise ApprovalError("Apply refused: the plan failed its checks.", check["issues"])
+            if not check["verification_only"]:
+                # Decision 3b (2026-11-25): only the user who approved may apply.
+                # Checked before logging in, so a refusal leaves the approval unused.
+                by = approver(plan_id)
+                if by is not None and by != user:
+                    raise ApprovalError(f"Apply refused: {by} approved this plan, so only {by} can apply it. "
+                                        "The approval was not used.")
+                with self.lock:
+                    self.still_bound(action)  # the preflight read this connection's known_hosts
+                if run.check_login(target, plan["target"]["host_key_sha256"], action.inventory,
+                                   **action.access) != 0:
+                    raise ApprovalError("Apply refused: cannot log in to the server. The approval was not used.")
+            # Same connection still, then claim the approval and start the job
+            # together: nothing can end or replace it in between.
+            with self.lock:
+                self.still_bound(action)
+                used = False
+                kind = "verify" if check["verification_only"] else "apply"
+                if not check["verification_only"]:
+                    used = self.claim_approval(user, plan_id, target, keys)
+                job = None
+                try:
+                    if used:
+                        path = default_state_dir() / "approvals" / plan_id / "plan.json"
+                        plan_bytes = path.read_bytes()
+                    digest = "sha256:" + hashlib.sha256(plan_bytes).hexdigest()
+                    if action.tag is not None:
+                        # Item 2: a successful run ends temporary access; after a failure it
+                        # stays (until the window ends) so Report and Resume rollback still work.
+                        then = on_finish
+
+                        def on_finish(job, then=then):
+                            if then:
+                                then(job)
+                            if job.code == 0:
+                                threading.Thread(target=self.end_temporary,
+                                                 args=(user, target, "run finished", action.tag),
+                                                 daemon=True).start()
+                    job = Job("apply", ["bash", str(run.RUN_SCRIPT), "apply", target, str(path), digest],
+                              action.env, plan_id, target, user, on_finish)
+                    # No audit line, no run: a failure here starts nothing.
+                    self.audit(user, "apply", plan_id=plan_id, target=target, job=job.id)
+                except Exception as error:
+                    raise self.start_failed(user, kind, plan_id, target, job and job.id, error, used,
+                                            False, "preparing the run") from None
+                try:
+                    return self.jobs.start(job)
+                except JobStartError as error:
+                    # The job is finished (exit 127), so it blocks no cleanup.
+                    # A consumed approval stays used: single use is kept.
+                    raise self.start_failed(user, kind, plan_id, target, job.id, error, used,
+                                            error.launched, "starting the run", error.stopped) from None
+
+    def approval_consumed(self, plan_id):
+        """(True, None) when the single-use marker exists, (False, None) when
+        it is absent, (None, error) when it cannot be read (round 7: an
+        unreadable marker is never taken for an absent one)."""
+
+        try:
+            os.lstat(default_state_dir() / "approvals" / plan_id / "consumed")
+            return True, None
+        except FileNotFoundError:
+            return False, None
+        except OSError as error:
+            return None, error
+
+    def claim_approval(self, user, plan_id, target, keys):
+        """Use the approval once; True when it was used for this run.
+
+        Round 7: consume_approval writes its marker, then audits; that audit
+        can fail with ApprovalError (or anything else) after the marker is
+        written. Round 8: such failures carry approval_consumed = True; any
+        other ApprovalError is a refusal and is passed on unchanged. For other
+        errors the marker is read before and after the call. On any doubt
+        the approval counts as used, the marker is never removed, and no job
+        starts."""
+
+        before, unreadable = self.approval_consumed(plan_id)
+        if before is None:
+            raise self.start_failed(user, "apply", plan_id, target, None,
+                                    f"its single-use marker cannot be read: {unreadable}", False, False,
+                                    "checking the approval") from None
+        try:
             consume_approval(plan_id, keys, definitions_dir=self.config.definitions_dir,
                              expected_operator=user)
-            path = default_state_dir() / "approvals" / plan_id / "plan.json"
-            plan_bytes = path.read_bytes()
-        digest = "sha256:" + hashlib.sha256(plan_bytes).hexdigest()
-        if target in self.temporary:
-            # Item 2: a successful run ends temporary access; after a failure it
-            # stays (until the window ends) so Report and Resume rollback still work.
-            then = on_finish
+        except Exception as error:
+            after, unreadable = self.approval_consumed(plan_id)
+            if getattr(error, "approval_consumed", False):
+                used = True  # this call wrote the marker, then failed (its audit, say)
+            elif isinstance(error, ApprovalError):
+                # Round 8: refused before or at the marker (not valid, another
+                # approver, already used, a concurrent consumer that won):
+                # this call used nothing, so the refusal is passed on as it is.
+                raise
+            elif before or after is False:
+                used = bool(before)
+            else:
+                used = after  # True: written (by this call or another); None: unknown, treated as used
+            detail = str(error) if unreadable is None else f"{error}; the marker cannot be read: {unreadable}"
+            raise self.start_failed(user, "apply", plan_id, target, None, detail, used, False,
+                                    "claiming the approval") from None
+        return True
 
-            def on_finish(job, then=then):
-                if then:
-                    then(job)
-                if job.code == 0:
-                    threading.Thread(target=self.end_temporary, args=(user, target, "run finished"),
-                                     daemon=True).start()
-        job = Job("apply", ["bash", str(run.RUN_SCRIPT), "apply", target, str(path), digest],
-                  self.env(target), plan_id, target, user, on_finish)
-        self.audit(user, "apply", plan_id=plan_id, target=target, job=job.id)
-        return self.jobs.start(job)
+    def start_failed(self, user, kind, plan_id, target, job_id, error, used, launched, stage, stopped=None):
+        """Audit a run that did not start cleanly and return the error to show.
+
+        Round 6: says whether the approval was used (True, False or unknown)
+        and whether anything may have run: nothing when the process was never
+        launched, uncertain when it was launched and then stopped."""
+
+        what = {"apply": "run", "verify": "verification run", "report": "report",
+                "resume": "resume rollback"}[kind]
+        if launched:
+            # Round 7: "stopped" only when DSSA saw the process exit.
+            outcome = (f"The {what} was started, but DSSA could not follow it and "
+                       + ("stopped it" if stopped else "could not confirm that it stopped")
+                       + f" ({error}). Part of it may have run on the server: open Report to see "
+                       "the server's state.")
+        else:
+            outcome = (f"The {what} could not start ({error})." if stage == "starting the run" else
+                       f"The {what} was not started: {stage} failed ({error}).") + " Nothing ran on the server."
+        if kind != "apply":
+            approval = " Try again." if not launched else ""
+        elif used is None:
+            approval = " DSSA could not tell whether the approval was used; treat it as used and make a new plan."
+        elif used:
+            approval = " The approval was used and cannot be used again; make a new plan to try again."
+        else:
+            approval = " The approval was not used; you can try again."
+        try:
+            self.audit(user, f"{'apply' if kind == 'verify' else kind}_start_failed", plan_id=plan_id,
+                       target=target, job=job_id,
+                       stage=stage, launched=bool(launched), error=str(error),
+                       **({"stopped": bool(stopped)} if launched else {}),
+                       **({"approval_used": used} if kind == "apply" else {}))
+            logged = ""
+        except Exception as audit_error:
+            logged = f" This failure could not be written to the audit log either ({audit_error})."
+        return ApprovalError(outcome + approval + logged)
 
     def start_remote(self, user, kind, plan_id):
-        _, plan, _ = run.load_plan(plan_id)
-        target, key = plan["target"]["target_id"], plan["target"]["host_key_sha256"]
-        self.require_owner(user, target)
-        self.require_plan_owner(user, plan_id, target)
-        command = "report" if kind == "report" else "resume-rollback"
-        job = Job(kind, ["bash", str(run.RUN_SCRIPT), command, target, plan_id, key],
-                  self.env(target), plan_id, target, user)
-        self.audit(user, kind, plan_id=plan_id, target=target, job=job.id)
-        return self.jobs.start(job)
+        with self.bound_action(user, plan_id) as action:
+            target, key = action.target, action.plan["target"]["host_key_sha256"]
+            command = "report" if kind == "report" else "resume-rollback"
+            with self.lock:
+                self.still_bound(action)
+                job = None
+                try:
+                    job = Job(kind, ["bash", str(run.RUN_SCRIPT), command, target, plan_id, key],
+                              action.env, plan_id, target, user)
+                    self.audit(user, kind, plan_id=plan_id, target=target, job=job.id)
+                except Exception as error:
+                    raise self.start_failed(user, kind, plan_id, target, job and job.id, error, None,
+                                            False, "preparing the run") from None
+                try:
+                    return self.jobs.start(job)
+                except JobStartError as error:
+                    raise self.start_failed(user, kind, plan_id, target, job.id, error, None,
+                                            error.launched, "starting the run", error.stopped) from None
 
     # --- batches (decision 7) -------------------------------------------------
 
@@ -707,6 +1302,38 @@ def plan_table(plan):
             f'({esc(plan["package_manager"])}) · {esc(plan["operation"].upper())}{mode} · '
             f'host key <code>{esc(plan["target"]["host_key_sha256"])}</code> · created {esc(plan["created_at"])}</p>'
             f'<table><tr><th>Component</th><th>Action</th><th>Variant</th><th>Reasons</th></tr>{"".join(rows)}</table>')
+
+
+def plan_summary(plan):
+    """The plan page's summary and table: Changes leaves out SKIP steps,
+    which are only verified (lab finding, web UI pass 1 step 9)."""
+
+    runnable = plan.get("runnable", [])
+    held = [s["component"] for s in plan["steps"] if s["component"] not in runnable]
+    skipped = [s["component"] for s in plan["steps"] if s["component"] in runnable and s["action"] == "SKIP"]
+    changes = [c for c in runnable if c not in skipped]
+    return (f'<dl class="meta"><div><dt>Server</dt><dd>{esc(plan["target"]["target_id"])}</dd></div>'
+            f'<div><dt>Operation</dt><dd>{esc(plan["operation"])}</dd></div>'
+            f'<div><dt>Changes</dt><dd>{esc(", ".join(changes) or "nothing")}</dd></div>'
+            + (f'<div><dt>Verified only</dt><dd>{esc(", ".join(skipped))}</dd></div>' if skipped else "")
+            + f'<div><dt>Held or blocked</dt><dd>{esc(", ".join(held) or "none")}</dd></div></dl>'
+            + plan_table(plan))
+
+
+def already_run(plan_id):
+    """The saved result of a plan that ran, or "" (read from this machine)."""
+
+    saved = run.runs_dir() / plan_id / "summary.json"
+    if not saved.is_file():
+        return ""
+    try:
+        summary = json.loads(saved.read_text())
+        outcomes = ", ".join(f'{r.get("component")}: {r.get("outcome")}' for r in summary.get("results", []))
+    except (OSError, ValueError):
+        summary, outcomes = {}, ""
+    return (f'<p>Already run: status <b>{esc(summary.get("status", "?"))}</b>'
+            f'{" (" + esc(outcomes) + ")" if outcomes else ""}. A plan runs only once; '
+            f'make a new plan to run again.</p>')
 
 
 def confirm_fields(plan):
@@ -865,7 +1492,8 @@ class Handler(BaseHTTPRequestHandler):
                 f'<td>{esc(time.strftime("%H:%M UTC", time.gmtime(m["expires"])))}</td>'
                 f'<td><a href="/servers/{esc(m["target_id"])}/apps">Applications &rarr;</a></td>'
                 f'<td><form method="post" action="/servers/{esc(m["target_id"])}/end" class="inline">'
-                f'{csrf(session)}<button>End access</button></form></td></tr>' for m in temps)
+                f'{csrf(session)}<input type="hidden" name="connection" value="{esc(m["tag"])}">'
+                f'<button>End access</button></form></td></tr>' for m in temps)
             body += ('<h2>This setup only</h2><p class="hint">Servers you connected without saving. '
                      'Only you see them.</p><table><tr><th scope="col">Server</th><th scope="col">Host</th>'
                      f'<th scope="col">Access ends</th><th scope="col">Open</th><th scope="col"></th></tr>{rows}</table>')
@@ -1077,38 +1705,27 @@ class Handler(BaseHTTPRequestHandler):
     def plan_page(self, session, plan_id):
         if not PLAN_ID_RE.fullmatch(plan_id):
             raise ValueError("Invalid plan ID.")
-        _, plan, _, _, check = self.app.check(plan_id)
-        if not self.app.may_see(session["user"], plan["target"]["target_id"], plan_id=plan_id):
+        # Authorize from the stored plan and its recorded owner first: the
+        # preflight below reads the target's current connection, which a
+        # historical temporary plan no longer has (Codex review of 839a377).
+        _, stored, _ = run.load_plan(plan_id)
+        if not self.app.may_see(session["user"], stored["target"]["target_id"], plan_id=plan_id):
             raise KeyError("No such plan.")
+        if self.app.historical(plan_id, stored["target"]["target_id"]):
+            return self.historical_plan_page(session, plan_id, stored)
+        _, plan, _, _, check = self.app.check(plan_id)
         approvals = default_state_dir() / "approvals" / plan_id
         approved = (approvals / "approval.json").exists()
         used = (approvals / "consumed").exists()
         by = approver(plan_id) if approved else None
         target = plan["target"]["target_id"]
         runnable = plan.get("runnable", [])
-        held = [s["component"] for s in plan["steps"] if s["component"] not in runnable]
-        # "Changes" lists only what the run changes; SKIP steps are verified
-        # (lab finding, web UI pass 1 step 9).
-        skipped = [s["component"] for s in plan["steps"] if s["component"] in runnable and s["action"] == "SKIP"]
-        changes = [c for c in runnable if c not in skipped]
-        body = (f'<dl class="meta"><div><dt>Server</dt><dd>{esc(target)}</dd></div>'
-                f'<div><dt>Operation</dt><dd>{esc(plan["operation"])}</dd></div>'
-                f'<div><dt>Changes</dt><dd>{esc(", ".join(changes) or "nothing")}</dd></div>'
-                + (f'<div><dt>Verified only</dt><dd>{esc(", ".join(skipped))}</dd></div>' if skipped else "")
-                + f'<div><dt>Held or blocked</dt><dd>{esc(", ".join(held) or "none")}</dd></div></dl>'
-                + plan_table(plan))
+        body = plan_summary(plan)
         # A plan runs once; after that only its result (Report) makes sense
         # (lab finding, combined test step 12).
-        saved = run.runs_dir() / plan_id / "summary.json"
-        if saved.is_file():
-            try:
-                summary = json.loads(saved.read_text())
-                outcomes = ", ".join(f'{r.get("component")}: {r.get("outcome")}' for r in summary.get("results", []))
-            except (OSError, ValueError):
-                summary, outcomes = {}, ""
-            body += (f'<p>Already run: status <b>{esc(summary.get("status", "?"))}</b>'
-                     f'{" (" + esc(outcomes) + ")" if outcomes else ""}. A plan runs only once; '
-                     f'make a new plan to run again.</p>')
+        already = already_run(plan_id)
+        if already:
+            body += already
             body += (f'<form method="post" action="/plans/{plan_id}/report" class="inline">{csrf(session)}'
                      f'<button>Report</button></form>')
             return self.send_html(page("Plan", body, session))
@@ -1144,6 +1761,19 @@ class Handler(BaseHTTPRequestHandler):
                 body += (f'<form method="post" action="/plans/{plan_id}/{kind}" class="inline">{csrf(session)}'
                          f'<button>{"Report" if kind == "report" else "Resume rollback"}</button></form>')
         body += f'<p><a href="/servers/{esc(target)}/apps">&larr; Applications on {esc(target)}</a></p>'
+        self.send_html(page("Plan", body, session))
+
+    def historical_plan_page(self, session, plan_id, plan):
+        """Read-only: the plan as stored and its saved result, without SSH,
+        preflight or any action (Codex review of 839a377)."""
+
+        target = plan["target"]["target_id"]
+        legacy = self.app.plan_owners[plan_id]["connection"] is None
+        body = plan_summary(plan) + already_run(plan_id)
+        body += (f'<p class="notice" role="status">This plan was made on an earlier temporary connection to '
+                 f'<b>{esc(target)}</b>{" before ownership was recorded" if legacy else ", which has ended"}. '
+                 f'You can read it here, but it cannot be approved, applied, reported or resumed. '
+                 f'To work on the server, connect again and make a new plan.</p>')
         self.send_html(page("Plan", body, session))
 
     def batch_page(self, session, batch_id):
@@ -1229,7 +1859,8 @@ class Handler(BaseHTTPRequestHandler):
                 if user not in self.app.sessions.active_users():
                     for meta in self.app.temporary_of(user):
                         threading.Thread(target=self.app.end_temporary,
-                                         args=(user, meta["target_id"], "signed out"), daemon=True).start()
+                                         args=(user, meta["target_id"], "signed out", meta["tag"]),
+                                         daemon=True).start()
                 return self.redirect("/login", [("Set-Cookie", self.cookie("", expire=True))])
             if path == "/plan":
                 return self.post_plan(user, form)
@@ -1237,10 +1868,22 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[1] == "servers" and parts[3] == "plan":
                 return self.post_single_plan(user, parts[2], form)
             if len(parts) == 4 and parts[1] == "servers" and parts[3] == "end":
-                self.app.target_entry(parts[2], user)  # the owner only
-                if not self.app.end_temporary(user, parts[2], "ended by the user"):
-                    raise ValueError("Access could not be removed yet (a run is still going, or the server "
-                                     "did not answer). It stops working at its expiry time anyway.")
+                # Round 6: end the connection this form was rendered for, never
+                # a newer one that reused its name since.
+                target, tag = parts[2], form.get("connection", "")
+                if not TARGET_RE.fullmatch(target):
+                    raise ValueError("Invalid server.")
+                if not tag:
+                    raise ValueError("This page is out of date; reload it and end access again.")
+                with self.app.lock:
+                    meta = self.app.temporary.get(target)
+                    current = meta is not None and meta["owner"] == user and meta["tag"] == tag
+                if not current:
+                    raise ValueError(f"That access to {target} has already ended, so nothing was removed. "
+                                     "Any newer connection with this name was left as it is.")
+                if not self.app.end_temporary(user, target, "ended by the user", tag):
+                    raise ValueError("Access could not be removed yet (a run or another removal is still going, "
+                                     "or the server did not answer). It stops working at its expiry time anyway.")
                 return self.redirect("/")
             if path == "/servers/scan":
                 return self.post_scan(session, form)
@@ -1359,12 +2002,7 @@ class Handler(BaseHTTPRequestHandler):
         if not pending.get("save"):
             meta = self.app.add_temporary(user, pending, form.get("password", ""), form.get("fingerprint", ""))
             return self.redirect(f"/servers/{meta['target_id']}/apps")
-        entry = enrolment.enrol(pending["name"], pending["host"], pending["port"], pending["user"],
-                                form.get("password", ""), form.get("fingerprint", ""), pending["keys"],
-                                self.app.config.master_key, self.app.config.known_hosts,
-                                self.app.config.inventory, pending["lab"])
-        self.app.audit(user, "server_added", target=entry["target_id"], host=entry["host"],
-                       fingerprint=form.get("fingerprint"))
+        entry = self.app.add_saved(user, pending, form.get("password", ""), form.get("fingerprint", ""))
         self.redirect(f"/servers/{entry['target_id']}")
 
 

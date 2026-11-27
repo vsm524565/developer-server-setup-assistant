@@ -325,6 +325,34 @@ class ConsumeTests(ApprovalTestCase):
         self.assertFalse((self.record_dir() / "consumed").exists(), "the approval stays unused")
         self.assertEqual(self.consume(expected_operator="tester")["runnable"], ["alpha", "beta"])
 
+    def test_a_failed_consume_audit_is_flagged_as_consumed(self):
+        """Codex review round 8: after the marker, a failure says so."""
+        failing = Path(self.tmp.name) / "fail-audit.sh"
+        failing.write_text("#!/usr/bin/env bash\nexit 1\n")
+        failing.chmod(0o700)
+        with mock.patch.object(approval_module, "AUDIT_SCRIPT", failing):
+            with self.assertRaises(ApprovalError) as raised:
+                self.consume()
+        self.assertIs(getattr(raised.exception, "approval_consumed", False), True)
+        self.assertTrue((self.record_dir() / "consumed").exists(), "single use kept")
+        with self.assertRaisesRegex(ApprovalError, "not valid"):
+            self.consume()
+
+    def test_a_refusal_is_never_flagged_as_consumed(self):
+        real_check = approval_module.check_approval
+
+        def check_then_race(*args, **kwargs):
+            result = real_check(*args, **kwargs)
+            (self.record_dir() / "consumed").write_text("other\n")
+            return result
+        with mock.patch.object(approval_module, "check_approval", check_then_race):
+            with self.assertRaises(ApprovalError) as raised:
+                self.consume()
+        self.assertFalse(hasattr(raised.exception, "approval_consumed"))
+        with self.assertRaises(ApprovalError) as raised:
+            self.consume(current_host_keys={OTHER_KEY})
+        self.assertFalse(hasattr(raised.exception, "approval_consumed"))
+
     def test_concurrent_claim_loses_to_existing_marker(self):
         # Simulate another apply creating the marker after our check passed.
         real_check = approval_module.check_approval

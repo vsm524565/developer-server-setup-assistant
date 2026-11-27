@@ -461,10 +461,17 @@ def consume_approval(plan_id, current_host_keys, now=None, root=None,
 
     # The marker stays even if auditing fails: a claimed approval must
     # never become usable again. The caller does not apply on error.
-    record = json.loads((directory / "approval.json").read_text())
-    _audit("approval.consumed", result["plan"], "consumed", {
-        "approval_id": record["approval_id"],
-        "approved_by": record["approved_by"],
-        "approved_components": record["approved_components"],
-    })
+    # Anything raised from here on carries approval_consumed = True, so a
+    # caller can tell "this call used it" from a refusal such as a
+    # concurrent consumer's "already used" (Codex review, round 8).
+    try:
+        record = json.loads((directory / "approval.json").read_text())
+        _audit("approval.consumed", result["plan"], "consumed", {
+            "approval_id": record["approval_id"],
+            "approved_by": record["approved_by"],
+            "approved_components": record["approved_components"],
+        })
+    except Exception as error:
+        error.approval_consumed = True
+        raise
     return result["plan"]

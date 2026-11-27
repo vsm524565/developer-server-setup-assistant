@@ -15,6 +15,7 @@ the same way.
 
 import os
 import secrets
+import signal
 import subprocess
 import threading
 import time
@@ -23,6 +24,25 @@ from bridge.components import run
 
 MAX_OUTPUT = 2 * 1024 * 1024
 MAX_INPUT = 1024
+
+
+class JobStartError(OSError):
+    """The job's process could not be started. The job is left finished
+    (exit 127, the reason in its output), so it blocks nothing.
+
+    launched: False when the process was never created, so nothing ran
+    (confirmed). True when it was created and then had to be stopped because
+    its output could not be followed: part of it may have run on the server,
+    so the outcome is uncertain (Codex review, round 6).
+
+    stopped: for a launched process, True only when DSSA saw it exit after
+    stopping it; False when that could not be confirmed (round 7). None
+    when nothing was launched."""
+
+    def __init__(self, message, launched=False, stopped=None):
+        super().__init__(message)
+        self.launched = launched
+        self.stopped = stopped if launched else None
 
 
 class _Buffer:
@@ -62,15 +82,80 @@ class Job:
     # --- lifecycle ---------------------------------------------------------
 
     def start(self):
-        master, slave = os.openpty()
-        self._master = master
-        self._process = subprocess.Popen(
-            self.argv, stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            env=self.env, start_new_session=True, close_fds=True,
-        )
-        os.close(slave)
-        threading.Thread(target=self._read, name=f"job-{self.id}", daemon=True).start()
+        master = slave = None
+        try:
+            master, slave = os.openpty()
+            self._master = master
+            self._process = subprocess.Popen(
+                self.argv, stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=self.env, start_new_session=True, close_fds=True,
+            )
+            os.close(slave)
+            slave = None
+            threading.Thread(target=self._read, name=f"job-{self.id}", daemon=True).start()
+        except Exception as error:
+            launched = self._process is not None
+            stopped = None
+            try:
+                stopped = self._teardown(master, slave)
+            except Exception:  # round 7: a teardown failure never hides the start failure
+                stopped = False if launched else None
+            self._master = None
+            if not launched:
+                reason = f"the run could not start: {error}"
+            elif stopped:
+                reason = f"the run was started but could not be followed, so DSSA stopped it: {error}"
+            else:
+                reason = (f"the run was started but could not be followed; DSSA tried to stop it "
+                          f"but could not confirm that it stopped: {error}")
+            # Whatever the teardown did, the job ends here: a job left
+            # "running" would block cleanup of its server.
+            try:
+                self.fail(reason)
+            except Exception:
+                self.rc, self.finished = 127, self.finished or time.time()
+            raise JobStartError(str(error), launched=launched, stopped=stopped) from error
         return self
+
+    def _teardown(self, master, slave):
+        """Best effort: stop a half-started process group, close descriptors.
+        Each step runs even if an earlier one fails. Returns None when no
+        process was launched, else whether it was seen to exit."""
+
+        process = self._process
+        stopped = None
+        if process is not None:
+            stopped = False
+            steps = (lambda: os.killpg(process.pid, signal.SIGKILL), lambda: process.kill())
+            for step in steps:
+                try:
+                    step()
+                except Exception:
+                    pass
+            try:
+                process.wait(timeout=10)
+                stopped = process.returncode is not None
+            except Exception:
+                stopped = False
+            try:
+                process.stdout.close()
+            except Exception:
+                pass
+        for fd in (master, slave):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+        return stopped
+
+    def fail(self, reason):
+        """Leave the job finished without a process (exit 127)."""
+
+        with self.lock:
+            self.rc = 127
+            self.finished = time.time()
+            self.output += f"[DSSA web UI: {reason}]\n".encode(errors="replace")
 
     def _read(self):
         marker = run.MarkerFilter(_Buffer(self))
@@ -105,7 +190,7 @@ class Job:
     def send(self, text):
         """Pass one line the operator typed to the server's terminal."""
 
-        if self.finished is not None:
+        if self.finished is not None or self._master is None:
             raise ValueError("The run has finished.")
         data = text.encode()
         if len(data) > MAX_INPUT or b"\n" in data or b"\r" in data:

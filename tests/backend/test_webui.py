@@ -1,6 +1,7 @@
 """Web UI on the master server (4.46): login, CSRF, jobs, server enrolment."""
 
 import http.client
+import contextlib
 import io
 import json
 import os
@@ -12,8 +13,10 @@ import time
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
+from bridge.components.approval import ApprovalError
 from bridge.webui import enrol
 from bridge.webui.app import App, Config, Handler, serve
 from bridge.webui.auth import AuthError, Sessions, Users
@@ -65,6 +68,11 @@ class AuthTests(unittest.TestCase):
 
 class HttpBase(unittest.TestCase):
     """The real handler on 127.0.0.1, plain HTTP (as behind a reverse proxy)."""
+
+    @staticmethod
+    def stored(plan):
+        """The plan page loads the stored plan before any preflight."""
+        return mock.patch("bridge.components.run.load_plan", return_value=(b"{}", plan, Path("/x")))
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -408,7 +416,7 @@ class WorkspaceCatalogTests(HttpBase):
         plan = self.plan(["git", "nginx"], ["git", "nginx"])
         plan["steps"][0]["action"] = "SKIP"
         check = {"issues": [], "passed": True, "verification_only": False, "requires_approval": True}
-        with mock.patch.object(App, "check", return_value=(b"{}", plan, None, [], check)):
+        with self.stored(plan), mock.patch.object(App, "check", return_value=(b"{}", plan, None, [], check)):
             _, body = self.request("GET", f"/plans/{self.PLAN_ID}", cookie=cookie)
             self.assertIn("<dt>Changes</dt><dd>nginx</dd>", body)
             self.assertIn("<dt>Verified only</dt><dd>git</dd>", body)
@@ -466,7 +474,7 @@ class WorkspaceCatalogTests(HttpBase):
                          reasons=["Not a fresh server: nginx is installed.", "Removal is not offered for panels."])
         check = {"issues": ["Nothing in the plan is runnable."], "passed": False,
                  "verification_only": False, "requires_approval": False}
-        with mock.patch.object(App, "check", return_value=(b"{}", plan, None, [], check)):
+        with self.stored(plan), mock.patch.object(App, "check", return_value=(b"{}", plan, None, [], check)):
             response, body = self.request("GET", f"/plans/{self.PLAN_ID}", cookie=cookie)
         self.assertEqual(response.status, 200)
         self.assertIn("Not a fresh server: nginx is installed.", body)
@@ -482,7 +490,7 @@ class WorkspaceCatalogTests(HttpBase):
         cookie = self.login()
         plan = self.plan(["git"], ["git"])
         check = {"issues": [], "passed": True, "verification_only": False, "requires_approval": True}
-        with mock.patch.object(App, "check", return_value=(b"{}", plan, None, [], check)):
+        with self.stored(plan), mock.patch.object(App, "check", return_value=(b"{}", plan, None, [], check)):
             response, body = self.request("GET", f"/plans/{self.PLAN_ID}", cookie=cookie)
         self.assertIn(f'action="/plans/{self.PLAN_ID}/approve"', body)
         self.assertIn('name="reviewed" value="1" required', body, "decision 3a: tick to approve")
@@ -509,12 +517,12 @@ class WorkspaceCatalogTests(HttpBase):
         folder = Path(os.environ["XDG_STATE_HOME"]) / "developer-server-setup-assistant/approvals" / self.PLAN_ID
         folder.mkdir(parents=True)
         (folder / "approval.json").write_text(json.dumps({"approved_by": "bob"}))
-        with mock.patch.object(App, "check", return_value=(b"{}", plan, None, [], check)):
+        with self.stored(plan), mock.patch.object(App, "check", return_value=(b"{}", plan, None, [], check)):
             response, body = self.request("GET", f"/plans/{self.PLAN_ID}", cookie=cookie)
         self.assertIn("Approved by <b>bob</b>; only bob can apply it.", body)
         self.assertNotIn(f'action="/plans/{self.PLAN_ID}/apply"', body)
         (folder / "approval.json").write_text(json.dumps({"approved_by": "alice"}))
-        with mock.patch.object(App, "check", return_value=(b"{}", plan, None, [], check)):
+        with self.stored(plan), mock.patch.object(App, "check", return_value=(b"{}", plan, None, [], check)):
             response, body = self.request("GET", f"/plans/{self.PLAN_ID}", cookie=cookie)
         self.assertIn(f'action="/plans/{self.PLAN_ID}/apply"', body)
 
@@ -628,6 +636,7 @@ class TemporaryAccessTests(unittest.TestCase):
         self.keys_file = self.home / ".ssh/authorized_keys"
         self.keys_file.write_text("ssh-ed25519 AAAAexisting someone@laptop\n")
         self.calls, self.client, self.fail_key_login = [], "192.0.2.7 51234 22", False
+        self.shell = "bash"
 
     def runner(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
@@ -636,7 +645,9 @@ class TemporaryAccessTests(unittest.TestCase):
         if self.fail_key_login and "BatchMode=yes" in argv:
             return mock.Mock(returncode=255, stdout="", stderr="Permission denied")
         env = dict(os.environ, HOME=str(self.home), SSH_CLIENT=self.client)
-        return __import__("subprocess").run(["bash", "-c", argv[-1]], env=env, capture_output=True, text=True)
+        if getattr(self, "fake_bin", None):
+            env["PATH"] = f"{self.fake_bin}:{env['PATH']}"
+        return __import__("subprocess").run([self.shell, "-c", argv[-1]], env=env, capture_output=True, text=True)
 
     def connect(self, folder="t/tmp1"):
         return enrol.temporary_access("tmp1", "203.0.113.5", 22, "deploy", "the-password", self.FP, self.KEYS,
@@ -682,11 +693,167 @@ class TemporaryAccessTests(unittest.TestCase):
     def test_failed_removal_keeps_the_folder_for_a_retry(self):
         self.connect()
         folder = self.base / "t/tmp1"
-        self.fail_key_login = True
-        self.assertFalse(enrol.end_temporary_access(folder, runner=self.runner))
+        self.fail_key_login = True  # after a removal the key itself no longer logs in
+        with self.assertRaisesRegex(enrol.RemovalUnknown, "did not confirm the removal \\(Permission denied\\)"):
+            enrol.end_temporary_access(folder, runner=self.runner)
         self.assertTrue((folder / "meta.json").exists())
         enrol.discard_temporary_access(folder)
         self.assertFalse(folder.exists())
+
+    # --- round 10: a confirmed refusal versus an answer that never came ----
+
+    def test_a_confirmed_refusal_is_told_apart(self):
+        meta = self.connect()
+        folder = self.base / "t/tmp1"
+        # Round 12: a symlinked authorized_keys is never replaced: the line stays.
+        real = self.home / "real_keys"
+        real.write_text(self.keys_file.read_text())
+        self.keys_file.unlink()
+        self.keys_file.symlink_to(real)
+        self.assertFalse(enrol.end_temporary_access(folder, runner=self.runner))
+        self.assertTrue(self.keys_file.is_symlink(), "still the user's symlink")
+        self.assertIn(meta["tag"], real.read_text())
+        self.assertTrue((folder / "meta.json").exists())
+
+    def test_a_lost_reply_after_a_real_removal_is_unknown(self):
+        meta = self.connect()
+        folder = self.base / "t/tmp1"
+
+        def lost_reply(argv, **kwargs):
+            self.runner(argv, **kwargs)  # the server removed the line...
+            return mock.Mock(returncode=255, stdout="", stderr="Connection reset by peer")  # ...the reply was lost
+        with self.assertRaisesRegex(enrol.RemovalUnknown, "Connection reset by peer"):
+            enrol.end_temporary_access(folder, runner=lost_reply)
+        self.assertNotIn(meta["tag"], self.keys_file.read_text(), "gone on the server")
+        self.assertTrue((folder / "meta.json").exists(), "kept: DSSA cannot know that")
+
+    # --- round 11: REMOVED only after the line is confirmed absent ----------
+
+    def remove_under(self, shell, setup):
+        """Connect, apply setup (permissions), run the real remove command in
+        shell; return (result or the exception, authorized_keys afterwards)."""
+
+        self.shell = "bash"
+        meta = self.connect()
+        folder = self.base / "t/tmp1"
+        undo = setup() or (lambda: None)
+        self.shell = shell
+        try:
+            outcome = enrol.end_temporary_access(folder, runner=self.runner)
+        except enrol.RemovalUnknown as error:
+            outcome = error
+        finally:
+            undo()
+        text = self.keys_file.read_text() if self.keys_file.exists() else None
+        return meta, outcome, text, folder
+
+    def each_shell(self):
+        for shell in ("bash", "dash"):
+            with self.subTest(shell=shell):
+                yield shell
+                __import__("shutil").rmtree(self.base / "t", ignore_errors=True)
+                (self.home / ".ssh").mkdir(mode=0o700, exist_ok=True)
+                self.keys_file.write_text("ssh-ed25519 AAAAexisting someone@laptop\n")
+
+    def chmod(self, path, mode, back):
+        def apply():
+            path.chmod(mode)
+            return lambda: path.chmod(back)
+        return apply
+
+    def test_an_unreadable_authorized_keys_is_unknown_and_left_intact(self):
+        for shell in self.each_shell():
+            meta, outcome, text, folder = self.remove_under(shell, self.chmod(self.keys_file, 0o200, 0o600))
+            self.assertIsInstance(outcome, enrol.RemovalUnknown)
+            self.assertIn("could not check whether the key line is gone", str(outcome))
+            self.assertIn("someone@laptop", text, "never truncated")
+            self.assertIn(meta["tag"], text)
+            self.assertTrue((folder / "meta.json").exists())
+
+    def test_an_unsearchable_ssh_folder_is_unknown(self):
+        for shell in self.each_shell():
+            meta, outcome, text, folder = self.remove_under(shell, self.chmod(self.home / ".ssh", 0o600, 0o700))
+            self.assertIsInstance(outcome, enrol.RemovalUnknown)
+            self.assertIn(meta["tag"], text)
+
+    def test_a_failed_rewrite_is_a_confirmed_refusal_and_truncates_nothing(self):
+        for shell in self.each_shell():  # ~/.ssh read-only: the temporary file cannot be made
+            meta, outcome, text, folder = self.remove_under(shell, self.chmod(self.home / ".ssh", 0o500, 0o700))
+            self.assertIs(outcome, False)
+            self.assertEqual(text.count("\n"), 2, "both lines still there")
+            self.assertFalse((self.home / ".ssh/authorized_keys.dssa-tmp").exists())
+
+    def test_a_missing_file_or_folder_is_a_confirmed_removal(self):
+        for shell in self.each_shell():
+            def drop_file():
+                self.keys_file.unlink()
+            _, outcome, _, folder = self.remove_under(shell, drop_file)
+            self.assertIs(outcome, True)
+            self.assertFalse(folder.exists())
+        for shell in self.each_shell():
+            def drop_folder():
+                __import__("shutil").rmtree(self.home / ".ssh")
+            _, outcome, _, _ = self.remove_under(shell, drop_folder)
+            self.assertIs(outcome, True)
+
+    def test_a_normal_removal_is_confirmed_in_both_shells(self):
+        for shell in self.each_shell():
+            meta, outcome, text, folder = self.remove_under(shell, lambda: None)
+            self.assertIs(outcome, True)
+            self.assertEqual(text, "ssh-ed25519 AAAAexisting someone@laptop\n")
+
+    # --- round 12: an atomic replacement after a complete staged write -----
+
+    def staged_files(self):
+        return sorted(p.name for p in (self.home / ".ssh").iterdir() if ".dssa" in p.name)
+
+    def failing(self, command, script="exit 1"):
+        """Put a failing (or lying) command first on the server's PATH."""
+        self.fake_bin = self.base / "fake-bin"
+        self.fake_bin.mkdir(exist_ok=True)
+        tool = self.fake_bin / command
+        tool.write_text(f"#!/bin/sh\n{script}\n")
+        tool.chmod(0o755)
+        return lambda: setattr(self, "fake_bin", None)
+
+    def test_a_read_only_file_is_replaced_atomically_with_its_mode_kept(self):
+        for shell in self.each_shell():
+            self.keys_file.write_text("ssh-ed25519 AAAAexisting someone@laptop\nssh-ed25519 AAAAother x@y")
+            def read_only():
+                self.inode = self.keys_file.stat().st_ino
+                self.keys_file.chmod(0o400)
+            meta, outcome, text, _ = self.remove_under(shell, read_only)
+            self.assertIs(outcome, True)
+            self.assertEqual(text, "ssh-ed25519 AAAAexisting someone@laptop\nssh-ed25519 AAAAother x@y\n",
+                             "unrelated lines kept, also a last line without a newline")
+            self.assertEqual(stat.S_IMODE(self.keys_file.stat().st_mode), 0o400, "its mode kept")
+            self.assertNotEqual(self.keys_file.stat().st_ino, self.inode, "replaced by rename, not written in place")
+            self.assertEqual(self.staged_files(), [])
+            self.keys_file.chmod(0o600)
+
+    def test_a_failed_step_leaves_authorized_keys_untouched(self):
+        steps = {"mv": "exit 1", "chmod": "exit 1", "mktemp": "exit 1", "stat": "exit 1",
+                 "wc": "echo 99"}  # a short or long staged copy
+        for command, script in steps.items():
+            for shell in self.each_shell():
+                with self.subTest(step=command):
+                    before = None
+
+                    def setup():
+                        nonlocal before
+                        before = (self.keys_file.read_text(), self.keys_file.stat().st_ino)
+                        return self.failing(command, script)
+                    meta, outcome, text, folder = self.remove_under(shell, setup)
+                    self.assertIs(outcome, False, "the line is still there: a confirmed refusal")
+                    self.assertEqual((text, self.keys_file.stat().st_ino), before, "untouched, same file")
+                    self.assertEqual(self.staged_files(), [], "the staged copy is removed")
+                    self.assertTrue((folder / "meta.json").exists())
+
+    def test_a_timeout_is_unknown(self):
+        self.connect()
+        timeout = mock.Mock(side_effect=__import__("subprocess").TimeoutExpired("ssh", 30))
+        with self.assertRaisesRegex(enrol.RemovalUnknown, "no answer from the server"):
+            enrol.end_temporary_access(self.base / "t/tmp1", runner=timeout)
 
     def test_unconfirmed_fingerprint_and_bad_names_are_refused(self):
         with self.assertRaises(enrol.EnrolError):
@@ -823,8 +990,9 @@ class TemporaryServerTests(HttpBase):
             with self.assertRaisesRegex(Exception, "another user's temporary server"):
                 self.app.make_plans("bob", ["tmp1"], ["git"], "install", False)
         make.assert_not_called()
-        response, _ = self.request("POST", "/servers/tmp1/end", f"csrf={self.token(other)}", other)
-        self.assertEqual(response.status, 400)
+        response, _ = self.request("POST", "/servers/tmp1/end",
+                                   f"csrf={self.token(other)}&connection={self.app.temporary['tmp1']['tag']}", other)
+        self.assertEqual(response.status, 400, "even with the right connection tag")
         self.assertEqual(self.removed, [])
 
     def test_planning_uses_its_own_inventory_known_hosts_and_key(self):
@@ -850,7 +1018,9 @@ class TemporaryServerTests(HttpBase):
     def test_end_access_and_sign_out_remove_the_key(self):
         cookie = self.login()
         self.connect(cookie)
-        response, _ = self.request("POST", "/servers/tmp1/end", f"csrf={self.token(cookie)}", cookie)
+        tag = re.search(r'name="connection" value="([^"]+)"', self.request("GET", "/", cookie=cookie)[1]).group(1)
+        self.assertEqual(tag, self.app.temporary["tmp1"]["tag"], "the form carries its connection")
+        response, _ = self.request("POST", "/servers/tmp1/end", f"csrf={self.token(cookie)}&connection={tag}", cookie)
         self.assertEqual(response.getheader("Location"), "/")
         self.assertEqual(self.removed, ["tmp1"])
         self.assertNotIn("tmp1", self.app.temporary)
@@ -876,11 +1046,11 @@ class TemporaryServerTests(HttpBase):
         cookie = self.login()
         self.connect(cookie)
         self.end_result = False
-        self.assertFalse(self.app.end_temporary("alice", "tmp1", "test"))
+        self.assertFalse(self.app.end_temporary("alice", "tmp1", "test", self.app.temporary["tmp1"]["tag"]))
         self.assertIn("tmp1", self.app.temporary)
         self.assertIn('"action": "temp_access_remove_failed"', self.config.audit.read_text())
         self.app.temporary["tmp1"]["expires"] = time.time() - 1
-        self.assertTrue(self.app.end_temporary("alice", "tmp1", "test"))
+        self.assertTrue(self.app.end_temporary("alice", "tmp1", "test", self.app.temporary["tmp1"]["tag"]))
         self.assertFalse((self.config.home / "temporary/tmp1").exists())
         self.assertIn('"action": "temp_access_expired"', self.config.audit.read_text())
 
@@ -900,7 +1070,7 @@ class TemporaryServerTests(HttpBase):
         self.app.bind_plan("alice", "11111111-2222-4333-8444-555555555555", "tmp1")
         plan = {"target": {"target_id": "tmp1", "host_key_sha256": "SHA256:x"}}
         check = {"passed": True, "requires_approval": True, "verification_only": False, "issues": []}
-        with mock.patch.object(App, "check", return_value=(b"{}", plan, Path("/x"), set(), check)), \
+        with self.stored(plan), mock.patch.object(App, "check", return_value=(b"{}", plan, Path("/x"), set(), check)), \
              mock.patch("bridge.components.run.check_login", return_value=0) as login, \
              mock.patch("bridge.webui.app.consume_approval") as consume, \
              mock.patch("bridge.webui.app.approver", return_value="alice"), \
@@ -928,7 +1098,7 @@ class TemporaryServerTests(HttpBase):
         other = self.login_as("bob", "another long password")
         plan = {"target": {"target_id": "tmp1", "host_key_sha256": "SHA256:x"}, "steps": [], "operation": "install"}
         check = {"passed": True, "requires_approval": True, "verification_only": False, "issues": []}
-        with mock.patch.object(App, "check", return_value=(b"{}", plan, Path("/x"), set(), check)):
+        with self.stored(plan), mock.patch.object(App, "check", return_value=(b"{}", plan, Path("/x"), set(), check)):
             response, body = self.request("GET", f"/plans/{plan_id}", cookie=other)
         self.assertEqual(response.status, 404)
         self.assertNotIn("tmp1", body)
@@ -959,7 +1129,7 @@ class TemporaryServerTests(HttpBase):
         with mock.patch("bridge.components.run.make_plan", return_value=(b"{}", {"plan_id": plan_id})), \
              mock.patch("bridge.components.run.save_plan"):
             self.app.make_plans("alice", ["tmp1"], ["git"], "install", False)
-        self.assertTrue(self.app.end_temporary("alice", "tmp1", "ended by the user"))
+        self.assertTrue(self.app.end_temporary("alice", "tmp1", "ended by the user", self.app.temporary["tmp1"]["tag"]))
         # Bob connects a server with the same name.
         bob = self.login_as("bob", "another long password")
         self.connect(bob)
@@ -973,7 +1143,7 @@ class TemporaryServerTests(HttpBase):
         self.assertNotIn("0123456789abcdef", self.request("GET", "/jobs", cookie=bob)[1])
         plan = {"target": {"target_id": "tmp1", "host_key_sha256": "SHA256:x"}, "steps": [], "operation": "install"}
         check = {"passed": True, "requires_approval": True, "verification_only": False, "issues": []}
-        with mock.patch.object(App, "check", return_value=(b"{}", plan, Path("/x"), set(), check)), \
+        with self.stored(plan), mock.patch.object(App, "check", return_value=(b"{}", plan, Path("/x"), set(), check)), \
              mock.patch("bridge.components.run.load_plan", return_value=(b"{}", plan, Path("/x"))), \
              mock.patch("bridge.components.run.check_login") as login:
             response, _ = self.request("GET", f"/plans/{plan_id}", cookie=bob)
@@ -1081,6 +1251,1021 @@ class TemporaryServerTests(HttpBase):
                 self.app.bind_plan("alice", self.PID, "tmp1")
         self.assertFalse(self.record_path().exists())
         self.assertNotIn(self.PID, self.app.plan_owners)
+
+    # --- actions stay on the authorized connection (Codex review, round 3) ---
+
+    APID = "33333333-2222-4333-8444-555555555555"
+
+    def action_setup(self, target="tmp1", bind=True):
+        """A temporary plan of alice's, approved by her, ready to act on."""
+
+        if bind:
+            self.connect(self.login())
+            self.app.bind_plan("alice", self.APID, target)
+        self.app.jobs = FakeJobs()
+        plan = {"plan_id": self.APID, "target": {"target_id": target, "host_key_sha256": "SHA256:x"},
+                "steps": [], "operation": "install", "runnable": ["git"]}
+        self.check_result = (b"{}", plan, Path("/x"), set(),
+                             {"passed": True, "requires_approval": True, "verification_only": False, "issues": []})
+        return contextlib.ExitStack(), plan
+
+    def patches(self, stack, plan, check=None, login=None):
+        stack.enter_context(mock.patch("bridge.components.run.load_plan", return_value=(b"{}", plan, Path("/x"))))
+        self.check = stack.enter_context(mock.patch.object(
+            App, "check", side_effect=check or (lambda *_: self.check_result)))
+        self.login_check = stack.enter_context(mock.patch(
+            "bridge.components.run.check_login", side_effect=login or (lambda *a, **k: 0)))
+        self.consume = stack.enter_context(mock.patch("bridge.webui.app.consume_approval"))
+        self.approved = stack.enter_context(mock.patch("bridge.webui.app.approve_plan", return_value={}))
+        stack.enter_context(mock.patch("bridge.webui.app.approver", return_value="alice"))
+        stack.enter_context(mock.patch("pathlib.Path.read_bytes", return_value=b"{}"))
+
+    def replace(self):
+        self.app.temporary["tmp1"] = dict(self.app.temporary["tmp1"], tag="dssa-temp-" + "f" * 16)
+
+    def assert_nothing_used(self):
+        self.consume.assert_not_called()
+        self.assertEqual(self.app.jobs.started, [])
+        self.assertEqual(self.app.actions, {}, "the action is unregistered after a refusal")
+
+    def test_apply_refuses_when_the_connection_is_replaced_during_preflight(self):
+        stack, plan = self.action_setup()
+        with stack:
+            self.patches(stack, plan, check=lambda *_: (self.replace(), self.check_result)[1])
+            with self.assertRaisesRegex(Exception, "ended or was replaced during this action"):
+                self.app.start_apply("alice", self.APID)
+        self.login_check.assert_not_called()
+        self.assert_nothing_used()
+
+    def test_apply_refuses_when_the_connection_is_replaced_during_login(self):
+        stack, plan = self.action_setup()
+        with stack:
+            self.patches(stack, plan, login=lambda *a, **k: (self.replace(), 0)[1])
+            with self.assertRaisesRegex(Exception, "no approval was consumed"):
+                self.app.start_apply("alice", self.APID)
+        self.assert_nothing_used()
+
+    def test_apply_refuses_when_access_ends_during_login(self):
+        stack, plan = self.action_setup()
+        with stack:
+            self.patches(stack, plan, login=lambda *a, **k: (self.app.temporary.pop("tmp1"), 0)[1])
+            with self.assertRaisesRegex(Exception, "ended or was replaced"):
+                self.app.start_apply("alice", self.APID)
+        self.assert_nothing_used()
+
+    def test_access_cannot_end_while_an_action_is_in_progress(self):
+        stack, plan = self.action_setup()
+        attempts = []
+
+        def login(*args, **kwargs):
+            attempts.append(self.app.end_temporary("alice", "tmp1", "signed out", self.app.temporary["tmp1"]["tag"]))
+            return 0
+        with stack:
+            self.patches(stack, plan, login=login)
+            job = self.app.start_apply("alice", self.APID)
+        self.assertEqual(attempts, [False], "sign-out waits for the action")
+        self.assertEqual(self.removed, [])
+        self.assertNotIn("ending", self.app.temporary["tmp1"])
+        self.assertEqual(self.consume.call_args.kwargs["expected_operator"], "alice")
+        self.assertEqual(self.login_check.call_args.kwargs,
+                         {"known_hosts": str(self.config.home / "temporary/tmp1/known_hosts")})
+        self.assertEqual(job.env["DSSA_KNOWN_HOSTS"], str(self.config.home / "temporary/tmp1/known_hosts"))
+        self.assertEqual(self.app.actions, {})
+
+    def test_no_action_starts_on_an_ending_or_nearly_expired_connection(self):
+        stack, plan = self.action_setup()
+        with stack:
+            self.patches(stack, plan)
+            self.app.temporary["tmp1"]["ending"] = True
+            for act in (lambda: self.app.start_apply("alice", self.APID),
+                        lambda: self.app.start_remote("alice", "report", self.APID),
+                        lambda: self.app.approve("alice", self.APID, {"_confirm": "APPROVE"})):
+                with self.assertRaisesRegex(Exception, "ended or was replaced"):
+                    act()
+            del self.app.temporary["tmp1"]["ending"]
+            self.app.temporary["tmp1"]["expires"] = int(time.time()) + 60
+            with self.assertRaisesRegex(Exception, "ends in under 5 minutes"):
+                self.app.start_apply("alice", self.APID)
+        self.check.assert_not_called()
+        self.approved.assert_not_called()
+        self.assert_nothing_used()
+
+    def test_approve_refuses_when_the_connection_is_replaced_during_preflight(self):
+        stack, plan = self.action_setup()
+        with stack:
+            self.patches(stack, plan, check=lambda *_: (self.replace(), self.check_result)[1])
+            with self.assertRaisesRegex(Exception, "ended or was replaced"):
+                self.app.approve("alice", self.APID, {"_confirm": "APPROVE"})
+        self.approved.assert_not_called()
+        self.assertEqual(self.app.actions, {})
+
+    def test_report_and_resume_use_the_authorized_connection(self):
+        stack, plan = self.action_setup()
+        with stack:
+            self.patches(stack, plan)
+            job = self.app.start_remote("alice", "report", self.APID)
+            self.assertEqual(job.env["DSSA_KNOWN_HOSTS"], str(self.config.home / "temporary/tmp1/known_hosts"))
+            self.replace()
+            with self.assertRaisesRegex(Exception, "earlier connection to tmp1"):
+                self.app.start_remote("alice", "resume", self.APID)
+        self.assertEqual(len(self.app.jobs.started), 1)
+        self.assertEqual(self.app.actions, {})
+
+    def test_a_saved_server_plan_refuses_if_its_name_turns_temporary_mid_action(self):
+        stack, plan = self.action_setup(target="web1", bind=False)
+        self.login()
+        with stack, mock.patch.object(App, "targets", return_value=[{"target_id": "web1"}]):
+            def turn(*_):
+                self.app.temporary["web1"] = {"owner": "bob", "tag": "dssa-temp-" + "e" * 16,
+                                              "expires": int(time.time()) + 3600}
+                return self.check_result
+            self.patches(stack, plan, check=turn)
+            with self.assertRaisesRegex(Exception, "became a temporary server during this action"):
+                self.app.start_apply("alice", self.APID)
+        self.login_check.assert_not_called()
+        self.assert_nothing_used()
+
+    # --- cleanup bound to its connection (Codex review, round 5) -----------
+
+    def tag(self, target="tmp1"):
+        return self.app.temporary[target]["tag"]
+
+    def test_overlapping_cleanup_removes_once(self):
+        self.connect(self.login())
+        tag = self.tag()
+        inside, release = threading.Event(), threading.Event()
+        real_end = self.fake_end
+
+        def slow_end(folder, runner=None):
+            inside.set()
+            release.wait(5)
+            return real_end(folder, runner)
+        results = []
+        with mock.patch("bridge.webui.enrol.end_temporary_access", side_effect=slow_end):
+            first = threading.Thread(target=lambda: results.append(
+                self.app.end_temporary("alice", "tmp1", "signed out", tag)))
+            first.start()
+            self.assertTrue(inside.wait(5))
+            # A second removal (sweep, logout, manual end) backs off.
+            self.assertFalse(self.app.end_temporary("alice", "tmp1", "expiry", tag))
+            # The name stays taken until the removal has finished.
+            bob = self.login_as("bob", "another long password")
+            response, _, _, _ = self.connect(bob)
+            self.assertEqual(response.status, 400)
+            release.set()
+            first.join(5)
+        self.assertEqual(results, [True])
+        self.assertEqual(self.removed, ["tmp1"], "removed exactly once")
+        self.assertNotIn("tmp1", self.app.temporary)
+
+    def test_stale_cleanup_never_touches_a_replacement(self):
+        alice = self.login()
+        self.connect(alice)
+        old = self.tag()
+        self.assertTrue(self.app.end_temporary("alice", "tmp1", "ended by the user", old))
+        bob = self.login_as("bob", "another long password")
+        self.connect(bob)
+        new = self.tag()
+        self.assertNotEqual(old, new)
+        # Late callers holding the old tag: job completion, logout, a sweep.
+        for reason in ("run finished", "signed out", "expiry"):
+            self.assertTrue(self.app.end_temporary("alice", "tmp1", reason, old), "theirs is already gone")
+        self.assertEqual(self.removed, ["tmp1"], "the replacement's key was never removed")
+        self.assertEqual((self.app.temporary["tmp1"]["owner"], self.tag()), ("bob", new))
+
+    def test_a_removal_never_forgets_a_connection_that_replaced_it(self):
+        self.connect(self.login())
+        old = self.tag()
+        newer = dict(self.app.temporary["tmp1"], tag="dssa-temp-" + "d" * 16)
+
+        def replace_while_removing(folder, runner=None):
+            self.removed.append("tmp1")
+            self.app.temporary["tmp1"] = newer
+            return True
+        with mock.patch("bridge.webui.enrol.end_temporary_access", side_effect=replace_while_removing):
+            self.assertTrue(self.app.end_temporary("alice", "tmp1", "signed out", old))
+        self.assertIs(self.app.temporary["tmp1"], newer)
+
+    def test_one_connection_attempt_per_name_at_a_time(self):
+        alice = self.login()
+        self.app.connecting.add("tmp1")
+        response, _, temp, _ = self.connect(alice)
+        self.assertEqual(response.status, 400)
+        temp.assert_not_called()
+        self.app.connecting.discard("tmp1")
+        response, _, temp, _ = self.connect(alice)
+        self.assertEqual(response.status, 303)
+        self.assertEqual(self.app.connecting, set())
+
+    def test_run_completion_cleanup_leaves_a_replacement_alone(self):
+        stack, plan = self.action_setup()
+        with stack:
+            self.patches(stack, plan)
+            job = self.app.start_apply("alice", self.APID)
+        self.replace()
+        job.on_finish(mock.Mock(code=0))
+        time.sleep(0.2)
+        self.assertEqual(self.removed, [])
+        self.assertEqual(self.tag(), "dssa-temp-" + "f" * 16)
+
+    # --- a job that cannot start (Codex review, round 5) ------------------
+
+    def test_a_job_that_cannot_start_is_left_finished(self):
+        jobs = __import__("bridge.webui.jobs", fromlist=["Jobs"])
+        registry = jobs.Jobs()
+        job = jobs.Job("apply", ["/nonexistent/dssa-run"], {}, "p", "tmp1", "alice")
+        with self.assertRaises(jobs.JobStartError):
+            registry.start(job)
+        self.assertIsNotNone(job.finished)
+        self.assertEqual(job.code, 127)
+        self.assertIn("the run could not start", job.view()["text"])
+        self.assertFalse(job.view()["running"])
+        self.assertIs(registry.get(job.id), job, "still listed, as finished")
+        with self.assertRaisesRegex(ValueError, "finished"):
+            job.send("password")
+
+    def test_a_failed_start_after_consumption_is_reported_and_blocks_no_cleanup(self):
+        stack, plan = self.action_setup()
+        jobs = __import__("bridge.webui.jobs", fromlist=["Jobs"])
+        with stack:
+            self.patches(stack, plan)
+            self.app.jobs = jobs.Jobs()
+            with mock.patch("bridge.webui.jobs.subprocess.Popen", side_effect=OSError("no pty left")):
+                with self.assertRaisesRegex(Exception, r"The run could not start \(no pty left\)\. Nothing ran on "
+                                                       r"the server\. The approval was used and cannot be used again"):
+                    self.app.start_apply("alice", self.APID)
+        self.consume.assert_called_once()
+        self.assertFalse(self.app.running_on("tmp1"))
+        self.assertEqual(self.app.actions, {})
+        failed = [json.loads(l) for l in self.config.audit.read_text().splitlines() if '"apply_start_failed"' in l]
+        self.assertEqual((len(failed), failed[0]["approval_used"]), (1, True))
+        self.assertTrue(self.app.end_temporary("alice", "tmp1", "signed out", self.tag()), "cleanup not blocked")
+
+    def test_a_failed_report_start_is_reported(self):
+        stack, plan = self.action_setup()
+        jobs = __import__("bridge.webui.jobs", fromlist=["Jobs"])
+        with stack:
+            self.patches(stack, plan)
+            self.app.jobs = jobs.Jobs()
+            with mock.patch("bridge.webui.jobs.os.openpty", side_effect=OSError("no pty left")):
+                with self.assertRaisesRegex(Exception, "The report could not start"):
+                    self.app.start_remote("alice", "report", self.APID)
+        self.assertFalse(self.app.running_on("tmp1"))
+
+    # --- failure paths (Codex review, round 6) ----------------------------
+
+    def test_a_failing_removal_never_strands_the_connection_in_ending(self):
+        self.connect(self.login())
+        tag = self.tag()
+        with mock.patch("bridge.webui.enrol.end_temporary_access", side_effect=ValueError("broken meta.json")):
+            self.assertFalse(self.app.end_temporary("alice", "tmp1", "signed out", tag))
+        self.assertNotIn("ending", self.app.temporary["tmp1"])
+        failed = [json.loads(l) for l in self.config.audit.read_text().splitlines() if "remove_failed" in l]
+        self.assertEqual(failed[-1]["error"], "broken meta.json")
+        self.assertTrue(self.app.end_temporary("alice", "tmp1", "signed out", tag), "a retry still works")
+        self.assertNotIn("tmp1", self.app.temporary)
+
+    def test_a_failing_audit_never_strands_the_connection(self):
+        self.connect(self.login())
+        tag = self.tag()
+        with mock.patch.object(App, "audit", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "was removed, but the audit log could not be written"):
+                self.app.end_temporary("alice", "tmp1", "signed out", tag)
+        self.assertNotIn("tmp1", self.app.temporary, "removed, so forgotten")
+        self.connect(self.login())
+        self.end_result = False
+        with mock.patch.object(App, "audit", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.app.end_temporary("alice", "tmp1", "signed out", self.tag())
+        self.assertNotIn("ending", self.app.temporary["tmp1"], "not removed, so usable and retryable")
+
+    def test_manual_end_only_ends_the_connection_its_form_showed(self):
+        cookie = self.login()
+        self.connect(cookie)
+        old = re.search(r'name="connection" value="([^"]+)"', self.request("GET", "/", cookie=cookie)[1]).group(1)
+        self.replace()  # the name was reused by a newer connection
+        response, body = self.request("POST", "/servers/tmp1/end", f"csrf={self.token(cookie)}&connection={old}",
+                                      cookie)
+        self.assertEqual(response.status, 400)
+        self.assertIn("has already ended, so nothing was removed", body)
+        response, body = self.request("POST", "/servers/tmp1/end", f"csrf={self.token(cookie)}", cookie)
+        self.assertIn("This page is out of date", body)
+        self.assertEqual(self.removed, [])
+        self.assertEqual(self.tag(), "dssa-temp-" + "f" * 16, "the newer connection is untouched")
+
+    def test_saved_enrolment_takes_the_same_name_reservation(self):
+        cookie = self.login()
+        self.connect(cookie)  # tmp1 is connected for this setup
+        response, _, _, saved = self.connect(cookie, save=True)
+        self.assertEqual(response.status, 400)
+        saved.assert_not_called()
+        self.app.temporary.clear()
+        pending = {"name": "web9", "host": "203.0.113.9", "port": 22, "user": "deploy", "keys": [], "lab": True}
+        seen = []
+
+        def enrol_while_racing(*args, **kwargs):
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                self.app.add_temporary("bob", dict(pending), "pw", "SHA256:x")
+            seen.append(set(self.app.connecting))
+            return {"target_id": "web9", "host": "203.0.113.9"}
+        with mock.patch("bridge.webui.enrol.enrol", side_effect=enrol_while_racing), \
+             mock.patch("bridge.webui.enrol.temporary_access") as temp:
+            self.app.add_saved("alice", pending, "pw", "SHA256:x")
+        temp.assert_not_called()
+        self.assertEqual((seen, self.app.connecting), ([{"web9"}], set()))
+        with mock.patch.object(App, "targets", return_value=[{"target_id": "web9"}]), \
+             mock.patch("bridge.webui.enrol.enrol") as again:
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                self.app.add_saved("alice", pending, "pw", "SHA256:x")
+        again.assert_not_called()
+
+    def test_a_job_whose_teardown_fails_is_still_left_finished(self):
+        jobs = __import__("bridge.webui.jobs", fromlist=["Jobs"])
+        process = mock.Mock(pid=4242)
+        process.kill.side_effect = OSError("kill failed")
+        process.wait.side_effect = OSError("wait failed")
+        process.stdout.close.side_effect = OSError("close failed")
+        job = jobs.Job("apply", ["bash"], {}, "p", "tmp1", "alice")
+        with mock.patch("bridge.webui.jobs.subprocess.Popen", return_value=process), \
+             mock.patch("bridge.webui.jobs.os.killpg", side_effect=OSError("killpg failed")) as killpg, \
+             mock.patch("bridge.webui.jobs.threading.Thread", side_effect=RuntimeError("no threads")):
+            with self.assertRaises(jobs.JobStartError) as raised:
+                jobs.Jobs().start(job)
+        self.assertTrue(raised.exception.launched, "the process existed: outcome uncertain")
+        killpg.assert_called_once()
+        process.kill.assert_called_once()
+        self.assertEqual((job.code, job.view()["running"]), (127, False))
+        self.assertIn("could not be followed", job.view()["text"])
+        self.assertFalse(raised.exception.stopped, "wait failed: never said to be stopped")
+        self.assertIn("could not confirm that it stopped", job.view()["text"])
+
+    def test_a_job_that_never_launched_says_so(self):
+        jobs = __import__("bridge.webui.jobs", fromlist=["Jobs"])
+        job = jobs.Job("apply", ["/nonexistent/dssa-run"], {}, "p", "tmp1", "alice")
+        with self.assertRaises(jobs.JobStartError) as raised:
+            job.start()
+        self.assertFalse(raised.exception.launched)
+
+    def apply_failure(self, **patched):
+        stack, plan = self.action_setup()
+        with stack:
+            self.patches(stack, plan)
+            for name, value in patched.items():
+                stack.enter_context(mock.patch(name, **value))
+            with self.assertRaises(ApprovalError) as raised:
+                self.app.start_apply("alice", self.APID)
+        failed = [json.loads(l) for l in self.config.audit.read_text().splitlines() if "_start_failed" in l]
+        return str(raised.exception), failed
+
+    def test_an_uncertain_launch_is_reported_as_uncertain(self):
+        jobs = __import__("bridge.webui.jobs", fromlist=["Jobs"])
+        error = jobs.JobStartError("lost the pty", launched=True, stopped=True)
+        stack, plan = self.action_setup()
+        with stack:
+            self.patches(stack, plan)
+            self.app.jobs = mock.Mock(start=mock.Mock(side_effect=error), recent=lambda limit=20: [])
+            with self.assertRaises(ApprovalError) as raised:
+                self.app.start_apply("alice", self.APID)
+        message = str(raised.exception)
+        self.assertIn("was started, but DSSA could not follow it and stopped it (lost the pty)", message)
+        self.assertIn("Part of it may have run on the server", message)
+        self.assertNotIn("Nothing ran", message)
+        self.assertIn("The approval was used and cannot be used again", message)
+        last = [json.loads(l) for l in self.config.audit.read_text().splitlines() if "_start_failed" in l][-1]
+        self.assertEqual((last["launched"], last["approval_used"], last["stage"]),
+                         (True, True, "starting the run"))
+
+    def test_a_claim_that_fails_after_its_marker_reports_the_approval_used(self):
+        marker = Path(os.environ["XDG_STATE_HOME"]) / "developer-server-setup-assistant/approvals" / self.APID
+
+        def claim_then_fail(*args, **kwargs):
+            marker.mkdir(parents=True)
+            (marker / "consumed").write_text("now\n")
+            raise OSError("approval audit failed")
+        message, failed = self.apply_failure(**{"bridge.webui.app.consume_approval": {"side_effect": claim_then_fail}})
+        self.assertIn("was not started: claiming the approval failed (approval audit failed)", message)
+        self.assertIn("The approval was used and cannot be used again", message)
+        self.assertEqual((failed[-1]["approval_used"], failed[-1]["launched"]), (True, False))
+        self.assertEqual(self.app.jobs.started, [])
+
+    def test_a_claim_that_fails_before_its_marker_reports_the_approval_unused(self):
+        message, failed = self.apply_failure(
+            **{"bridge.webui.app.consume_approval": {"side_effect": OSError("read-only state folder")}})
+        self.assertIn("The approval was not used; you can try again", message)
+        self.assertIs(failed[-1]["approval_used"], False)
+        self.assertEqual(self.app.jobs.started, [])
+
+    def test_a_failed_apply_audit_starts_nothing_and_says_so(self):
+        real = App.audit
+
+        def audit(app, user, action, **details):
+            if action in ("apply", "apply_start_failed"):
+                raise OSError("disk full")
+            return real(app, user, action, **details)
+        message, _ = self.apply_failure(**{"bridge.webui.app.App.audit": {"autospec": True, "side_effect": audit}})
+        self.assertIn("was not started: preparing the run failed (disk full). Nothing ran on the server", message)
+        self.assertIn("The approval was used and cannot be used again", message)
+        self.assertIn("could not be written to the audit log either (disk full)", message)
+        self.assertEqual(self.app.jobs.started, [])
+        self.assertEqual(self.app.actions, {})
+
+    def test_a_refused_claim_is_passed_on_unchanged(self):
+        message, failed = self.apply_failure(
+            **{"bridge.webui.app.consume_approval": {"side_effect": ApprovalError("Approval has already been used.")}})
+        self.assertEqual(message, "Approval has already been used.")
+        self.assertEqual(failed, [])
+
+    # --- round 7 (Codex review of round 6) --------------------------------
+
+    def marker_dir(self):
+        return Path(os.environ["XDG_STATE_HOME"]) / "developer-server-setup-assistant/approvals" / self.APID
+
+    def lock_dir(self, folder):
+        folder.chmod(0o000)
+        self.addCleanup(folder.chmod, 0o700)
+
+    def test_an_approval_audit_error_after_the_marker_reports_it_used(self):
+        marker = self.marker_dir()
+
+        def claim_then_audit_fails(*args, **kwargs):
+            marker.mkdir(parents=True)
+            (marker / "consumed").write_text("now\n")
+            error = ApprovalError("approval audit failed")
+            error.approval_consumed = True  # as consume_approval marks it (round 8)
+            raise error
+        message, failed = self.apply_failure(
+            **{"bridge.webui.app.consume_approval": {"side_effect": claim_then_audit_fails}})
+        self.assertIn("claiming the approval failed (approval audit failed)", message)
+        self.assertIn("The approval was used and cannot be used again", message)
+        self.assertIs(failed[-1]["approval_used"], True)
+        self.assertEqual(self.app.jobs.started, [])
+        self.assertTrue((marker / "consumed").exists(), "single use kept")
+
+    # --- round 8 -----------------------------------------------------------
+
+    def test_a_concurrent_consumer_that_wins_keeps_already_used(self):
+        marker = self.marker_dir()
+
+        def another_consumer_wins(*args, **kwargs):
+            marker.mkdir(parents=True)
+            (marker / "consumed").write_text("other\n")
+            raise ApprovalError("Approval has already been used.")
+        message, failed = self.apply_failure(
+            **{"bridge.webui.app.consume_approval": {"side_effect": another_consumer_wins}})
+        self.assertEqual((message, failed), ("Approval has already been used.", []))
+        self.assertEqual(self.app.jobs.started, [])
+        self.assertEqual((marker / "consumed").read_text(), "other\n", "single use kept")
+
+    def stick(self):
+        """Real permissions (non-root): the folder and its parent read-only,
+        so neither deleting nor moving it aside works."""
+
+        for folder in (self.config.home / "temporary/tmp1", self.config.home / "temporary"):
+            folder.chmod(0o500)
+            self.addCleanup(folder.chmod, 0o700)
+
+    def repair(self):
+        for folder in (self.config.home / "temporary", self.config.home / "temporary/tmp1"):
+            folder.chmod(0o700)
+
+    def end_with_a_stuck_folder(self):
+        """End access whose key is removed but whose folder cannot be
+        deleted or moved aside."""
+
+        self.stick()
+        with mock.patch("bridge.webui.enrol.end_temporary_access", return_value=True):
+            self.assertTrue(self.app.end_temporary("alice", "tmp1", "signed out", self.tag()))
+        self.assertTrue((self.config.home / "temporary/tmp1/meta.json").exists())
+        line = [json.loads(l) for l in self.config.audit.read_text().splitlines() if "temp_access_removed" in l][-1]
+        self.assertIn("could not be deleted or moved aside", line["leftover"])
+
+    def restart(self):
+        self.app = App(self.config, jobs=FakeJobs())
+        self.httpd.RequestHandlerClass.app = self.app  # sessions are lost, as on a real restart
+        return self.app
+
+    def test_a_restart_never_reloads_an_ended_connection_with_a_stuck_folder(self):
+        self.connect(self.login())
+        tag = self.tag()
+        self.end_with_a_stuck_folder()
+        self.assertTrue((self.config.home / "temporary-ended" / tag).exists())
+        self.assertNotIn("tmp1", self.restart().temporary)
+
+    def test_without_its_ended_record_the_audit_line_still_keeps_it_ended(self):
+        self.connect(self.login())
+        with mock.patch.object(App, "mark_ended", return_value=OSError("read-only")):
+            self.end_with_a_stuck_folder()
+        self.assertFalse((self.config.home / "temporary-ended").exists())
+        line = [json.loads(l) for l in self.config.audit.read_text().splitlines() if "temp_access_removed" in l][-1]
+        self.assertEqual(line["ended_record_error"], "read-only")
+        self.assertNotIn("tmp1", self.restart().temporary)
+
+    def test_after_a_restart_and_repaired_permissions_the_name_connects_again(self):
+        cookie = self.login()
+        self.connect(cookie)
+        self.end_with_a_stuck_folder()
+        self.restart()
+        cookie = self.login()
+        response, body, temp, _ = self.connect(cookie)
+        self.assertEqual(response.status, 400, "still stuck: refused clearly")
+        temp.assert_not_called()
+        self.assertNotIn("tmp1", self.app.temporary)
+        self.assertIn('"temp_leftover_blocked"', self.config.audit.read_text())
+        self.repair()
+        response, _, temp, _ = self.connect(cookie)
+        self.assertEqual(response.getheader("Location"), "/servers/tmp1/apps")
+        temp.assert_called_once()
+        self.assertIn('"temp_leftover_cleared"', self.config.audit.read_text())
+        fresh = self.tag()
+        self.assertNotIn(fresh, self.app.ended_connections())
+        self.assertEqual(self.restart().temporary["tmp1"]["tag"], fresh, "the new connection reloads")
+
+    def test_a_restart_keeps_a_failed_removal_for_its_retry(self):
+        self.connect(self.login())
+        tag = self.tag()
+        self.end_result = False
+        self.assertFalse(self.app.end_temporary("alice", "tmp1", "signed out", tag))
+        self.assertNotIn(tag, self.app.ended_connections())
+        self.assertEqual(self.app.cleanup_intents(), set(), "answered 'not removed': stays active")
+        self.assertEqual(self.restart().temporary["tmp1"]["tag"], tag, "reloaded for the retry")
+        self.end_result = True
+        self.assertTrue(self.app.end_temporary("alice", "tmp1", "expiry", tag))
+        self.assertNotIn("tmp1", self.app.temporary)
+
+    # --- round 9: a stop between removing the key and recording it ----------
+
+    class Stopped(BaseException):
+        """DSSA stopping mid-removal: no except or audit line runs for it."""
+
+    def stop_after_removing(self, folder, runner=None):
+        self.removed.append(Path(folder).name)  # the server removed the key line...
+        raise self.Stopped()                    # ...and DSSA stopped before its folder, record or audit
+
+    def interrupted_removal(self):
+        cookie = self.login()
+        self.connect(cookie)
+        tag = self.tag()
+        with mock.patch("bridge.webui.enrol.end_temporary_access", side_effect=self.stop_after_removing):
+            with self.assertRaises(self.Stopped):
+                self.app.end_temporary("alice", "tmp1", "signed out", tag)
+        folder = self.config.home / "temporary/tmp1"
+        self.assertTrue((folder / "meta.json").exists(), "the original folder is still there")
+        self.assertEqual(self.app.cleanup_intents(), {tag}, "the intent was saved before the server was asked")
+        self.assertNotIn(tag, self.app.ended_connections(), "no ended record, no audit line")
+        return tag
+
+    def test_the_cleanup_intent_is_saved_before_the_server_is_asked(self):
+        self.connect(self.login())
+        tag = self.tag()
+        seen = []
+
+        def removal(folder, runner=None):
+            seen.append(set(self.app.cleanup_intents()))
+            return self.fake_end(folder, runner)
+        with mock.patch("bridge.webui.enrol.end_temporary_access", side_effect=removal):
+            self.assertTrue(self.app.end_temporary("alice", "tmp1", "signed out", tag))
+        self.assertEqual(seen, [{tag}])
+        self.assertEqual(self.app.cleanup_intents(), set(), "done: the ended record speaks for it")
+        self.assertIn(tag, self.app.ended_connections())
+
+    def test_without_a_saved_intent_nothing_is_removed(self):
+        self.connect(self.login())
+        with mock.patch.object(App, "mark_cleanup", return_value=OSError("read-only")):
+            self.assertFalse(self.app.end_temporary("alice", "tmp1", "signed out", self.tag()))
+        self.assertEqual(self.removed, [], "the server was not asked")
+        self.assertIn("tmp1", self.app.temporary)
+        self.assertNotIn("ending", self.app.temporary["tmp1"])
+        line = [json.loads(l) for l in self.config.audit.read_text().splitlines() if "remove_failed" in l][-1]
+        self.assertIn("could not be recorded before removing: read-only", line["error"])
+
+    def test_a_removal_interrupted_after_the_key_went_is_retried_after_a_restart(self):
+        tag = self.interrupted_removal()
+        app = self.restart()
+        self.assertNotIn("tmp1", app.temporary, "never active again")
+        self.assertEqual(app.cleanup_pending["tmp1"]["tag"], tag, "kept for the retry")
+        self.assertNotIn("tmp1", app.temporary_of("alice"))
+        with self.assertRaisesRegex(ValueError, "still being removed"):
+            app.add_temporary("alice", {"name": "tmp1"}, "pw", "SHA256:x")
+        app.sweep_temporary(app.sessions.active_users())
+        self.assertEqual(self.removed, ["tmp1", "tmp1"], "removed again (idempotent on the server)")
+        self.assertEqual(app.cleanup_pending, {})
+        self.assertFalse((self.config.home / "temporary/tmp1").exists())
+        self.assertEqual(app.cleanup_intents(), set())
+        self.assertIn(tag, app.ended_connections())
+        line = [json.loads(l) for l in self.config.audit.read_text().splitlines() if "temp_access_removed" in l][-1]
+        self.assertEqual((line["connection"], line["resumed"], line["reason"]),
+                         (tag, True, "cleanup resumed after a restart"))
+        response, _, temp, _ = self.connect(self.login())  # the same name connects again
+        self.assertEqual(response.getheader("Location"), "/servers/tmp1/apps")
+        fresh = self.tag()
+        self.assertNotEqual(fresh, tag)
+        self.assertEqual(self.restart().temporary["tmp1"]["tag"], fresh, "the new connection is active")
+
+    def test_a_resumed_removal_that_fails_stays_pending_and_retryable(self):
+        tag = self.interrupted_removal()
+        app = self.restart()
+        self.end_result = False
+        app.sweep_temporary(set())
+        self.assertIn("tmp1", app.cleanup_pending, "still pending, still not active")
+        self.assertNotIn("ending", app.cleanup_pending["tmp1"])
+        self.assertEqual(app.cleanup_intents(), {tag})
+        self.assertNotIn("tmp1", self.restart().temporary, "and so after another restart")
+        app = self.app
+        self.assertIn("tmp1", app.cleanup_pending)
+        self.end_result = True
+        app.sweep_temporary(set())
+        self.assertEqual((app.cleanup_pending, app.cleanup_intents()), ({}, set()))
+        response, _, _, _ = self.connect(self.login())
+        self.assertEqual(response.getheader("Location"), "/servers/tmp1/apps")
+
+    def test_a_pending_removal_whose_key_expired_is_discarded(self):
+        self.interrupted_removal()
+        app = self.restart()
+        app.cleanup_pending["tmp1"]["expires"] = int(time.time()) - 1
+        self.end_result = False
+        app.sweep_temporary(set())
+        self.assertEqual(app.cleanup_pending, {})
+        self.assertFalse((self.config.home / "temporary/tmp1").exists())
+        self.assertIn('"temp_access_expired"', self.config.audit.read_text())
+
+    # --- round 10: lost replies, overlapping retries, unrecorded retirement --
+
+    def lost(self, folder, runner=None):
+        self.removed.append(Path(folder).name)
+        raise enrol.RemovalUnknown("no answer from the server: timed out")
+
+    def test_a_lost_reply_keeps_the_cleanup_pending(self):
+        self.connect(self.login())
+        tag = self.tag()
+        with mock.patch("bridge.webui.enrol.end_temporary_access", side_effect=self.lost):
+            self.assertFalse(self.app.end_temporary("alice", "tmp1", "ended by the user", tag))
+        self.assertNotIn("tmp1", self.app.temporary, "the key may be gone: not active")
+        self.assertEqual(self.app.cleanup_pending["tmp1"]["tag"], tag)
+        self.assertNotIn("ending", self.app.cleanup_pending["tmp1"])
+        self.assertEqual(self.app.cleanup_intents(), {tag})
+        line = [json.loads(l) for l in self.config.audit.read_text().splitlines()
+                if '"temp_access_remove_unknown"' in l][-1]
+        self.assertEqual((line["pending"], line["error"]), (True, "no answer from the server: timed out"))
+        with self.assertRaisesRegex(ValueError, "still being removed"):
+            self.app.add_temporary("alice", {"name": "tmp1"}, "pw", "SHA256:x")
+        self.assertIn("tmp1", self.restart().cleanup_pending, "and after a restart")
+        self.app.sweep_temporary(set())  # the server answers now
+        self.assertEqual((self.app.cleanup_pending, self.app.cleanup_intents()), ({}, set()))
+        response, _, _, _ = self.connect(self.login())
+        self.assertEqual(response.getheader("Location"), "/servers/tmp1/apps")
+
+    def test_a_confirmed_refusal_stays_active_and_retryable(self):
+        self.connect(self.login())
+        tag = self.tag()
+        self.end_result = False
+        self.assertFalse(self.app.end_temporary("alice", "tmp1", "ended by the user", tag))
+        self.assertIn("tmp1", self.app.temporary)
+        self.assertEqual((self.app.cleanup_pending, self.app.cleanup_intents()), ({}, set()))
+        self.end_result = True
+        self.assertTrue(self.app.end_temporary("alice", "tmp1", "ended by the user", tag))
+
+    def test_the_intent_is_settled_before_a_retry_can_start(self):
+        """A retry of the same tag must never start between clearing "ending"
+        and settling the intent: it would write its own intent, which the
+        first caller's settlement would then delete."""
+
+        self.connect(self.login())
+        tag = self.tag()
+        calls, reached, seen, results = [], threading.Event(), [], []
+
+        def removal(folder, runner=None):
+            calls.append(Path(folder).name)
+            if len(calls) == 1:
+                return False  # the first removal is refused: its intent is dropped
+            seen.append(tag in self.app.cleanup_intents())  # the retry's own intent
+            reached.set()
+            __import__("shutil").rmtree(folder, ignore_errors=True)
+            return True
+        retry = threading.Thread(target=lambda: results.append(
+            self.app.end_temporary("alice", "tmp1", "signed out", tag)))
+        real_drop = App.drop_cleanup
+
+        def drop_while_a_retry_tries_to_start(app, connection):
+            if not retry.is_alive() and not results:
+                self.assertTrue(app.lock.locked(), "settled under the lock")
+                self.assertTrue(app.temporary["tmp1"].get("ending"), "before ending is cleared")
+                retry.start()
+                self.assertFalse(reached.wait(0.5), "a retry started before the intent was settled")
+            return real_drop(app, connection)
+        with mock.patch("bridge.webui.enrol.end_temporary_access", side_effect=removal), \
+             mock.patch.object(App, "drop_cleanup", autospec=True, side_effect=drop_while_a_retry_tries_to_start):
+            self.assertFalse(self.app.end_temporary("alice", "tmp1", "ended by the user", tag))
+            retry.join(5)
+        self.assertEqual((calls, results, seen), (["tmp1", "tmp1"], [True], [True]),
+                         "the retry ran afterwards, and its intent was not deleted under it")
+        self.assertEqual(self.app.cleanup_intents(), set())
+        self.assertNotIn("tmp1", self.app.temporary)
+
+    def test_overlapping_retries_of_a_pending_cleanup_remove_once(self):
+        self.connect(self.login())
+        with mock.patch("bridge.webui.enrol.end_temporary_access", side_effect=self.lost):
+            self.app.end_temporary("alice", "tmp1", "signed out", self.tag())
+        inside, release = threading.Event(), threading.Event()
+
+        def slow(folder, runner=None):
+            inside.set()
+            release.wait(5)
+            return self.fake_end(folder, runner)
+        with mock.patch("bridge.webui.enrol.end_temporary_access", side_effect=slow):
+            first = threading.Thread(target=self.app.resume_cleanup)
+            first.start()
+            self.assertTrue(inside.wait(5))
+            self.app.resume_cleanup()  # overlaps: backs off while the first runs
+            release.set()
+            first.join(5)
+        self.assertEqual(self.removed, ["tmp1", "tmp1"], "the lost one, then one retry")
+        self.assertEqual((self.app.cleanup_pending, self.app.cleanup_intents()), ({}, set()))
+
+    def test_unrecorded_retirement_with_its_folder_left_keeps_the_name_across_restart(self):
+        self.connect(self.login())
+        tag = self.tag()
+        self.stick()
+        with mock.patch("bridge.webui.enrol.end_temporary_access", return_value=True), \
+             mock.patch.object(App, "mark_ended", return_value=OSError("read-only")):
+            self.assertTrue(self.app.end_temporary("alice", "tmp1", "signed out", tag), "the key is gone")
+        self.assertTrue((self.config.home / "temporary/tmp1/meta.json").exists())
+        self.assertEqual(self.app.cleanup_intents(), {tag}, "kept")
+        self.assertIn("tmp1", self.app.cleanup_pending)
+        self.assertIn(tag, self.app.ended_connections(), "its audit line exists")
+        app = self.restart()
+        self.assertNotIn("tmp1", app.temporary)
+        self.assertIn("tmp1", app.cleanup_pending, "the intent wins over the audit line")
+        with self.assertRaisesRegex(ValueError, "still being removed"):
+            app.add_temporary("alice", {"name": "tmp1"}, "pw", "SHA256:x")
+        self.repair()
+        before = list(self.removed)
+        app.sweep_temporary(set())
+        self.assertEqual(self.removed, before, "already removed: the server is not asked again")
+        self.assertEqual((app.cleanup_pending, app.cleanup_intents()), ({}, set()))
+        self.assertTrue((self.config.home / "temporary-ended" / tag).exists())
+        self.assertFalse((self.config.home / "temporary/tmp1").exists())
+        response, _, _, _ = self.connect(self.login())
+        self.assertEqual(response.getheader("Location"), "/servers/tmp1/apps")
+
+    def test_unrecorded_retirement_without_a_folder_left_is_done(self):
+        self.connect(self.login())
+        with mock.patch.object(App, "mark_ended", return_value=OSError("read-only")):
+            self.assertTrue(self.app.end_temporary("alice", "tmp1", "signed out", self.tag()))
+        self.assertEqual((self.app.cleanup_pending, self.app.cleanup_intents()), ({}, set()))
+
+    # --- round 11: unreadable metadata; retirement without SSH -------------
+
+    def meta_file(self):
+        return self.config.home / "temporary/tmp1/meta.json"
+
+    def test_an_unreadable_meta_keeps_its_intent_and_name_across_restart(self):
+        tag = self.interrupted_removal()
+        self.meta_file().chmod(0o000)
+        self.addCleanup(lambda: self.meta_file().exists() and self.meta_file().chmod(0o600))
+        app = self.restart()
+        self.assertNotIn("tmp1", app.temporary)
+        self.assertTrue(app.cleanup_pending["tmp1"]["unreadable"])
+        self.assertEqual(app.cleanup_pending["tmp1"]["tag"], tag, "known from its intent")
+        self.assertEqual(app.cleanup_pending["tmp1"]["owner"], "alice")
+        self.assertEqual(app.cleanup_intents(), {tag}, "the intent is kept")
+        with self.assertRaisesRegex(ValueError, "still being removed"):
+            app.add_temporary("alice", {"name": "tmp1"}, "pw", "SHA256:x")
+        before = list(self.removed)
+        app.sweep_temporary(set())
+        self.assertEqual(self.removed, before, "nothing to log in with yet: the server is not asked")
+        self.assertIn("tmp1", self.restart().cleanup_pending, "still reserved after another restart")
+        self.meta_file().chmod(0o600)  # repaired
+        self.app.sweep_temporary(set())
+        self.assertEqual(self.removed, before + ["tmp1"])
+        self.assertEqual((self.app.cleanup_pending, self.app.cleanup_intents()), ({}, set()))
+        response, _, _, _ = self.connect(self.login())
+        self.assertEqual(response.getheader("Location"), "/servers/tmp1/apps")
+
+    def test_an_unreadable_meta_without_an_intent_is_reserved_not_active(self):
+        self.connect(self.login())
+        self.meta_file().chmod(0o000)
+        self.addCleanup(lambda: self.meta_file().exists() and self.meta_file().chmod(0o600))
+        app = self.restart()
+        self.assertNotIn("tmp1", app.temporary)
+        self.assertIn("tmp1", app.cleanup_pending)
+        with self.assertRaisesRegex(ValueError, "still being removed"):
+            app.add_temporary("alice", {"name": "tmp1"}, "pw", "SHA256:x")
+        self.meta_file().chmod(0o600)
+        app.sweep_temporary(set())
+        self.assertEqual((app.cleanup_pending, self.removed), ({}, ["tmp1"]))
+
+    def test_an_intent_that_cannot_be_read_is_never_dropped(self):
+        tag = self.interrupted_removal()
+        intent = self.config.home / "temporary-cleanup" / tag
+        intent.chmod(0o000)
+        self.addCleanup(intent.chmod, 0o600)
+        app = self.restart()
+        self.assertIn("tmp1", app.cleanup_pending, "matched through the folder's own meta.json")
+        self.assertTrue(intent.exists())
+
+    def test_a_confirmed_removal_is_retired_without_ssh_when_records_fail(self):
+        self.connect(self.login())
+        tag = self.tag()
+        self.stick()
+        with mock.patch.object(App, "mark_ended", return_value=OSError("read-only")), \
+             mock.patch.object(App, "audit", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "was removed, but the audit log could not be written"):
+                self.app.end_temporary("alice", "tmp1", "signed out", tag)
+        self.assertEqual(self.removed, ["tmp1"])
+        self.assertNotIn(tag, self.app.ended_connections(), "neither record was written")
+        self.assertTrue(self.app.cleanup_pending["tmp1"]["retire_only"])
+        self.assertIs(self.app.read_cleanup(tag)["removed"], True, "kept in its intent")
+        app = self.restart()
+        self.assertTrue(app.cleanup_pending["tmp1"]["retire_only"], "and after a restart")
+        self.repair()
+        app.sweep_temporary(set())
+        self.assertEqual(self.removed, ["tmp1"], "retired locally; the server was not asked again")
+        self.assertEqual((app.cleanup_pending, app.cleanup_intents()), ({}, set()))
+        self.assertIn(tag, app.ended_connections())
+        response, _, _, _ = self.connect(self.login())
+        self.assertEqual(response.getheader("Location"), "/servers/tmp1/apps")
+
+    # --- round 12: unreadable intents; invalid meta.json -------------------
+
+    def test_an_unreadable_intent_blocks_ssh_and_stays_intact(self):
+        tag = self.interrupted_removal()
+        intent = self.config.home / "temporary-cleanup" / tag
+        content = intent.read_bytes()
+        intent.chmod(0o000)
+        self.addCleanup(lambda: intent.exists() and intent.chmod(0o600))
+        app = self.restart()
+        before = list(self.removed)
+        app.sweep_temporary(set())
+        app.sweep_temporary(set())
+        self.assertEqual(self.removed, before, "no retry while its intent cannot be read")
+        self.assertIn("tmp1", app.cleanup_pending)
+        intent.chmod(0o600)
+        self.assertEqual(intent.read_bytes(), content, "never overwritten")
+        app.sweep_temporary(set())  # readable again: reread, then retried
+        self.assertEqual(self.removed, before + ["tmp1"])
+        self.assertEqual((app.cleanup_pending, app.cleanup_intents()), ({}, set()))
+
+    def test_a_broken_intent_is_reread_and_can_turn_the_retry_local(self):
+        tag = self.interrupted_removal()
+        intent = self.config.home / "temporary-cleanup" / tag
+        intent.write_text("{not json")
+        app = self.restart()
+        before = list(self.removed)
+        app.sweep_temporary(set())
+        self.assertEqual((self.removed, intent.read_text()), (before, "{not json"), "no SSH, intact")
+        repaired = {"target": "tmp1", "connection": tag, "owner": "alice", "removed": True}
+        intent.write_text(json.dumps(repaired))  # says the key was already removed
+        app.sweep_temporary(set())
+        self.assertEqual(self.removed, before, "retired locally: still no SSH")
+        self.assertEqual(app.cleanup_pending, {})
+        self.assertIn(tag, app.ended_connections())
+
+    def test_a_non_object_meta_keeps_the_name_through_startup_and_sweep(self):
+        for broken in ("[]", '"tmp1"', "42", '{"target_id": "other"}', '{"target_id": "tmp1"}'):
+            with self.subTest(meta=broken):
+                self.app.temporary.clear()
+                self.app.cleanup_pending.clear()
+                self.connect(self.login())
+                good = self.meta_file().read_text()
+                self.meta_file().write_text(broken)
+                app = self.restart()  # never crashes
+                self.assertNotIn("tmp1", app.temporary)
+                self.assertTrue(app.cleanup_pending["tmp1"]["unreadable"])
+                app.sweep_temporary(set())
+                self.assertIn("tmp1", app.cleanup_pending, "still reserved after a sweep")
+                with self.assertRaisesRegex(ValueError, "still being removed"):
+                    app.add_temporary("alice", {"name": "tmp1"}, "pw", "SHA256:x")
+                self.meta_file().write_text(good)  # repaired
+                app.sweep_temporary(set())
+                self.assertEqual(app.cleanup_pending, {})
+                self.assertFalse((self.config.home / "temporary/tmp1").exists())
+
+    def test_an_approval_used_earlier_is_refused_unchanged(self):
+        self.marker_dir().mkdir(parents=True)
+        (self.marker_dir() / "consumed").write_text("earlier\n")
+        message, failed = self.apply_failure(
+            **{"bridge.webui.app.consume_approval": {"side_effect": ApprovalError("Approval has already been used.")}})
+        self.assertEqual((message, failed), ("Approval has already been used.", []))
+
+    def test_an_unreadable_marker_before_the_claim_uses_nothing(self):
+        self.marker_dir().mkdir(parents=True)
+        self.lock_dir(self.marker_dir())
+        message, failed = self.apply_failure()
+        self.consume.assert_not_called()
+        self.assertIn("checking the approval failed (its single-use marker cannot be read", message)
+        self.assertIn("The approval was not used", message)
+        self.assertIs(failed[-1]["approval_used"], False)
+        self.assertEqual(self.app.jobs.started, [])
+
+    def test_an_unreadable_marker_after_a_failed_claim_counts_as_maybe_used(self):
+        marker = self.marker_dir()
+
+        def claim_then_lose_the_marker(*args, **kwargs):
+            marker.mkdir(parents=True)
+            (marker / "consumed").write_text("now\n")
+            self.lock_dir(marker)
+            raise OSError("fsync failed")  # from writing the marker: not flagged
+        message, failed = self.apply_failure(
+            **{"bridge.webui.app.consume_approval": {"side_effect": claim_then_lose_the_marker}})
+        self.assertIn("the marker cannot be read", message)
+        self.assertIn("could not tell whether the approval was used; treat it as used", message)
+        self.assertIsNone(failed[-1]["approval_used"])
+        self.assertEqual(self.app.jobs.started, [])
+
+    def test_a_folder_that_cannot_be_deleted_is_moved_aside(self):
+        self.connect(self.login())
+        folder = self.config.home / "temporary/tmp1"
+        with mock.patch("bridge.webui.enrol.end_temporary_access", return_value=True), \
+             mock.patch("bridge.webui.enrol.discard_temporary_access"), \
+             mock.patch("bridge.webui.app.shutil.rmtree"):
+            self.assertTrue(self.app.end_temporary("alice", "tmp1", "signed out", self.tag()))
+        self.assertFalse(folder.exists(), "out of the name's way")
+        aside = list((self.config.home / "temporary-leftover").iterdir())
+        self.assertEqual(len(aside), 1)
+        self.assertTrue(aside[0].name.startswith("tmp1-"))
+        line = [json.loads(l) for l in self.config.audit.read_text().splitlines() if "temp_access_removed" in l][-1]
+        self.assertIn(str(aside[0]), line["leftover"])
+        self.app.load_temporary()
+        self.assertNotIn("tmp1", self.app.temporary, "never loaded as a connection")
+        response, _, temp, _ = self.connect(self.login())
+        self.assertEqual(response.getheader("Location"), "/servers/tmp1/apps", "the name connects again")
+
+    def test_a_leftover_folder_blocks_nothing_once_it_can_be_cleared(self):
+        self.connect(self.login())
+        folder = self.config.home / "temporary/tmp1"
+        with mock.patch("bridge.webui.enrol.end_temporary_access", return_value=True), \
+             mock.patch("bridge.webui.enrol.discard_temporary_access"), \
+             mock.patch("bridge.webui.app.os.rename", side_effect=OSError("read-only")):
+            self.assertTrue(self.app.end_temporary("alice", "tmp1", "signed out", self.tag()))
+            self.assertTrue(folder.exists())
+            self.assertNotIn("tmp1", self.app.temporary)
+            with self.assertRaisesRegex(ValueError, "earlier connection to tmp1 could not be cleared"):
+                self.app.add_temporary("alice", {"name": "tmp1"}, "pw", "SHA256:x")
+        self.assertEqual(self.app.connecting, set(), "the reservation is released")
+        audit = self.config.audit.read_text()
+        self.assertIn("could not be deleted or moved aside (read-only)", audit)
+        self.assertIn('"temp_leftover_blocked"', audit)
+        response, _, temp, _ = self.connect(self.login())  # deleting works again
+        self.assertEqual(response.getheader("Location"), "/servers/tmp1/apps")
+        self.assertIn('"temp_leftover_cleared"', self.config.audit.read_text())
+        self.assertEqual(self.app.temporary["tmp1"]["owner"], "alice")
+
+    def test_a_failed_removal_keeps_its_folder_for_the_retry(self):
+        self.connect(self.login())
+        self.end_result = False
+        self.assertFalse(self.app.end_temporary("alice", "tmp1", "signed out", self.tag()))
+        self.assertTrue((self.config.home / "temporary/tmp1/meta.json").exists())
+        self.assertFalse((self.config.home / "temporary-leftover").exists())
+
+    def test_a_confirmed_stop_is_reported_as_stopped(self):
+        jobs = __import__("bridge.webui.jobs", fromlist=["Jobs"])
+        process = mock.Mock(pid=4242, returncode=-9)
+        job = jobs.Job("apply", ["bash"], {}, "p", "tmp1", "alice")
+        with mock.patch("bridge.webui.jobs.subprocess.Popen", return_value=process), \
+             mock.patch("bridge.webui.jobs.os.killpg"), \
+             mock.patch("bridge.webui.jobs.threading.Thread", side_effect=RuntimeError("no threads")):
+            with self.assertRaises(jobs.JobStartError) as raised:
+                job.start()
+        self.assertEqual((raised.exception.launched, raised.exception.stopped), (True, True))
+        self.assertIn("so DSSA stopped it", job.view()["text"])
+
+    def test_a_raising_teardown_keeps_launched_and_the_finished_state(self):
+        jobs = __import__("bridge.webui.jobs", fromlist=["Jobs"])
+        job = jobs.Job("apply", ["bash"], {}, "p", "tmp1", "alice")
+        with mock.patch("bridge.webui.jobs.subprocess.Popen", return_value=mock.Mock(pid=4242)), \
+             mock.patch("bridge.webui.jobs.threading.Thread", side_effect=RuntimeError("no threads")), \
+             mock.patch.object(jobs.Job, "_teardown", side_effect=AttributeError("no stdout")), \
+             mock.patch.object(jobs.Job, "fail", side_effect=RuntimeError("output broken")):
+            with self.assertRaises(jobs.JobStartError) as raised:
+                job.start()
+        self.assertEqual((raised.exception.launched, raised.exception.stopped), (True, False))
+        self.assertEqual((job.code, job.finished is not None), (127, True))
+        self.assertFalse(job.view()["running"])
+
+    def test_an_unconfirmed_stop_is_never_called_stopped(self):
+        jobs = __import__("bridge.webui.jobs", fromlist=["Jobs"])
+        error = jobs.JobStartError("lost the pty", launched=True, stopped=False)
+        stack, plan = self.action_setup()
+        with stack:
+            self.patches(stack, plan)
+            self.app.jobs = mock.Mock(start=mock.Mock(side_effect=error), recent=lambda limit=20: [])
+            with self.assertRaises(ApprovalError) as raised:
+                self.app.start_apply("alice", self.APID)
+        self.assertIn("could not confirm that it stopped (lost the pty)", str(raised.exception))
+        self.assertNotIn("stopped it", str(raised.exception))
+        last = [json.loads(l) for l in self.config.audit.read_text().splitlines() if "_start_failed" in l][-1]
+        self.assertEqual((last["launched"], last["stopped"]), (True, False))
+
+    def test_preflight_uses_the_captured_connection(self):
+        self.connect(self.login())
+        action = SimpleNamespace(host="203.0.113.5", access={"known_hosts": "/captured/known_hosts"})
+        self.app.temporary["tmp1"] = dict(self.app.temporary["tmp1"], host="198.51.100.7")
+        plan = {"target": {"target_id": "tmp1"}}
+        with mock.patch("bridge.components.run.load_plan", return_value=(b"{}", plan, Path("/x"))), \
+             mock.patch("bridge.webui.app.known_host_fingerprints", return_value={"SHA256:x"}) as keys, \
+             mock.patch("bridge.webui.app.preflight_plan", return_value={}):
+            self.app.check(self.APID, action)
+        keys.assert_called_once_with("203.0.113.5", known_hosts="/captured/known_hosts")
 
     def test_a_saved_server_plan_never_acts_through_a_temporary_connection(self):
         cookie = self.login()
@@ -1221,6 +2406,88 @@ class LegacyPlanTests(HttpBase):
              mock.patch("sys.stdout", io.StringIO()):
             main(["plan-owners"])
         self.assertEqual(len(list((self.config.home / "temporary-plans").iterdir())), 6)
+
+    # --- reading a historical plan (Codex review of 839a377) ---------------
+
+    def full_plan(self, name, target="tmp1"):
+        return {"plan_id": self.IDS[name], "operation": "install", "package_manager": "apt",
+                "created_at": "2026-11-26T03:10:00Z", "runnable": ["haproxy"],
+                "target": {"target_id": target, "host_key_sha256": "SHA256:x"},
+                "steps": [{"component": "haproxy", "action": "INSTALL", "variant_id": "apt",
+                           "reasons": ["Not installed."]}]}
+
+    def sign_in(self, user, password):
+        response, _ = self.request("POST", "/login", f"user={user}&password={password.replace(' ', '+')}")
+        return response.getheader("Set-Cookie").split(";")[0]
+
+    def upgraded(self):
+        self.app.load_plan_owners()
+        self.app.upgrade_legacy_plans()
+
+    def no_preflight(self):
+        return mock.patch.object(App, "check", side_effect=AssertionError("no SSH or preflight for history"))
+
+    def test_the_owner_reads_a_legacy_plan_after_its_connection_ended(self):
+        self.upgraded()
+        plan = self.full_plan("owned")
+        runs = self.state / "developer-server-setup-assistant/runs" / self.IDS["owned"]
+        runs.mkdir(parents=True)
+        (runs / "summary.json").write_text(json.dumps(
+            {"status": "completed", "results": [{"component": "haproxy", "outcome": "installed"}]}))
+        cookie = self.login()
+        with self.stored(plan), self.no_preflight():
+            response, body = self.request("GET", f"/plans/{self.IDS['owned']}", cookie=cookie)
+        self.assertEqual(response.status, 200)
+        self.assertIn("<dt>Server</dt><dd>tmp1</dd>", body)
+        self.assertIn("haproxy", body)
+        self.assertIn("Already run: status <b>completed</b> (haproxy: installed)", body)
+        self.assertIn("earlier temporary connection to <b>tmp1</b> before ownership was recorded", body)
+        for action in ("approve", "apply", "report", "resume"):
+            self.assertNotIn(f"/plans/{self.IDS['owned']}/{action}", body, "read only")
+
+    def test_a_bound_plan_is_read_only_once_its_connection_ended(self):
+        plan_id = self.IDS["owned"]
+        self.app.write_plan_owner(plan_id, {"owner": "alice", "connection": "dssa-temp-" + "c" * 16,
+                                            "target": "tmp1", "source": "bound"})
+        cookie = self.login()
+        with self.stored(self.full_plan("owned")), self.no_preflight():
+            response, body = self.request("GET", f"/plans/{plan_id}", cookie=cookie)
+        self.assertEqual(response.status, 200)
+        self.assertIn("earlier temporary connection to <b>tmp1</b>, which has ended", body)
+
+    def test_another_user_gets_404_even_after_reusing_the_name(self):
+        self.upgraded()
+        self.app.users.add("bob", "another long password")
+        bob = self.sign_in("bob", "another long password")
+        alice = self.login()
+        self.app.temporary["tmp1"] = {"owner": "bob", "tag": "dssa-temp-" + "b" * 16, "target_id": "tmp1",
+                                      "host": "203.0.113.9", "entry": {"target_id": "tmp1"}}
+        with self.stored(self.full_plan("owned")), self.no_preflight():
+            response, body = self.request("GET", f"/plans/{self.IDS['owned']}", cookie=bob)
+            self.assertEqual(response.status, 404)
+            self.assertNotIn("haproxy", body)
+            # The owner still reads it, without using Bob's connection.
+            response, body = self.request("GET", f"/plans/{self.IDS['owned']}", cookie=alice)
+            self.assertEqual(response.status, 200)
+        self.app.temporary.pop("tmp1")
+        self.saved.append({"target_id": "tmp1"})
+        with self.stored(self.full_plan("owned")), self.no_preflight():
+            response, _ = self.request("GET", f"/plans/{self.IDS['owned']}", cookie=bob)
+        self.assertEqual(response.status, 404, "a saved server of that name does not inherit it either")
+
+    def test_report_and_other_actions_stay_blocked_for_a_legacy_plan(self):
+        self.upgraded()
+        cookie = self.login()
+        token = re.search(r'name="csrf" value="([^"]+)"', self.request("GET", "/servers/add", cookie=cookie)[1]).group(1)
+        self.app.jobs = mock.Mock(start=mock.Mock(side_effect=AssertionError("nothing may start")),
+                                  recent=lambda limit=20: [])
+        with self.stored(self.full_plan("owned")), self.no_preflight():
+            for action in ("report", "resume", "apply", "approve"):
+                with self.subTest(action=action):
+                    response, body = self.request("POST", f"/plans/{self.IDS['owned']}/{action}",
+                                                  f"csrf={token}&reviewed=1", cookie)
+                    self.assertEqual(response.status, 400)
+                    self.assertIn("before ownership was recorded", body)
 
     def test_a_stored_plan_without_any_audit_evidence(self):
         self.config.audit.write_text("")
