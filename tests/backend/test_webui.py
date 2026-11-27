@@ -1,6 +1,7 @@
 """Web UI on the master server (4.46): login, CSRF, jobs, server enrolment."""
 
 import http.client
+import io
 import json
 import os
 import re
@@ -69,6 +70,10 @@ class HttpBase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.config = Config(Path(self.tmp.name) / "webui")
+        # App() looks at stored plans when it starts: never the real state folder.
+        patcher = mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(Path(self.tmp.name) / "state")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.app = App(self.config)
         self.app.users.add("alice", "correct horse battery")
         handler = type("H", (Handler,), {"app": self.app, "secure": False})
@@ -990,6 +995,93 @@ class TemporaryServerTests(HttpBase):
         self.assertEqual(
             (self.config.home / "temporary-plans" / f"{plan_id}.json").stat().st_mode & 0o777, 0o600)
 
+    # --- binding before the plan is stored (Codex follow-up, 2026-11-26) ---
+
+    PID = "22222222-2222-4333-8444-555555555555"
+
+    def plan_with(self, during=None, save=None):
+        """make_plans on tmp1 with a planner that runs `during` mid-planning."""
+
+        def planner(*args, **kwargs):
+            if during:
+                during()
+            return b"{}", {"plan_id": self.PID}
+        with mock.patch("bridge.components.run.make_plan", side_effect=planner), \
+             mock.patch("bridge.components.run.save_plan", side_effect=save) as saved:
+            try:
+                return self.app.make_plans("alice", ["tmp1"], ["git"], "install", False), saved
+            except Exception as error:  # noqa: BLE001 - returned for the assertions
+                return error, saved
+
+    def record_path(self):
+        return self.config.home / "temporary-plans" / f"{self.PID}.json"
+
+    def test_the_binding_is_written_before_the_plan_is_stored(self):
+        self.connect(self.login())
+        tag = self.app.temporary["tmp1"]["tag"]
+        seen = []
+        result, saved = self.plan_with(save=lambda data: seen.append(json.loads(self.record_path().read_text())))
+        self.assertEqual(result, [self.PID])
+        saved.assert_called_once()
+        self.assertEqual(seen, [{"owner": "alice", "connection": tag, "target": "tmp1", "source": "bound"}])
+        plan_line = [json.loads(l) for l in self.config.audit.read_text().splitlines()][-1]
+        self.assertEqual((plan_line["action"], plan_line["connection"]), ("plan", tag))
+        created = [json.loads(l) for l in self.config.audit.read_text().splitlines()
+                   if '"temp_access_created"' in l][-1]
+        self.assertEqual(created["connection"], tag, "future upgrades have the connection as evidence")
+
+    def test_access_ending_during_planning_discards_the_plan(self):
+        self.connect(self.login())
+        result, saved = self.plan_with(during=lambda: self.app.temporary.pop("tmp1"))
+        self.assertRegex(str(result), "ended or changed while planning")
+        saved.assert_not_called()
+        self.assertFalse(self.record_path().exists())
+        self.assertNotIn(self.PID, self.app.plan_owners)
+
+    def test_a_replaced_connection_during_planning_discards_the_plan(self):
+        self.connect(self.login())
+
+        def replace():
+            self.app.temporary["tmp1"] = dict(self.app.temporary["tmp1"], tag="dssa-temp-" + "f" * 16)
+        result, saved = self.plan_with(during=replace)
+        self.assertRegex(str(result), "ended or changed while planning")
+        saved.assert_not_called()
+        self.assertFalse(self.record_path().exists())
+
+    def test_a_name_becoming_temporary_during_planning_discards_the_plan(self):
+        with mock.patch.object(App, "targets", return_value=[{"target_id": "tmp1"}]):
+            def appear():
+                self.app.temporary["tmp1"] = {"owner": "alice", "tag": "dssa-temp-" + "a" * 16}
+            result, saved = self.plan_with(during=appear)
+        self.assertRegex(str(result), "became a temporary server while planning")
+        saved.assert_not_called()
+
+    def test_a_failed_binding_write_stores_no_plan(self):
+        self.connect(self.login())
+        with mock.patch.object(App, "write_plan_owner", side_effect=OSError("disk full")):
+            result, saved = self.plan_with()
+        self.assertIsInstance(result, OSError)
+        saved.assert_not_called()
+        self.assertFalse(self.record_path().exists())
+
+    def test_a_failed_plan_write_removes_its_binding(self):
+        self.connect(self.login())
+
+        def fail(data):
+            raise OSError("disk full")
+        result, saved = self.plan_with(save=fail)
+        self.assertIsInstance(result, OSError)
+        self.assertFalse(self.record_path().exists())
+        self.assertNotIn(self.PID, self.app.plan_owners)
+
+    def test_a_partial_binding_file_is_removed(self):
+        self.connect(self.login())
+        with mock.patch("json.dump", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.app.bind_plan("alice", self.PID, "tmp1")
+        self.assertFalse(self.record_path().exists())
+        self.assertNotIn(self.PID, self.app.plan_owners)
+
     def test_a_saved_server_plan_never_acts_through_a_temporary_connection(self):
         cookie = self.login()
         self.connect(cookie)
@@ -1018,6 +1110,124 @@ class TemporaryServerTests(HttpBase):
         self.request("POST", "/logout", f"csrf={self.token(cookie)}", cookie)
         self.assertIn('"action": "logout"', self.config.audit.read_text())
 
+
+
+class LegacyPlanTests(HttpBase):
+    """Plans made on temporary servers before ownership records existed
+    (Codex follow-up, 2026-11-26): restored from the audit log where it is
+    reliable, restricted where it is not, repeatable, never inherited."""
+
+    IDS = {name: f"{i}{i}{i}{i}{i}{i}{i}{i}-1111-4111-8111-111111111111"
+           for i, name in enumerate(["owned", "other_user", "cli", "saved", "gone", "overlap", "after"], 1)}
+
+    def setUp(self):
+        super().setUp()
+        self.state = Path(os.environ["XDG_STATE_HOME"])
+        plans = self.state / "developer-server-setup-assistant/plans"
+        plans.mkdir(parents=True)
+        times = {"owned": ("tmp1", "T03:10"), "other_user": ("tmp1", "T03:20"), "cli": ("tmp1", "T03:25"),
+                 "saved": ("web1", "T03:30"), "gone": ("old1", "T03:35"), "overlap": ("tmp2", "T05:10"),
+                 "after": ("tmp1", "T04:30")}
+        for name, (target, at) in times.items():
+            (plans / f"{self.IDS[name]}.json").write_text(json.dumps(
+                {"plan_id": self.IDS[name], "target": {"target_id": target}, "created_at": f"2026-11-26{at}:00Z"}))
+        lines = [
+            {"action": "temp_access_created", "target": "tmp1", "user": "alice",
+             "time": "2026-11-26T03:00:00Z", "expires": "2026-11-26T04:00:00Z"},
+            self.plan_line("owned", "tmp1", "alice", "T03:10"),
+            self.plan_line("other_user", "tmp1", "bob", "T03:20"),
+            self.plan_line("saved", "web1", "bob", "T03:30"),
+            self.plan_line("gone", "old1", "bob", "T03:35"),
+            {"action": "temp_access_removed", "target": "tmp1", "user": "alice", "time": "2026-11-26T03:40:00Z"},
+            # Never closed, then the name connected again before it expired.
+            {"action": "temp_access_created", "target": "tmp2", "user": "alice",
+             "time": "2026-11-26T05:00:00Z", "expires": "2026-11-26T06:00:00Z"},
+            {"action": "temp_access_created", "target": "tmp2", "user": "alice",
+             "time": "2026-11-26T05:05:00Z", "expires": "2026-11-26T06:05:00Z"},
+            self.plan_line("overlap", "tmp2", "alice", "T05:10"),
+            self.plan_line("after", "tmp1", "alice", "T04:30"),
+        ]
+        self.config.home.mkdir(parents=True, exist_ok=True)
+        self.config.audit.write_text("".join(json.dumps(l) + "\n" for l in lines))
+        self.saved = [{"target_id": "web1"}]
+        patcher = mock.patch.object(App, "targets", side_effect=lambda: list(self.saved))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def plan_line(self, name, target, user, at):
+        return {"action": "plan", "plan_id": self.IDS[name], "target": target, "user": user,
+                "time": f"2026-11-26{at}:00Z"}
+
+    def test_the_upgrade_restores_or_restricts_each_plan(self):
+        app = App(self.config)
+        owners = {name: app.plan_owners.get(pid) for name, pid in self.IDS.items()}
+        self.assertEqual(owners["owned"], {"owner": "alice", "connection": None, "target": "tmp1",
+                                           "source": "legacy-audit"})
+        for name in ("other_user", "cli", "gone", "overlap", "after"):
+            with self.subTest(name=name):
+                self.assertEqual(owners[name]["source"], "ambiguous")
+                self.assertIsNone(owners[name]["owner"])
+        self.assertIsNone(owners["saved"], "saved-server plans stay shared, as before")
+        record = self.config.home / "temporary-plans" / f"{self.IDS['owned']}.json"
+        self.assertEqual(record.stat().st_mode & 0o777, 0o600)
+        upgraded = [json.loads(l) for l in self.config.audit.read_text().splitlines()
+                    if '"plan_owner_upgraded"' in l]
+        self.assertEqual(len(upgraded), 6)
+
+    def test_the_upgrade_is_repeatable_and_never_overwrites(self):
+        App(self.config)
+        record = self.config.home / "temporary-plans" / f"{self.IDS['owned']}.json"
+        record.write_text(json.dumps({"owner": "alice", "connection": "dssa-temp-" + "1" * 16,
+                                      "target": "tmp1", "source": "bound"}))
+        restarted = App(self.config)
+        self.assertEqual(restarted.upgrade_legacy_plans(), {}, "nothing left to do")
+        self.assertEqual(restarted.plan_owners[self.IDS["owned"]]["source"], "bound")
+        self.assertEqual(sum('"plan_owner_upgraded"' in l for l in self.config.audit.read_text().splitlines()), 6)
+
+    def test_legacy_plans_survive_restart_and_name_reuse(self):
+        App(self.config)
+        app = App(self.config)  # a restart
+        owned, unclear = self.IDS["owned"], self.IDS["cli"]
+        # Bob reuses the name as a temporary server, then as a saved one.
+        app.temporary["tmp1"] = {"owner": "bob", "tag": "dssa-temp-" + "b" * 16, "target_id": "tmp1"}
+        self.assertTrue(app.may_see("alice", "tmp1", owned))
+        self.assertFalse(app.may_see("bob", "tmp1", owned))
+        self.assertFalse(app.may_see("bob", "tmp1", owned, "bob"))
+        app.temporary.pop("tmp1")
+        self.saved.append({"target_id": "tmp1"})
+        self.assertFalse(app.may_see("bob", "tmp1", owned), "a saved server never inherits it either")
+        for user in ("alice", "bob"):
+            self.assertFalse(app.may_see(user, "tmp1", unclear), "ambiguous: nobody sees it")
+        # No action: the old connection has ended, or nobody is known.
+        app.temporary["tmp1"] = {"owner": "alice", "tag": "dssa-temp-" + "a" * 16, "target_id": "tmp1"}
+        with self.assertRaisesRegex(Exception, "before ownership was recorded"):
+            app.require_plan_owner("alice", owned, "tmp1")
+        with self.assertRaisesRegex(Exception, "Nobody can use this plan"):
+            app.require_plan_owner("alice", unclear, "tmp1")
+        with self.assertRaisesRegex(Exception, "another user's temporary server"):
+            app.require_plan_owner("bob", owned, "tmp1")
+        self.assertTrue(app.may_see("bob", "web1", self.IDS["saved"]), "saved servers stay shared")
+
+    def test_the_dry_run_command_writes_nothing(self):
+        from bridge.webui.__main__ import main
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"DSSA_WEBUI_HOME": str(self.config.home)}), \
+             mock.patch("sys.stdout", out):
+            self.assertEqual(main(["plan-owners", "--dry-run"]), 0)
+        self.assertIn("6 plan(s) would be recorded", out.getvalue())
+        self.assertIn(f"{self.IDS['owned']}  tmp1", out.getvalue())
+        self.assertFalse((self.config.home / "temporary-plans").exists())
+        with mock.patch.dict(os.environ, {"DSSA_WEBUI_HOME": str(self.config.home)}), \
+             mock.patch("sys.stdout", io.StringIO()):
+            main(["plan-owners"])
+        self.assertEqual(len(list((self.config.home / "temporary-plans").iterdir())), 6)
+
+    def test_a_stored_plan_without_any_audit_evidence(self):
+        self.config.audit.write_text("")
+        app = App(self.config)
+        self.assertIsNone(app.plan_owners.get(self.IDS["saved"]), "a saved server's plan stays shared")
+        self.assertEqual(app.plan_owners[self.IDS["owned"]]["source"], "ambiguous",
+                         "tmp1 is not saved: restricted, not guessed")
 
 
 if __name__ == "__main__":

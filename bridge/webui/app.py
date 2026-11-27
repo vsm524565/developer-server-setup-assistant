@@ -82,7 +82,7 @@ class Config:
 
 
 class App:
-    def __init__(self, config, jobs=None, clock=time.monotonic):
+    def __init__(self, config, jobs=None, clock=time.monotonic, upgrade=True):
         self.config = config
         self.users = Users(config.users)
         self.sessions = Sessions(self.users, clock)
@@ -94,9 +94,11 @@ class App:
         # plan ID -> {"owner", "connection", "target"} for plans made on a
         # temporary server, kept on disk so a reused name never inherits them.
         self.plan_owners = {}
+        self.lock = threading.Lock()
         self.load_temporary()
         self.load_plan_owners()
-        self.lock = threading.Lock()
+        if upgrade:  # plan-owners --dry-run looks without writing
+            self.upgrade_legacy_plans()
 
     # --- helpers --------------------------------------------------------------
 
@@ -155,6 +157,7 @@ class App:
         with self.lock:
             self.temporary[name] = meta
         self.audit(user, "temp_access_created", target=name, host=meta["host"], fingerprint=fingerprint,
+                   connection=meta["tag"],
                    expires=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(meta["expires"])))
         return meta
 
@@ -181,18 +184,121 @@ class App:
             if PLAN_ID_RE.fullmatch(path.stem) and isinstance(owner, dict):
                 self.plan_owners[path.stem] = owner
 
-    def bind_plan(self, user, plan_id, target):
+    def write_plan_owner(self, plan_id, owner):
+        """Persist one ownership record (exclusive create, 0600) and keep it
+        in memory. An existing record is never overwritten."""
+
+        root = self.plans_dir()
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path = root / f"{plan_id}.json"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(fd, "w") as handle:
+                json.dump(owner, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        self.plan_owners[plan_id] = owner
+
+    def bind_plan(self, user, plan_id, target, connection=None):
         """Bind a plan made on a temporary server to its owner and to that
         connection's unique tag (Codex review, 2026-11-26)."""
 
-        owner = {"owner": user, "connection": self.temporary[target]["tag"], "target": target}
-        root = self.plans_dir()
-        root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(root / f"{plan_id}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "w") as handle:
-            json.dump(owner, handle)
-        with self.lock:
-            self.plan_owners[plan_id] = owner
+        self.write_plan_owner(plan_id, {"owner": user, "connection": connection or self.temporary[target]["tag"],
+                                        "target": target, "source": "bound"})
+
+    def unbind_plan(self, plan_id):
+        self.plan_owners.pop(plan_id, None)
+        (self.plans_dir() / f"{plan_id}.json").unlink(missing_ok=True)
+
+    # --- plans made before ownership records (Codex follow-up, 2026-11-26) -------
+
+    def legacy_plan_owners(self):
+        """{plan_id: record} for stored plans that have no ownership record,
+        decided from this web UI's audit log. Nothing is written here.
+
+        - Inside exactly one temporary-access interval of its server name, and
+          planned in this web UI by that interval's owner: that owner, with
+          no connection (the old connection has ended; no action is allowed).
+        - Inside an interval otherwise (no web plan line, another user, or
+          overlapping intervals): ambiguous, nobody sees it or acts on it.
+        - Outside every interval, for a server not saved now: ambiguous.
+        - Outside every interval, for a saved server: no record (shared, as
+          before)."""
+
+        events = []
+        try:
+            with open(self.config.audit) as handle:
+                for line in handle:
+                    try:
+                        events.append(json.loads(line))
+                    except ValueError:
+                        continue
+        except FileNotFoundError:
+            pass
+        intervals, open_ = [], {}
+        planned = {}
+        for event in events:
+            action, target = event.get("action"), event.get("target")
+            if action == "temp_access_created" and target:
+                if target in open_:  # never closed: assume it ran to its expiry
+                    intervals.append(open_.pop(target))
+                open_[target] = {"target": target, "owner": event.get("user"), "start": event.get("time", ""),
+                                 "end": event.get("expires", ""), "connection": event.get("connection")}
+            elif action == "temp_access_removed" and target in open_:
+                interval = open_.pop(target)
+                interval["end"] = min(interval["end"] or event.get("time", ""), event.get("time", ""))
+                intervals.append(interval)
+            elif action == "plan" and event.get("plan_id"):
+                planned[event["plan_id"]] = event
+        intervals += open_.values()
+        saved = {entry["target_id"] for entry in self.targets()}
+        out = {}
+        directory = run.plans_dir()
+        paths = sorted(directory.glob("*.json")) if directory.is_dir() else []
+        for path in paths:
+            plan_id = path.stem
+            if not PLAN_ID_RE.fullmatch(plan_id) or plan_id in self.plan_owners:
+                continue
+            try:
+                document = json.loads(path.read_text())
+                target = document["target"]["target_id"]
+                created = document.get("created_at", "")
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            line = planned.get(plan_id)
+            when = (line or {}).get("time") or created
+            if line and line.get("target") != target:
+                inside = None
+            else:
+                inside = [i for i in intervals if i["target"] == target and i["start"] <= when <= (i["end"] or "~")]
+            record = {"owner": None, "connection": None, "target": target, "source": "ambiguous"}
+            if inside is not None and len(inside) == 1 and line and line.get("user") == inside[0]["owner"]:
+                record = {"owner": inside[0]["owner"], "connection": None, "target": target,
+                          "source": "legacy-audit"}
+            elif inside == [] and target in saved:
+                continue
+            out[plan_id] = record
+        return out
+
+    def upgrade_legacy_plans(self):
+        """Record ownership for plans made before records existed. Repeatable:
+        existing records are never changed, and each run writes only what is
+        missing. Returns the records written."""
+
+        found = self.legacy_plan_owners()
+        written = {}
+        for plan_id, record in found.items():
+            try:
+                self.write_plan_owner(plan_id, record)
+            except FileExistsError:
+                continue
+            written[plan_id] = record
+            self.audit(None, "plan_owner_upgraded", plan_id=plan_id, target=record["target"],
+                       owner=record["owner"], source=record["source"])
+        return written
 
     def require_plan_owner(self, user, plan_id, target):
         """Approval, apply, report and resume: a plan made on a temporary
@@ -202,8 +308,14 @@ class App:
         owner = self.plan_owners.get(plan_id)
         meta = self.temporary.get(target)
         if owner is not None:
+            if owner["owner"] is None:
+                raise ApprovalError("Nobody can use this plan: who made it on which connection is not known. "
+                                    "Make a new plan.")
             if owner["owner"] != user:
                 raise ApprovalError("This plan was made on another user's temporary server.")
+            if owner["connection"] is None:
+                raise ApprovalError(f"This plan was made on an earlier temporary connection to {target}, "
+                                    "before ownership was recorded. Make a new plan.")
             if meta is None or meta.get("tag") != owner["connection"]:
                 raise ApprovalError(f"This plan was made for an earlier connection to {target}, "
                                     "which has ended. Connect again and make a new plan.")
@@ -220,13 +332,17 @@ class App:
 
         owner = self.plan_owners.get(plan_id)
         if owner is not None:
-            return owner["owner"] == user
+            return owner["owner"] is not None and owner["owner"] == user
+        saved = any(entry["target_id"] == target for entry in self.targets())
+        if plan_id is not None:
+            # Every plan made on a temporary server has a record (bound before
+            # it is stored, or upgraded at start), so a plan without one is a
+            # saved server's: shared, never its name's current temporary owner's.
+            return saved
         meta = self.temporary.get(target)
         if meta is not None:
             return meta["owner"] == user
-        if any(entry["target_id"] == target for entry in self.targets()):
-            return True
-        return user is not None and run_by == user
+        return saved or (user is not None and run_by == user)
 
     def running_on(self, target):
         return any(j.target == target and j.finished is None for j in self.jobs.recent(1000))
@@ -243,7 +359,7 @@ class App:
             return False
         # Audit first, then forget it: whoever sees it gone also finds the audit line.
         if enrolment.end_temporary_access(self.temp_dir(target)):
-            self.audit(user, "temp_access_removed", target=target, reason=reason)
+            self.audit(user, "temp_access_removed", target=target, reason=reason, connection=meta.get("tag"))
             with self.lock:
                 self.temporary.pop(target, None)
                 self.records.pop(target, None)
@@ -359,16 +475,38 @@ class App:
             self.require_owner(user, target)
         plan_ids = []
         for target in targets:
+            # Codex follow-up (2026-11-26): a temporary server's identity is
+            # captured before planning and must be unchanged afterwards; the
+            # ownership record is written before the plan is stored.
+            with self.lock:
+                meta = self.temporary.get(target)
+                connection = meta["tag"] if meta else None
+                if meta is not None and meta["owner"] != user:
+                    raise ApprovalError(f"{target} is another user's temporary server.")
+                inventory, access = self.inventory(target), self.access(target)
             # Drafts: lab servers only; dssa-run.sh refuses them elsewhere.
             plan_bytes, plan = run.make_plan(target, components, allow_draft and operation == "install",
-                                             self.inventory(target), operation, all_or_nothing,
-                                             **self.access(target))
-            run.save_plan(plan_bytes)
-            plan_ids.append(plan["plan_id"])
-            if target in self.temporary:
-                self.bind_plan(user, plan["plan_id"], target)
-            self.audit(user, "plan", target=target, plan_id=plan["plan_id"], operation=operation,
-                       components=components)
+                                             inventory, operation, all_or_nothing, **access)
+            plan_id = plan["plan_id"]
+            with self.lock:
+                now = self.temporary.get(target)
+                if connection is not None and (now is None or now["tag"] != connection or now["owner"] != user):
+                    raise ApprovalError(f"Access to {target} ended or changed while planning, so the plan was "
+                                        "discarded. Connect again and plan again.")
+                if connection is None and now is not None:
+                    raise ApprovalError(f"{target} became a temporary server while planning, so the plan was "
+                                        "discarded. Plan again.")
+                if connection is not None:
+                    self.bind_plan(user, plan_id, target, connection)
+                try:
+                    run.save_plan(plan_bytes)
+                except BaseException:
+                    if connection is not None:
+                        self.unbind_plan(plan_id)
+                    raise
+            plan_ids.append(plan_id)
+            self.audit(user, "plan", target=target, plan_id=plan_id, operation=operation,
+                       components=components, **({"connection": connection} if connection else {}))
         return plan_ids
 
     def make_single_plan(self, user, target, component, operation, allow_draft=False):

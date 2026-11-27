@@ -185,3 +185,129 @@ Result: Ran 96 tests, OK.
 
 Not run by Claude this round: the full suite and the lab guides. The owner
 has moved that testing to Codex/ChatGPT (2026-11-26).
+
+## Review round 2 (`docs/webui/claude-authorization-follow-up.md`)
+
+### 1. Temporary plans made before ownership records
+
+`App.legacy_plan_owners()` decides from this web UI's audit log. It writes
+nothing. Every stored plan that has no record is classified:
+
+| Evidence | Record | Who sees it | Actions |
+|---|---|---|---|
+| Inside exactly one `temp_access_created`→`removed` interval of its name (or up to `expires` if never closed), and the audit `plan` line is by that interval's owner | `{owner, connection: null, source: "legacy-audit"}` | the owner only | none: "made on an earlier temporary connection … before ownership was recorded. Make a new plan." |
+| Inside an interval otherwise: no web `plan` line (e.g. a CLI plan), a different user, overlapping intervals, or a target that differs from the plan line | `{owner: null, source: "ambiguous"}` | nobody | none |
+| Outside every interval, for a server that isn't saved now (including no audit at all) | `ambiguous` | nobody | none |
+| Outside every interval, for a saved server | no record | everyone signed in, as before | as before |
+
+How the upgrade runs:
+- `App.upgrade_legacy_plans()` runs when the web UI starts, and on demand:
+
+  ```bash
+  python -m bridge.webui plan-owners [--dry-run]
+  ```
+
+- Each record is written with an exclusive create, 0600, and fsync'd. An
+  existing record is never changed. Each one is audited
+  (`plan_owner_upgraded`). A second run writes nothing.
+
+How the rules use the records:
+- `may_see` checks the record first. A plan without a record is a saved
+  server's plan and is shared. It is never visible to its name's current
+  temporary owner.
+- `require_plan_owner` refuses `owner: null` and `connection: null`.
+
+**Fixture run on a copy of the lab state.** The copy held the audit log,
+the inventory and the 102 stored plans, and no keys. The lab itself was not
+touched.
+
+```bash
+env -u DSSA_SSH_KEY DSSA_WEBUI_HOME=<copy>/home XDG_STATE_HOME=<copy>/state .venv/bin/python -m bridge.webui plan-owners --dry-run
+```
+
+The dry run found the four legacy plans and wrote nothing:
+
+```
+071b4eba-cc84-4023-828e-7429a9f84985  u26temp  legacy-audit  owner=tester
+87296627-2816-444a-bc01-40cc06124f01  u26temp  legacy-audit  owner=tester
+9acf2d7a-7e6e-4039-ab6c-467f61c78e7f  u26temp  legacy-audit  owner=tester
+fff357fb-adaf-496c-8ca8-b568dc77b500  u26temp  legacy-audit  owner=tester
+4 plan(s) would be recorded; 0 already had a record.
+```
+
+Then a real run on the copy wrote 4 records, and a second run reported
+"0 plan(s) were recorded; 4 already had a record."
+
+### 2. Ownership is bound before the plan is stored
+
+In `make_plans`:
+1. **Before planning,** under the lock, capture the temporary server's owner
+   and connection tag, its inventory and its known_hosts.
+2. **Plan** with exactly those.
+3. **After planning,** under the lock again:
+   - If the connection ended, was replaced (a different tag) or changed
+     owner, the plan is discarded and nothing is written.
+   - If the name became temporary meanwhile, the plan is discarded too.
+   - Otherwise the binding is written (exclusive create, fsync), then
+     `run.save_plan`. If saving the plan fails, the binding is removed.
+
+Failure cases:
+- If writing the binding fails, the plan isn't stored, and a partly written
+  binding file is removed.
+- A restart between the two writes leaves at most an orphan binding, never
+  a stored, unbound temporary plan.
+
+The consumer's `expected_operator` check and the single-use marker are
+unchanged.
+
+New audit fields: `connection` on `temp_access_created`,
+`temp_access_removed` and on `plan` lines for temporary servers. They give
+future evidence that the round-1 lines lacked.
+
+### Changed paths (round 2)
+
+- `bridge/webui/app.py`:
+  - `write_plan_owner`, `bind_plan`, `unbind_plan`;
+  - `legacy_plan_owners`, `upgrade_legacy_plans`;
+  - `may_see`, `require_plan_owner`, `make_plans`;
+  - `App(upgrade=)`, and the audit fields.
+- `bridge/webui/__main__.py`: `plan-owners [--dry-run]`.
+- `tests/backend/test_webui.py`:
+  - `HttpBase` now uses a private `XDG_STATE_HOME`. Before, it read the
+    real state folder.
+  - 7 binding tests in `TemporaryServerTests`.
+  - The new class `LegacyPlanTests`, with 5 tests.
+- `docs/webui/claude-integration-handback.md`: this section.
+
+### Tests (round 2)
+
+```bash
+.venv/bin/python -m unittest tests.backend.test_webui tests.backend.test_unified_apply.WebFlowTests tests.backend.test_approval_records < /dev/null
+```
+
+Result: Ran 108 tests, OK.
+
+```bash
+.venv/bin/python -m unittest discover -s tests/backend -p 'test_*.py' < /dev/null
+```
+
+Result: Ran 933 tests in 468.1s, OK (skipped=6). That is Codex's 921 plus the 12 new tests.
+
+### Remaining checks for Codex
+
+1. **Upgrade the real lab state.**
+   - Run `plan-owners --dry-run` against `~/dssa-lab-4.47`; expect the
+     four plans above.
+   - Then start the web UI, which upgrades at start-up.
+   - Check that tester sees those four plan pages and gets "before
+     ownership was recorded" on Report.
+2. **Name reuse live.**
+   - Connect an unsaved `u26temp` as another user (for example
+     `tester2`).
+   - Confirm that user can't open the four plans or their runs.
+3. **Planning interrupted live.**
+   - Sign out (ending access) while a plan on a temporary server is
+     running, and expect "ended or changed while planning".
+   - Hard to time by hand; the unit tests cover it.
+4. **Still open from round 1:** the password-required sudo prompt in the
+   web UI needs a dedicated lab account.

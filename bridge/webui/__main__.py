@@ -6,6 +6,10 @@
   adduser   add a web UI user (password asked twice on this terminal)
   serve     --host 0.0.0.0 --port 8443 --cert FULLCHAIN.pem --key KEY.pem
             (plain HTTP only with --host 127.0.0.1, behind a reverse proxy)
+  plan-owners [--dry-run]
+            record who owns plans made on temporary servers before ownership
+            records existed (serve also does this when it starts); --dry-run
+            only prints what would be recorded
 
 State folder: $DSSA_WEBUI_HOME, else ~/.config/dssa-webui (mode 0700).
 """
@@ -41,6 +45,8 @@ def main(argv=None):
     srv.add_argument("--cert")
     srv.add_argument("--key")
     srv.add_argument("--master-key")
+    owners = sub.add_parser("plan-owners")
+    owners.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     cfg = config(args)
 
@@ -75,6 +81,14 @@ def main(argv=None):
     except AuthError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
+    if args.command == "plan-owners":
+        app = App(cfg, upgrade=False)
+        found = app.legacy_plan_owners() if args.dry_run else app.upgrade_legacy_plans()
+        for plan_id, record in sorted(found.items()):
+            print(f"{plan_id}  {record['target']:<16} {record['source']:<13} owner={record['owner'] or '-'}")
+        print(f"{len(found)} plan(s) {'would be' if args.dry_run else 'were'} recorded; "
+              f"{len(app.plan_owners) - (0 if args.dry_run else len(found))} already had a record.")
+        return 0
     if args.command == "serve":
         if not users.names():
             print("ERROR: Add a user first: python -m bridge.webui adduser NAME", file=sys.stderr)
